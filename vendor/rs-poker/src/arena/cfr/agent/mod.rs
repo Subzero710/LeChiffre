@@ -1556,6 +1556,14 @@ mod tests {
         events: std::sync::Arc<std::sync::Mutex<Vec<CapturedEvent>>>,
     }
 
+    // These tests install thread-local tracing subscribers, but tracing's
+    // callsite interest cache is process-global and is rebuilt when defaults
+    // change. Cargo runs unit tests in parallel, so concurrent cfr_diag tests
+    // can race those rebuilds and spuriously observe diagnostics as disabled.
+    // Serialize only the tracing-capture tests; the rest of the suite remains
+    // fully parallel.
+    static CFR_DIAG_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     impl CapturingDiagLayer {
         fn new() -> Self {
             Self::default()
@@ -1615,6 +1623,8 @@ mod tests {
     /// `Stop` — so the wave loop runs exactly 5 times and stops.
     #[tokio::test(flavor = "current_thread")]
     async fn diag_event_records_iteration_bound_stop() {
+        let _diag_test_guard = CFR_DIAG_TEST_LOCK.lock().await;
+
         use tracing_subscriber::layer::SubscriberExt;
 
         let layer = CapturingDiagLayer::new();
@@ -1672,6 +1682,8 @@ mod tests {
     /// stop flag, the engine breaks with `StopCause::Deadline`.
     #[tokio::test(flavor = "current_thread")]
     async fn diag_event_records_deadline_stop() {
+        let _diag_test_guard = CFR_DIAG_TEST_LOCK.lock().await;
+
         use crate::arena::cfr::{Deadline, MostRestrictive};
         use tracing_subscriber::layer::SubscriberExt;
 
@@ -1726,6 +1738,8 @@ mod tests {
     /// so sub-agents actually run; PerDepth caps iterations per depth.
     #[tokio::test(flavor = "current_thread")]
     async fn diag_event_emitted_at_every_depth() {
+        let _diag_test_guard = CFR_DIAG_TEST_LOCK.lock().await;
+
         use tracing_subscriber::layer::SubscriberExt;
 
         let layer = CapturingDiagLayer::new();
@@ -1774,6 +1788,8 @@ mod tests {
     /// serialization round-trips.
     #[tokio::test(flavor = "current_thread")]
     async fn diag_event_records_stable_strategy_stop() {
+        let _diag_test_guard = CFR_DIAG_TEST_LOCK.lock().await;
+
         use tracing_subscriber::layer::SubscriberExt;
 
         let layer = CapturingDiagLayer::new();
