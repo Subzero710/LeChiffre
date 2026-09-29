@@ -1,0 +1,978 @@
+use async_trait::async_trait;
+use tracing::{debug, instrument, trace};
+
+use crate::arena::{action::AgentAction, game_state::GameState};
+
+use super::Agent;
+
+/// A replay agent that will replay a sequence of actions
+/// from a vector. It consumes the vector making it fast but
+/// hard to reuse or introspect what actions were taken.
+#[derive(Debug, Clone)]
+pub struct VecReplayAgent {
+    name: String,
+    actions: Vec<AgentAction>,
+    idx: usize,
+    default: AgentAction,
+}
+
+impl VecReplayAgent {
+    pub fn new(name: impl Into<String>, actions: Vec<AgentAction>) -> Self {
+        Self::new_with_default(name, actions, AgentAction::Fold)
+    }
+
+    pub fn new_with_default(
+        name: impl Into<String>,
+        actions: Vec<AgentAction>,
+        default: AgentAction,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            actions,
+            idx: 0,
+            default,
+        }
+    }
+}
+
+/// A replay agent that will replay a sequence of actions from a slice.
+#[derive(Debug, Clone)]
+pub struct SliceReplayAgent<'a> {
+    name: String,
+    actions: &'a [AgentAction],
+    idx: usize,
+    default: AgentAction,
+}
+
+impl<'a> SliceReplayAgent<'a> {
+    pub fn new(name: impl Into<String>, actions: &'a [AgentAction]) -> Self {
+        Self::new_with_default(name, actions, AgentAction::Fold)
+    }
+
+    pub fn new_with_default(
+        name: impl Into<String>,
+        actions: &'a [AgentAction],
+        default: AgentAction,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            actions,
+            idx: 0,
+            default,
+        }
+    }
+}
+
+#[async_trait]
+impl Agent for VecReplayAgent {
+    #[instrument(level = "trace", skip(self, _game_state), fields(agent_name = %self.name))]
+    async fn act(self: &mut VecReplayAgent, _id: u128, _game_state: &GameState) -> AgentAction {
+        let idx = self.idx;
+        self.idx += 1;
+        self.actions.get(idx).map_or_else(
+            || {
+                debug!(
+                    idx,
+                    actions_len = self.actions.len(),
+                    ?self.default,
+                    "VecReplayAgent exhausted actions, using default"
+                );
+                self.default.clone()
+            },
+            |a| {
+                trace!(idx, ?a, "VecReplayAgent replaying action");
+                a.clone()
+            },
+        )
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+#[async_trait]
+impl<'a> Agent for SliceReplayAgent<'a> {
+    #[instrument(level = "trace", skip(self, _game_state), fields(agent_name = %self.name))]
+    async fn act(
+        self: &mut SliceReplayAgent<'a>,
+        _id: u128,
+        _game_state: &GameState,
+    ) -> AgentAction {
+        let idx = self.idx;
+        self.idx += 1;
+        self.actions.get(idx).map_or_else(
+            || {
+                debug!(
+                    idx,
+                    actions_len = self.actions.len(),
+                    ?self.default,
+                    "SliceReplayAgent exhausted actions, using default"
+                );
+                self.default.clone()
+            },
+            |a| {
+                trace!(idx, ?a, "SliceReplayAgent replaying action");
+                a.clone()
+            },
+        )
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use rand::{SeedableRng, rngs::StdRng};
+
+    use crate::arena::{
+        Agent, GameStateBuilder, HoldemSimulation, HoldemSimulationBuilder,
+        action::AgentAction,
+        agent::VecReplayAgent,
+        test_util::{assert_valid_game_state, assert_valid_round_data},
+    };
+
+    fn boxed_vec_agent(actions: Vec<AgentAction>) -> Box<VecReplayAgent> {
+        boxed_vec_agent_with_default(actions, AgentAction::Fold)
+    }
+
+    fn boxed_vec_agent_with_default(
+        actions: Vec<AgentAction>,
+        default: AgentAction,
+    ) -> Box<VecReplayAgent> {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let name = format!(
+            "vec-replay-agent-{}",
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        Box::new(VecReplayAgent::new_with_default(name, actions, default))
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_all_in_for_less() {
+        let agent_one = boxed_vec_agent(vec![
+            AgentAction::Bet(10.0),
+            AgentAction::Bet(0.0),
+            AgentAction::Bet(0.0),
+            AgentAction::Bet(690.0),
+        ]);
+        let agent_two = boxed_vec_agent(vec![
+            AgentAction::Bet(10.0),
+            AgentAction::Bet(0.0),
+            AgentAction::Bet(0.0),
+            AgentAction::Bet(690.0),
+        ]);
+        let agent_three = boxed_vec_agent(vec![
+            AgentAction::Bet(10.0),
+            AgentAction::Bet(0.0),
+            AgentAction::Bet(0.0),
+            AgentAction::Bet(90.0),
+        ]);
+        let agent_four = boxed_vec_agent(vec![AgentAction::Bet(10.0), AgentAction::Fold]);
+
+        let stacks = vec![700.0, 900.0, 100.0, 800.0];
+        let game_state = GameStateBuilder::new()
+            .stacks(stacks)
+            .blinds(10.0, 5.0)
+            .build()
+            .unwrap();
+        let agents: Vec<Box<dyn Agent>> = vec![agent_one, agent_two, agent_three, agent_four];
+
+        let mut sim: HoldemSimulation = HoldemSimulationBuilder::default()
+            .game_state(game_state)
+            .agents(agents)
+            .build_with_rng(StdRng::seed_from_u64(421))
+            .unwrap();
+        sim.run().await;
+
+        assert_valid_game_state(&sim.game_state);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_cant_bet_after_folds() {
+        let agent_one = boxed_vec_agent(vec![]);
+        let agent_two = boxed_vec_agent(vec![]);
+        let agent_three = boxed_vec_agent(vec![AgentAction::Bet(100.0)]);
+
+        let stacks = vec![100.0, 100.0, 100.0];
+        let game_state = GameStateBuilder::new()
+            .stacks(stacks)
+            .blinds(10.0, 5.0)
+            .build()
+            .unwrap();
+        let agents: Vec<Box<dyn Agent>> = vec![agent_one, agent_two, agent_three];
+
+        let mut sim: HoldemSimulation = HoldemSimulationBuilder::default()
+            .game_state(game_state)
+            .agents(agents)
+            .build_with_rng(StdRng::seed_from_u64(421))
+            .unwrap();
+
+        sim.run().await;
+
+        assert_valid_round_data(&sim.game_state.round_data);
+        assert_valid_game_state(&sim.game_state);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_another_three_player() {
+        let sb = 3.0;
+        let bb = 3.0;
+
+        let agent_one = boxed_vec_agent(vec![AgentAction::Bet(bb), AgentAction::Bet(bb)]);
+        let agent_two = boxed_vec_agent(vec![AgentAction::Bet(bb), AgentAction::Bet(bb)]);
+        let agent_three = boxed_vec_agent(vec![AgentAction::Fold]);
+
+        let stacks = vec![bb + 5.906776e-3, bb + 5.906776e-39, bb];
+        let game_state = GameStateBuilder::new()
+            .stacks(stacks)
+            .blinds(bb, sb)
+            .build()
+            .unwrap();
+        let agents: Vec<Box<dyn Agent>> = vec![agent_one, agent_two, agent_three];
+
+        let mut sim: HoldemSimulation = HoldemSimulationBuilder::default()
+            .game_state(game_state)
+            .agents(agents)
+            .build_with_rng(StdRng::seed_from_u64(421))
+            .unwrap();
+        sim.run().await;
+
+        assert_valid_round_data(&sim.game_state.round_data);
+        assert_valid_game_state(&sim.game_state);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_from_fuzz_early_all_in() {
+        // This test was discoverd by fuzzing.
+        let agent_zero = boxed_vec_agent(vec![AgentAction::Fold]);
+        let agent_one = boxed_vec_agent(vec![AgentAction::Fold]);
+        let agent_two = boxed_vec_agent(vec![AgentAction::Fold]);
+        let agent_three = boxed_vec_agent(vec![AgentAction::Bet(5.0)]);
+        let agent_four = boxed_vec_agent(vec![AgentAction::Bet(5.0)]);
+        let agent_five = boxed_vec_agent(vec![AgentAction::Bet(259.0), AgentAction::Fold]);
+
+        let stacks = vec![1000.0, 100.0, 1000.0, 5.0, 5.0, 1000.0];
+        let game_state = GameStateBuilder::new()
+            .stacks(stacks)
+            .blinds(114.0, 96.0)
+            .dealer_idx(210439175936 % 5)
+            .build()
+            .unwrap();
+        let agents: Vec<Box<dyn Agent>> = vec![
+            agent_zero,
+            agent_one,
+            agent_two,
+            agent_three,
+            agent_four,
+            agent_five,
+        ];
+
+        let mut sim: HoldemSimulation = HoldemSimulationBuilder::default()
+            .game_state(game_state)
+            .agents(agents)
+            .build_with_rng(StdRng::seed_from_u64(0))
+            .unwrap();
+
+        sim.run().await;
+
+        assert_valid_game_state(&sim.game_state);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_from_fuzz() {
+        // This test was discoverd by fuzzing.
+        //
+        // Previously it would fail as the last two agents in
+        // a round both fold leaving orphaned money in the pot.
+        let agent_one = boxed_vec_agent(vec![]);
+        let agent_two =
+            boxed_vec_agent(vec![AgentAction::Bet(259.0), AgentAction::Bet(16711936.0)]);
+        let agent_three = boxed_vec_agent(vec![
+            AgentAction::Bet(259.0),
+            AgentAction::Bet(259.0),
+            AgentAction::Bet(259.0),
+            AgentAction::Fold,
+        ]);
+        let agent_four = boxed_vec_agent(vec![AgentAction::Bet(57828.0)]);
+        let agent_five = boxed_vec_agent(vec![
+            AgentAction::Bet(259.0),
+            AgentAction::Bet(259.0),
+            AgentAction::Bet(259.0),
+            AgentAction::Fold,
+        ]);
+
+        let stacks = vec![22784.0, 260.0, 65471.0, 255.0, 65471.0];
+        let game_state = GameStateBuilder::new()
+            .stacks(stacks)
+            .blinds(114.0, 96.0)
+            .dealer_idx(210439175936 % 5)
+            .build()
+            .unwrap();
+        let agents: Vec<Box<dyn Agent>> =
+            vec![agent_one, agent_two, agent_three, agent_four, agent_five];
+
+        let mut sim: HoldemSimulation = HoldemSimulationBuilder::default()
+            .game_state(game_state)
+            .agents(agents)
+            .build_with_rng(StdRng::seed_from_u64(0))
+            .unwrap();
+        sim.run().await;
+
+        assert_valid_game_state(&sim.game_state);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_another_from_fuzz() {
+        let agent_zero = boxed_vec_agent(vec![
+            AgentAction::Fold,
+            AgentAction::Fold,
+            AgentAction::Fold,
+            AgentAction::Fold,
+            AgentAction::Fold,
+            AgentAction::Fold,
+            AgentAction::Fold,
+        ]);
+        let agent_one = boxed_vec_agent(vec![]);
+        let stacks = vec![2.8460483e26, 53477376.0];
+        let game_state = GameStateBuilder::new()
+            .stacks(stacks)
+            .big_blind(8365616.5)
+            .small_blind(0.0)
+            .dealer_idx(1)
+            .build()
+            .unwrap();
+        let agents: Vec<Box<dyn Agent>> = vec![agent_zero, agent_one];
+
+        let mut sim: HoldemSimulation = HoldemSimulationBuilder::default()
+            .game_state(game_state)
+            .agents(agents)
+            .build_with_rng(StdRng::seed_from_u64(0))
+            .unwrap();
+
+        sim.run().await;
+
+        assert_valid_game_state(&sim.game_state);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_call_with_fold() {
+        let agent_zero = boxed_vec_agent(vec![AgentAction::Call]);
+        let agent_one = boxed_vec_agent(vec![
+            AgentAction::Call,
+            AgentAction::Fold,
+            AgentAction::Fold,
+        ]);
+        let agent_two = boxed_vec_agent(vec![AgentAction::Call]);
+        let agent_three = boxed_vec_agent(vec![AgentAction::Call, AgentAction::Call]);
+
+        let stacks = vec![50000.0, 50000.0, 50000.0, 50000.0];
+        let game_state = GameStateBuilder::new()
+            .stacks(stacks)
+            .big_blind(50.0)
+            .small_blind(3.59e-43)
+            .dealer_idx(1)
+            .build()
+            .unwrap();
+        let agents: Vec<Box<dyn Agent>> = vec![agent_zero, agent_one, agent_two, agent_three];
+
+        let mut sim: HoldemSimulation = HoldemSimulationBuilder::default()
+            .game_state(game_state)
+            .agents(agents)
+            .build_with_rng(StdRng::seed_from_u64(0))
+            .unwrap();
+
+        sim.run().await;
+
+        assert_valid_game_state(&sim.game_state);
+    }
+
+    /// Verifies that VecReplayAgent::name() returns the name provided at construction.
+    #[test]
+    fn test_vec_replay_agent_name() {
+        let agent = VecReplayAgent::new("TestAgentName", vec![AgentAction::Fold]);
+        assert_eq!(agent.name(), "TestAgentName");
+        assert!(!agent.name().is_empty());
+        assert_ne!(agent.name(), "xyzzy");
+    }
+
+    /// Verifies that SliceReplayAgent::name() returns the name provided at construction.
+    #[test]
+    fn test_slice_replay_agent_name() {
+        use super::SliceReplayAgent;
+        let actions = vec![AgentAction::Fold, AgentAction::Bet(10.0)];
+        let agent = SliceReplayAgent::new("SliceAgentName", &actions);
+        assert_eq!(agent.name(), "SliceAgentName");
+        assert!(!agent.name().is_empty());
+        assert_ne!(agent.name(), "xyzzy");
+    }
+
+    /// Verifies that SliceReplayAgent::act() returns actions in sequence.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_slice_replay_agent_index_increment() {
+        use super::SliceReplayAgent;
+        let actions = vec![
+            AgentAction::Bet(10.0),
+            AgentAction::Bet(20.0),
+            AgentAction::Bet(30.0),
+        ];
+        let game_state = GameStateBuilder::new()
+            .num_players_with_stack(2, 100.0)
+            .blinds(10.0, 5.0)
+            .build()
+            .unwrap();
+        let mut agent = SliceReplayAgent::new("TestAgent", &actions);
+
+        // First call should return first action
+        let action1 = agent.act(0, &game_state).await;
+        assert_eq!(action1, AgentAction::Bet(10.0));
+
+        // Second call should return second action (idx incremented by 1, not multiplied/subtracted)
+        let action2 = agent.act(0, &game_state).await;
+        assert_eq!(action2, AgentAction::Bet(20.0));
+
+        // Third call should return third action
+        let action3 = agent.act(0, &game_state).await;
+        assert_eq!(action3, AgentAction::Bet(30.0));
+
+        // Fourth call should return default (exhausted)
+        let action4 = agent.act(0, &game_state).await;
+        assert_eq!(action4, AgentAction::Fold);
+    }
+
+    /// Test that when one player is all-in and the other calls, no betting
+    /// rounds happen on subsequent streets. The remaining player should NOT
+    /// be asked to act on turn or river.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_single_player_all_in_no_actions_on_later_streets() {
+        use crate::arena::action::Action;
+        use crate::arena::game_state::Round;
+        use crate::arena::historian::{self, VecHistorian};
+
+        // Player 0 (dealer/SB): stack=100, will go all-in on flop
+        // Player 1 (BB): stack=1000, will call the all-in
+        //
+        // After flop: Player 0 is all-in, Player 1 has chips.
+        // Turn and River should have NO player actions.
+
+        // Player 0 (dealer/SB in heads-up):
+        // - Posts SB (forced)
+        // - Preflop: Calls BB
+        // - Flop: Goes all-in
+        let agent_zero = boxed_vec_agent_with_default(
+            vec![AgentAction::Call, AgentAction::AllIn],
+            AgentAction::Fold,
+        );
+
+        // Player 1 (BB):
+        // - Posts BB (forced)
+        // - Preflop: Checks (calls matching bet)
+        // - Flop: Bets 20, then calls the all-in raise
+        let agent_one = boxed_vec_agent_with_default(
+            vec![AgentAction::Call, AgentAction::Bet(20.0), AgentAction::Call],
+            AgentAction::Fold,
+        );
+
+        let game_state = GameStateBuilder::new()
+            .stacks(vec![100.0, 1000.0])
+            .blinds(10.0, 5.0)
+            .build()
+            .unwrap();
+        let agents: Vec<Box<dyn Agent>> = vec![agent_zero, agent_one];
+
+        let vec_hist = Box::new(VecHistorian::new());
+        let vec_storage = vec_hist.get_storage();
+        let historians: Vec<Box<dyn historian::Historian>> = vec![vec_hist];
+
+        let mut sim: HoldemSimulation = HoldemSimulationBuilder::default()
+            .game_state(game_state)
+            .agents(agents)
+            .historians(historians)
+            .build_with_rng(StdRng::seed_from_u64(42))
+            .unwrap();
+
+        sim.run().await;
+
+        assert_valid_round_data(&sim.game_state.round_data);
+        assert_valid_game_state(&sim.game_state);
+
+        // Verify no player actions on Turn or River
+        let records = vec_storage.lock().unwrap();
+        for record in records.iter() {
+            if let Action::PlayedAction(action) = &record.action {
+                assert!(
+                    action.round != Round::Turn && action.round != Round::River,
+                    "Player {} should not act on {:?} when opponent is all-in. Action: {:?}",
+                    action.idx,
+                    action.round,
+                    action.action,
+                );
+            }
+            if let Action::FailedAction(failed) = &record.action {
+                assert!(
+                    failed.result.round != Round::Turn && failed.result.round != Round::River,
+                    "Player {} should not act on {:?} when opponent is all-in",
+                    failed.result.idx,
+                    failed.result.round,
+                );
+            }
+        }
+    }
+
+    /// Test that when a player is forced all-in by posting the big blind,
+    /// the other player still gets to act (call, fold, or raise).
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_forced_all_in_bb_sb_still_acts() {
+        use crate::arena::action::Action;
+        use crate::arena::game_state::Round;
+        use crate::arena::historian::{self, VecHistorian};
+
+        // Player 0 (dealer/SB): stack=1000
+        // Player 1 (BB): stack=8, BB=10 → forced all-in by BB posting
+        //
+        // After forced bets: Player 1 is all-in (stack=0), player_active has
+        // only Player 0. But Player 0 must still decide whether to call.
+        let agent_zero = boxed_vec_agent_with_default(vec![AgentAction::Call], AgentAction::Fold);
+
+        let agent_one = boxed_vec_agent_with_default(
+            vec![],
+            AgentAction::Fold, // Should never be called since forced all-in
+        );
+
+        let game_state = GameStateBuilder::new()
+            .stacks(vec![1000.0, 8.0])
+            .blinds(10.0, 5.0)
+            .build()
+            .unwrap();
+        let agents: Vec<Box<dyn Agent>> = vec![agent_zero, agent_one];
+
+        let vec_hist = Box::new(VecHistorian::new());
+        let vec_storage = vec_hist.get_storage();
+        let historians: Vec<Box<dyn historian::Historian>> = vec![vec_hist];
+
+        let mut sim: HoldemSimulation = HoldemSimulationBuilder::default()
+            .game_state(game_state)
+            .agents(agents)
+            .historians(historians)
+            .build_with_rng(StdRng::seed_from_u64(42))
+            .unwrap();
+
+        sim.run().await;
+
+        assert_valid_round_data(&sim.game_state.round_data);
+        assert_valid_game_state(&sim.game_state);
+
+        // Verify that Player 0 DID act on preflop (called the BB)
+        let records = vec_storage.lock().unwrap();
+        let preflop_actions: Vec<_> = records
+            .iter()
+            .filter(|r| matches!(&r.action, Action::PlayedAction(a) if a.round == Round::Preflop))
+            .collect();
+
+        assert!(
+            !preflop_actions.is_empty(),
+            "SB must still act on preflop when BB is forced all-in"
+        );
+    }
+
+    /// When the BB forces a player all-in (BB > their stack), the SB must
+    /// still get to fold or call, and the all-in BB must NOT get to act.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_forced_all_in_bb_sb_acts_bb_does_not() {
+        use crate::arena::action::Action;
+        use crate::arena::game_state::Round;
+        use crate::arena::historian::{self, VecHistorian};
+
+        // Player 0 (dealer/SB): stack=1000, will fold
+        // Player 1 (BB): stack=8, BB=10 → forced all-in posting BB
+        //
+        // BB posts 8 (all their chips). SB must still decide.
+        // BB should never get to act voluntarily.
+        let agent_zero = boxed_vec_agent_with_default(vec![AgentAction::Fold], AgentAction::Fold);
+
+        // If BB were ever asked to act, this would produce a Call.
+        // We'll assert it never happens.
+        let agent_one = boxed_vec_agent_with_default(vec![AgentAction::Call], AgentAction::Call);
+
+        let game_state = GameStateBuilder::new()
+            .stacks(vec![1000.0, 8.0])
+            .blinds(10.0, 5.0)
+            .build()
+            .unwrap();
+        let agents: Vec<Box<dyn Agent>> = vec![agent_zero, agent_one];
+
+        let vec_hist = Box::new(VecHistorian::new());
+        let vec_storage = vec_hist.get_storage();
+        let historians: Vec<Box<dyn historian::Historian>> = vec![vec_hist];
+
+        let mut sim: HoldemSimulation = HoldemSimulationBuilder::default()
+            .game_state(game_state)
+            .agents(agents)
+            .historians(historians)
+            .build_with_rng(StdRng::seed_from_u64(99))
+            .unwrap();
+
+        sim.run().await;
+
+        assert_valid_round_data(&sim.game_state.round_data);
+        assert_valid_game_state(&sim.game_state);
+
+        let records = vec_storage.lock().unwrap();
+        let preflop_played: Vec<_> = records
+            .iter()
+            .filter_map(|r| match &r.action {
+                Action::PlayedAction(a) if a.round == Round::Preflop => Some(a),
+                Action::FailedAction(f) if f.result.round == Round::Preflop => Some(&f.result),
+                _ => None,
+            })
+            .collect();
+
+        // SB (Player 0) should have exactly one preflop action: Fold
+        let sb_actions: Vec<_> = preflop_played.iter().filter(|a| a.idx == 0).collect();
+        assert_eq!(
+            sb_actions.len(),
+            1,
+            "SB should act exactly once on preflop, got {} actions: {:?}",
+            sb_actions.len(),
+            sb_actions
+                .iter()
+                .map(|a| format!("{:?}", a.action))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            matches!(sb_actions[0].action, AgentAction::Fold),
+            "SB should fold, got {:?}",
+            sb_actions[0].action
+        );
+
+        // BB (Player 1) should have ZERO voluntary preflop actions.
+        // They were forced all-in by the blind — no decision to make.
+        let bb_actions: Vec<_> = preflop_played.iter().filter(|a| a.idx == 1).collect();
+        assert_eq!(
+            bb_actions.len(),
+            0,
+            "BB (forced all-in by blind) should not act on preflop, \
+             but got {} actions: {:?}",
+            bb_actions.len(),
+            bb_actions
+                .iter()
+                .map(|a| format!("{:?}", a.action))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Test that all-in players should not have any actions on subsequent streets.
+    /// When both players go all-in preflop, the simulation should not ask them
+    /// to act on flop/turn/river, and no Check actions should be recorded.
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(feature = "open-hand-history-test-util")]
+    async fn test_all_in_players_no_actions_on_subsequent_streets() {
+        use crate::arena::historian::{self, OpenHandHistoryVecHistorian, VecHistorian};
+        use crate::open_hand_history::{
+            assert_open_hand_history_matches_game_state, assert_valid_open_hand_history,
+        };
+
+        // Reproduce the fuzzer crash scenario:
+        // - 2 players with 3.6171875 stack each
+        // - SB: 0.052481495, BB: 2.0042896
+        // - Preflop: SB calls, BB raises all-in, SB calls all-in
+        // - Both players are all-in after preflop, no actions should happen after
+
+        // Player 0 (SB/dealer in heads-up):
+        // - Posts SB (forced)
+        // - Calls to BB level (needs ~1.95 more)
+        // - Calls BB's all-in raise (needs ~1.61 more)
+        let agent_zero = boxed_vec_agent_with_default(
+            vec![AgentAction::Call, AgentAction::Call],
+            AgentAction::Fold, // Should never be used since player is all-in
+        );
+
+        // Player 1 (BB):
+        // - Posts BB (forced)
+        // - Raises all-in with remaining stack (~1.61)
+        let agent_one = boxed_vec_agent_with_default(
+            vec![AgentAction::AllIn],
+            AgentAction::Fold, // Should never be used since player is all-in
+        );
+
+        let stacks = vec![3.6171875, 3.6171875];
+        let sb = 0.052481495;
+        let bb = 2.0042896;
+        let game_state = GameStateBuilder::new()
+            .stacks(stacks)
+            .blinds(bb, sb)
+            .build()
+            .unwrap();
+        let agents: Vec<Box<dyn Agent>> = vec![agent_zero, agent_one];
+
+        // Add historian to capture hand history
+        let open_hand_hist = Box::new(OpenHandHistoryVecHistorian::new());
+        let hand_storage = open_hand_hist.get_storage();
+        let vec_hist = Box::new(VecHistorian::new());
+        let vec_storage = vec_hist.get_storage();
+        let historians: Vec<Box<dyn historian::Historian>> = vec![open_hand_hist, vec_hist];
+
+        let mut sim: HoldemSimulation = HoldemSimulationBuilder::default()
+            .game_state(game_state)
+            .agents(agents)
+            .historians(historians)
+            .build_with_rng(StdRng::seed_from_u64(42))
+            .unwrap();
+
+        sim.run().await;
+
+        assert_valid_round_data(&sim.game_state.round_data);
+        assert_valid_game_state(&sim.game_state);
+
+        // Print actions for debugging
+        for record in vec_storage.lock().unwrap().iter() {
+            eprintln!("{:?}", record.action);
+        }
+
+        // Check the hand history - there should be no Check actions for all-in players
+        // on post-flop streets
+        let hands = hand_storage.lock().unwrap();
+        assert!(!hands.is_empty());
+        for hand in hands.iter() {
+            assert_valid_open_hand_history(hand);
+            assert_open_hand_history_matches_game_state(hand, &sim.game_state);
+        }
+    }
+
+    /// When a player goes all-in on the river, the remaining active player
+    /// must still get to act (fold or call). This is a regression test for a
+    /// bug where `run_betting_round` skipped the round because only one
+    /// player was in `player_active`, even though the active player had an
+    /// unmatched bet to respond to.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_player_acts_after_opponent_river_all_in() {
+        use crate::arena::action::Action;
+        use crate::arena::game_state::Round;
+        use crate::arena::historian::{self, VecHistorian};
+
+        // Player 0 (dealer/SB): stack=100, goes all-in on river
+        // Player 1 (BB): stack=100, calls throughout, then folds to river all-in
+        //
+        // Preflop: both call (match blinds)
+        // Flop/Turn: both check
+        // River: Player 0 goes all-in, Player 1 must fold/call
+
+        // Player 0 (dealer/SB in heads-up):
+        // - Posts SB (forced)
+        // - Preflop: Calls BB
+        // - Flop: Checks (Bet(0) = check)
+        // - Turn: Checks
+        // - River: Goes all-in
+        let agent_zero = boxed_vec_agent_with_default(
+            vec![
+                AgentAction::Call,     // preflop: call BB
+                AgentAction::Bet(0.0), // flop: check
+                AgentAction::Bet(0.0), // turn: check
+                AgentAction::AllIn,    // river: all-in
+            ],
+            AgentAction::Fold,
+        );
+
+        // Player 1 (BB in heads-up):
+        // - Posts BB (forced)
+        // - Preflop: Checks
+        // - Flop: Checks
+        // - Turn: Checks
+        // - River: Folds to the all-in
+        let agent_one = boxed_vec_agent_with_default(
+            vec![
+                AgentAction::Call,     // preflop: check
+                AgentAction::Bet(0.0), // flop: check
+                AgentAction::Bet(0.0), // turn: check
+                AgentAction::Fold,     // river: fold to all-in
+            ],
+            AgentAction::Fold,
+        );
+
+        let game_state = GameStateBuilder::new()
+            .stacks(vec![100.0, 100.0])
+            .blinds(10.0, 5.0)
+            .build()
+            .unwrap();
+        let agents: Vec<Box<dyn Agent>> = vec![agent_zero, agent_one];
+
+        let vec_hist = Box::new(VecHistorian::new());
+        let vec_storage = vec_hist.get_storage();
+        let historians: Vec<Box<dyn historian::Historian>> = vec![vec_hist];
+
+        let mut sim: HoldemSimulation = HoldemSimulationBuilder::default()
+            .game_state(game_state)
+            .agents(agents)
+            .historians(historians)
+            .build_with_rng(StdRng::seed_from_u64(42))
+            .unwrap();
+
+        sim.run().await;
+
+        assert_valid_round_data(&sim.game_state.round_data);
+        assert_valid_game_state(&sim.game_state);
+
+        // Verify that Player 1 acted on the river (responded to the all-in).
+        let records = vec_storage.lock().unwrap();
+        let river_actions: Vec<_> = records
+            .iter()
+            .filter_map(|r| match &r.action {
+                Action::PlayedAction(a) if a.round == Round::River => Some(a),
+                _ => None,
+            })
+            .collect();
+
+        // There should be exactly 2 river actions: P0's all-in and P1's fold
+        assert_eq!(
+            river_actions.len(),
+            2,
+            "Expected 2 river actions (all-in + fold), got {}. \
+             Actions: {:?}",
+            river_actions.len(),
+            river_actions
+                .iter()
+                .map(|a| format!("P{}: {:?}", a.idx, a.action))
+                .collect::<Vec<_>>()
+        );
+
+        // First action should be P0's all-in
+        assert_eq!(river_actions[0].idx, 0);
+        assert!(
+            matches!(river_actions[0].action, AgentAction::AllIn),
+            "P0's river action should be AllIn, got {:?}",
+            river_actions[0].action
+        );
+
+        // Second action should be P1's fold
+        assert_eq!(river_actions[1].idx, 1);
+        assert!(
+            matches!(river_actions[1].action, AgentAction::Fold),
+            "P1's river action should be Fold, got {:?}",
+            river_actions[1].action
+        );
+
+        // P0 should win the pot (P1 folded)
+        assert!(
+            sim.game_state.player_reward(0) > 0.0,
+            "P0 should profit from P1's fold, got reward {}",
+            sim.game_state.player_reward(0)
+        );
+    }
+
+    /// Same scenario as above but with 3 players where one folded earlier.
+    /// This is the exact topology that triggered the original bug: after
+    /// one player folds and another goes all-in, `player_active` has only
+    /// the remaining player, but they still need to respond to the all-in.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_three_player_river_all_in_remaining_player_acts() {
+        use crate::arena::action::Action;
+        use crate::arena::game_state::Round;
+        use crate::arena::historian::{self, VecHistorian};
+
+        // 3-player game:
+        // Player 0 (dealer): folds preflop
+        // Player 1 (SB): calls throughout, goes all-in on river
+        // Player 2 (BB): calls throughout, must respond to river all-in
+
+        // Player 0: folds immediately
+        let agent_zero = boxed_vec_agent_with_default(vec![AgentAction::Fold], AgentAction::Fold);
+
+        // Player 1 (SB):
+        // - Posts SB (forced)
+        // - Preflop: Calls BB
+        // - Flop: Checks
+        // - Turn: Checks
+        // - River: Goes all-in
+        let agent_one = boxed_vec_agent_with_default(
+            vec![
+                AgentAction::Call,     // preflop
+                AgentAction::Bet(0.0), // flop: check
+                AgentAction::Bet(0.0), // turn: check
+                AgentAction::AllIn,    // river: all-in
+            ],
+            AgentAction::Fold,
+        );
+
+        // Player 2 (BB):
+        // - Posts BB (forced)
+        // - Preflop: Checks
+        // - Flop: Checks
+        // - Turn: Checks
+        // - River: Folds to all-in
+        let agent_two = boxed_vec_agent_with_default(
+            vec![
+                AgentAction::Call,     // preflop: check
+                AgentAction::Bet(0.0), // flop: check
+                AgentAction::Bet(0.0), // turn: check
+                AgentAction::Fold,     // river: fold to all-in
+            ],
+            AgentAction::Fold,
+        );
+
+        let game_state = GameStateBuilder::new()
+            .stacks(vec![100.0, 100.0, 100.0])
+            .blinds(10.0, 5.0)
+            .build()
+            .unwrap();
+        let agents: Vec<Box<dyn Agent>> = vec![agent_zero, agent_one, agent_two];
+
+        let vec_hist = Box::new(VecHistorian::new());
+        let vec_storage = vec_hist.get_storage();
+        let historians: Vec<Box<dyn historian::Historian>> = vec![vec_hist];
+
+        let mut sim: HoldemSimulation = HoldemSimulationBuilder::default()
+            .game_state(game_state)
+            .agents(agents)
+            .historians(historians)
+            .build_with_rng(StdRng::seed_from_u64(42))
+            .unwrap();
+
+        sim.run().await;
+
+        assert_valid_round_data(&sim.game_state.round_data);
+        assert_valid_game_state(&sim.game_state);
+
+        // Verify Player 2 acted on the river
+        let records = vec_storage.lock().unwrap();
+        let river_actions: Vec<_> = records
+            .iter()
+            .filter_map(|r| match &r.action {
+                Action::PlayedAction(a) if a.round == Round::River => Some(a),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            river_actions.len(),
+            2,
+            "Expected 2 river actions (all-in + fold), got {}. \
+             Actions: {:?}",
+            river_actions.len(),
+            river_actions
+                .iter()
+                .map(|a| format!("P{}: {:?}", a.idx, a.action))
+                .collect::<Vec<_>>()
+        );
+
+        // P1's all-in and P2's fold
+        assert!(
+            matches!(river_actions[0].action, AgentAction::AllIn),
+            "First river action should be AllIn, got {:?}",
+            river_actions[0].action
+        );
+        assert_eq!(
+            river_actions[1].idx, 2,
+            "P2 should be the one folding on the river"
+        );
+        assert!(
+            matches!(river_actions[1].action, AgentAction::Fold),
+            "P2's river action should be Fold, got {:?}",
+            river_actions[1].action
+        );
+    }
+}

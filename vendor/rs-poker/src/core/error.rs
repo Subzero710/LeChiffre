@@ -1,0 +1,44 @@
+use thiserror::Error;
+
+use super::Card;
+
+/// This is the core error type for the
+/// RS-Poker library. It uses `thiserror` to provide
+/// readable error messages
+#[derive(Error, Debug, Hash)]
+pub enum RSPokerError {
+    #[error("Unable to parse value")]
+    UnexpectedValueChar,
+    #[error("Unable to parse suit")]
+    UnexpectedSuitChar,
+    #[error("Error reading characters while parsing")]
+    TooFewChars,
+    #[error("Holdem hands should never have more than 7 cards in them.")]
+    HoldemHandSize,
+    #[error("Card already added to hand {0}")]
+    DuplicateCardInHand(Card),
+    #[error("Extra un-used characters found after parsing")]
+    UnparsedCharsRemaining,
+    #[error("Hand range can't be offsuit while cards are suiterd")]
+    OffSuitWithMatchingSuit,
+    #[error("Hand range is suited while cards are not.")]
+    SuitedWithNoMatchingSuit,
+    #[error("Invalid use of the plus modifier")]
+    InvalidPlusModifier,
+    #[error("The gap between cards must be constant when defining a hand range.")]
+    InvalidGap,
+    #[error("Pairs can't be suited.")]
+    InvalidSuitedPairs,
+    #[error("Invalid preflop hand notation: {0}")]
+    InvalidPreflopNotation(String),
+    #[error("Strategy frequencies must sum to 1.0, got {0}")]
+    InvalidStrategyFrequencies(String),
+    #[error("Preflop hand must have exactly 2 cards, got {0}")]
+    InvalidPreflopHandSize(usize),
+    #[error("Omaha hole cards must have 2-7 cards, got {0}")]
+    OmahaHoleCardCount(usize),
+    #[error("Omaha board must have 3-5 cards, got {0}")]
+    OmahaBoardCardCount(usize),
+    #[error("Omaha hole cards and board cards must not overlap")]
+    OmahaOverlappingCards,
+}

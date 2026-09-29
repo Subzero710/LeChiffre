@@ -1,0 +1,38 @@
+name: "Prod Compile"
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+permissions: {}
+
+jobs:
+  prod_compile:
+      name: cargo prod compile
+      runs-on: ubuntu-latest
+      steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/mise
+            ~/.rustup/toolchains
+            ~/.rustup/update-hashes
+            ~/.rustup/settings.toml
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: rust-${{ runner.os }}-${{ hashFiles('mise.toml', 'mise.lock', '**/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-
+
+      - uses: jdx/mise-action@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          cache: false
+      - run: cargo build --release --all --all-targets --all-features

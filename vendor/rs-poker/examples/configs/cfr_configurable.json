@@ -1,0 +1,76 @@
+{
+    "type": "cfr_configurable",
+    "name": "CFR-Configurable",
+    "hand_estimator": "known",
+    "exploration": {
+        "budget": [
+            {
+                "type": "deadline",
+                "millis": 250
+            },
+            {
+                "type": "per_depth_iterations",
+                "counts": [
+                    50,
+                    40,
+                    30,
+                    20,
+                    10,
+                    5
+                ]
+            },
+            {
+                "type": "max_width",
+                "recursive_widths": [
+                    1,
+                    1,
+                    1,
+                    1,
+                    1,
+                    1
+                ]
+            }
+        ]
+    },
+    "action_config": {
+        "preflop": {
+            "call_enabled": true,
+            "raise_mult": [
+                2.5
+            ],
+            "pot_mult": [],
+            "setup_shove": false,
+            "all_in": true
+        },
+        "flop": {
+            "call_enabled": true,
+            "raise_mult": [],
+            "pot_mult": [
+                0.33,
+                1.0
+            ],
+            "setup_shove": false,
+            "all_in": false
+        },
+        "turn": {
+            "call_enabled": true,
+            "raise_mult": [],
+            "pot_mult": [
+                0.67,
+                1.0
+            ],
+            "setup_shove": true,
+            "all_in": false
+        },
+        "river": {
+            "call_enabled": true,
+            "raise_mult": [],
+            "pot_mult": [
+                0.67,
+                1.5
+            ],
+            "setup_shove": true,
+            "all_in": true
+        }
+    }
+}

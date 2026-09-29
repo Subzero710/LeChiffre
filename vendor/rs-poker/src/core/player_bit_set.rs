@@ -1,0 +1,395 @@
+use std::{
+    fmt::{Debug, Display},
+    ops::{BitAnd, BitOr},
+};
+
+/// A struct representing a bit set for players.
+///
+/// # Examples
+///
+/// ```
+/// use rs_poker::core::PlayerBitSet;
+/// let mut active_players = PlayerBitSet::new(9);
+///
+/// // Player 4 folds
+/// active_players.disable(4);
+/// assert_eq!(8, active_players.count());
+/// ```
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PlayerBitSet {
+    set: u16,
+}
+
+impl std::hash::Hash for PlayerBitSet {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.set.hash(state);
+    }
+}
+
+impl Debug for PlayerBitSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PlayerBitSet[")?;
+
+        for idx in 0..16 {
+            if self.get(idx) {
+                write!(f, "A")?;
+            } else {
+                write!(f, "_")?;
+            }
+        }
+
+        write!(f, "]")
+    }
+}
+
+impl Display for PlayerBitSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[")?;
+
+        for idx in 0..16 {
+            if self.get(idx) {
+                write!(f, "A")?;
+            } else {
+                write!(f, "_")?;
+            }
+        }
+
+        write!(f, "]")
+    }
+}
+
+impl PlayerBitSet {
+    /// Creates a new `PlayerBitSet` with `players` number of players.
+    ///
+    /// Supports up to 16 players (the width of the underlying `u16`).
+    pub fn new(players: usize) -> Self {
+        debug_assert!(
+            players <= 16,
+            "PlayerBitSet supports at most 16 players, got {players}"
+        );
+        // `1u16 << 16` overflows, so special-case the full-width case rather
+        // than computing `(1 << players) - 1` directly.
+        let set = if players >= 16 {
+            u16::MAX
+        } else {
+            (1u16 << players) - 1
+        };
+        Self { set }
+    }
+
+    /// Returns the number of players enabled in the bit set.
+    pub fn count(&self) -> usize {
+        self.set.count_ones() as usize
+    }
+
+    /// Returns `true` if the bit set is empty.
+    pub fn empty(&self) -> bool {
+        self.set == 0
+    }
+
+    /// Enables the player at `idx` position in the bit set.
+    pub fn enable(&mut self, idx: usize) {
+        self.set |= 1 << idx;
+    }
+
+    /// Disables the player at `idx` position in the bit set.
+    pub fn disable(&mut self, idx: usize) {
+        self.set &= !(1 << idx);
+    }
+
+    /// Returns `true` if the player at `idx` position in the bit set is
+    /// enabled.
+    pub fn get(&self, idx: usize) -> bool {
+        (self.set & (1 << idx)) != 0
+    }
+
+    /// Returns an iterator over the active players in the bit set.
+    pub fn ones(self) -> ActivePlayerBitSetIter {
+        ActivePlayerBitSetIter { set: self.set }
+    }
+}
+
+/// Implements the BitOr trait for PlayerBitSet, allowing two PlayerBitSet
+/// instances to be combined using the | operator.
+///
+/// # Examples
+///
+/// ```
+/// use rs_poker::core::PlayerBitSet;
+///
+/// let mut a = PlayerBitSet::default();
+/// a.enable(0);
+/// a.enable(2);
+///
+/// let mut b = PlayerBitSet::default();
+/// b.enable(1);
+/// b.enable(2);
+///
+/// let c = a | b;
+/// assert_eq!(c.get(0), true);
+/// assert_eq!(c.get(1), true);
+/// assert_eq!(c.get(2), true);
+/// ```
+///
+/// Here, two `PlayerBitSet` instances `a` and `b` are combined using the `|`
+/// operator to produce a new `PlayerBitSet` instance `c`. `c` contains all the
+/// bits set in either `a` or `b`.
+impl BitOr for PlayerBitSet {
+    type Output = PlayerBitSet;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self {
+            set: self.set | rhs.set,
+        }
+    }
+}
+
+impl BitAnd for PlayerBitSet {
+    type Output = PlayerBitSet;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        Self {
+            set: self.set & rhs.set,
+        }
+    }
+}
+
+/// An iterator over the active players in a bit set.
+pub struct ActivePlayerBitSetIter {
+    set: u16,
+}
+
+/// # Examples
+///
+/// ```
+/// use rs_poker::core::PlayerBitSet;
+///
+/// let mut set = PlayerBitSet::default();
+///
+/// set.enable(0);
+/// set.enable(4);
+/// set.enable(2);
+///
+/// let mut iter = set.ones();
+///
+/// assert_eq!(iter.next(), Some(0));
+/// assert_eq!(iter.next(), Some(2));
+/// assert_eq!(iter.next(), Some(4));
+/// assert_eq!(iter.next(), None);
+/// ```
+///
+/// Here, we create a `PlayerBitSet` instance `set` and set some bits in it. We
+/// then create an `ActivePlayerBitSetIter` iterator from the `set` instance and
+/// use it to iterate over the active players. We verify that the iterator
+/// returns the correct indices of the active players.
+impl Iterator for ActivePlayerBitSetIter {
+    type Item = usize;
+
+    /// Returns the next active player in the bit set, or `None` if there are no
+    /// more.
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.set == 0 {
+            None
+        } else {
+            // Find the index of the first non-zero bit
+            let idx = self.set.trailing_zeros() as usize;
+            // Then set the first non-zero bit to zero
+            self.set &= !(1 << idx);
+            // Then emit the next active player
+            Some(idx)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_count() {
+        assert_eq!(7, PlayerBitSet::new(7).count());
+    }
+
+    #[test]
+    fn test_new_max_players_count() {
+        // Regression: `(1u16 << 16) - 1` overflows. Building a 16-player
+        // bit set must still report 16 active players.
+        let s = PlayerBitSet::new(16);
+        assert_eq!(16, s.count());
+        for idx in 0..16 {
+            assert!(s.get(idx), "player {idx} should be active");
+        }
+    }
+
+    #[test]
+    fn test_new_max_players_iter() {
+        let s = PlayerBitSet::new(16);
+        let collected: Vec<usize> = s.ones().collect();
+        assert_eq!(collected, (0..16).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_new_all_valid_widths_exact_mask() {
+        // Lock the exact bit pattern `PlayerBitSet::new` produces for every
+        // valid player count, including both edges (0 and 16). This is the
+        // invariant the `benches/player_bit_set_init.rs` candidates were
+        // compared against: the low `players` bits set, nothing else.
+        for players in 0usize..=16 {
+            let s = PlayerBitSet::new(players);
+            assert_eq!(s.count(), players, "count mismatch at players={players}");
+            for idx in 0..players {
+                assert!(s.get(idx), "bit {idx} should be set at players={players}");
+            }
+            for idx in players..16 {
+                assert!(
+                    !s.get(idx),
+                    "bit {idx} should be clear at players={players}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_default_zero_count() {
+        assert_eq!(0, PlayerBitSet::default().count());
+    }
+
+    #[test]
+    fn test_disable_count() {
+        let mut s = PlayerBitSet::new(7);
+
+        assert_eq!(7, s.count());
+        s.disable(6);
+        assert_eq!(6, s.count());
+        s.disable(0);
+        assert_eq!(5, s.count());
+    }
+
+    #[test]
+    fn test_enable_count() {
+        let mut s = PlayerBitSet::default();
+
+        assert_eq!(0, s.count());
+        s.enable(0);
+        assert_eq!(1, s.count());
+        s.enable(0);
+        assert_eq!(1, s.count());
+
+        s.enable(2);
+        assert_eq!(2, s.count());
+
+        s.disable(0);
+        assert_eq!(1, s.count());
+    }
+
+    #[test]
+    fn test_iter() {
+        let s = PlayerBitSet::new(2);
+        let mut iter = s.ones();
+
+        assert_eq!(Some(0), iter.next());
+        assert_eq!(Some(1), iter.next());
+        assert_eq!(None, iter.next());
+    }
+
+    #[test]
+    fn test_iter_with_disabled() {
+        let mut s = PlayerBitSet::new(3);
+        let mut iter = s.ones();
+
+        assert_eq!(Some(0), iter.next());
+        assert_eq!(Some(1), iter.next());
+        assert_eq!(Some(2), iter.next());
+        assert_eq!(None, iter.next());
+
+        s.disable(0);
+
+        let mut after_iter = s.ones();
+        assert_eq!(Some(1), after_iter.next());
+        assert_eq!(Some(2), after_iter.next());
+        assert_eq!(None, after_iter.next());
+    }
+
+    #[test]
+    fn test_iter_with_enabled() {
+        let mut s = PlayerBitSet::default();
+        let mut iter = s.ones();
+        assert_eq!(None, iter.next());
+
+        s.enable(3);
+
+        let mut after_iter = s.ones();
+        assert_eq!(Some(3), after_iter.next());
+        assert_eq!(None, after_iter.next());
+    }
+
+    #[test]
+    fn test_display() {
+        let mut s = PlayerBitSet::new(6);
+        s.disable(2);
+
+        assert_eq!("[AA_AAA__________]", format!("{s}"))
+    }
+
+    #[test]
+    fn test_get() {
+        let mut s = PlayerBitSet::default();
+
+        s.enable(0);
+        s.enable(2);
+
+        assert!(s.get(0));
+        assert!(!s.get(1));
+        assert!(s.get(2));
+
+        s.disable(0);
+
+        assert!(!s.get(0));
+        assert!(!s.get(1));
+        assert!(s.get(2));
+    }
+
+    /// Test Hash implementation produces consistent hashes for equal sets.
+    #[test]
+    fn test_hash() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn hash_it<T: Hash>(t: &T) -> u64 {
+            let mut s = DefaultHasher::new();
+            t.hash(&mut s);
+            s.finish()
+        }
+
+        let mut s1 = PlayerBitSet::default();
+        s1.enable(0);
+        s1.enable(2);
+
+        let mut s2 = PlayerBitSet::default();
+        s2.enable(0);
+        s2.enable(2);
+
+        let mut s3 = PlayerBitSet::default();
+        s3.enable(1);
+
+        // Same sets should hash the same
+        assert_eq!(hash_it(&s1), hash_it(&s2));
+
+        // Different sets should hash differently (with very high probability)
+        assert_ne!(hash_it(&s1), hash_it(&s3));
+    }
+
+    /// Test Debug implementation produces expected output format.
+    #[test]
+    fn test_debug() {
+        let mut s = PlayerBitSet::new(4);
+        s.disable(1);
+
+        let debug_str = format!("{:?}", s);
+        assert!(!debug_str.is_empty());
+        assert!(debug_str.contains("PlayerBitSet"));
+        assert!(debug_str.contains("A")); // Active player
+        assert!(debug_str.contains("_")); // Inactive player
+    }
+}

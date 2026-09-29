@@ -1,0 +1,14 @@
+---
+source: src/bin/rsp/tui/widgets/game_log.rs
+assertion_line: 162
+expression: terminal.backend()
+snapshot_kind: text
+---
+"╭ ♥ Recent Games ──────────────────────────────────────────────────────────────╮"
+"│ #       Winner          Win(bb)  Loser           Loss(bb) Pot(bb)  Street    │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"╰──────────────────────────────────────────────────────────────────────────────╯"

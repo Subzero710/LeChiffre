@@ -1,0 +1,36 @@
+---
+source: src/bin/rsp/tui/screens/game_detail.rs
+assertion_line: 929
+expression: terminal.backend()
+snapshot_kind: text
+---
+"╭ ♠ Game Info ─────────╮╭ ♥ Players ───────────────────────────────────────────╮"
+"│ Site     test        ││ Seat  Name       Start   End     Change   Cards      │"
+"│ Table    test (2-max ││                                                      │"
+"│ Game     Hold'em     ││                                                      │"
+"│ Limit    —           ││                                                      │"
+"│ Blinds   5 / 10      ││                                                      │"
+"│ Date     —           ││                                                      │"
+"│ Game #   1           ││                                                      │"
+"│ Dealer   Seat 0      ││                                                      │"
+"╰──────────────────────╯╰──────────────────────────────────────────────────────╯"
+"╭ ♣ Round Log ─────────────────────────────────────────────────────────────────╮"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"╰──────────────────────────────────────────────────────────────────────────────╯"
+"q Back  j/k Scroll  ^d/^u ½Page  g Top  G End                                   "

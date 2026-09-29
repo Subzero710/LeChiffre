@@ -1,0 +1,224 @@
+[package]
+name = "rs_poker"
+version = "5.1.0"
+authors = ["Elliott Clark <eclark@apache.org>"]
+keywords = ["cards", "poker"]
+categories = ["games"]
+homepage = "https://docs.rs/rs_poker"
+repository = "https://github.com/elliottneilclark/rs-poker"
+description = "A library to help with any Rust code dealing with poker. This includes card values, suits, hands, hand ranks, 5 card hand strength calculation, 7 card hand strength calulcation, and monte carlo game simulation helpers."
+readme = "README.md"
+license = "Apache-2.0"
+edition = "2024"
+build = "build.rs"
+# Dev-only files that have no business in the published crate. `.cargo/` build
+# config only applies to in-tree builds (cargo invocation dir, not the package),
+# so consumers ignore it anyway; the rest is tooling, CI, agent notes, and
+# generated demo artifacts. docs/arena_tui.png is kept — the README embeds it.
+exclude = [
+  ".cargo/",
+  ".github/",
+  "CLAUDE.md",
+  "mise.toml",
+  "mise.lock",
+  "examples/exports/",
+]
+
+[dependencies]
+rand = { version = "~0.10.1" }
+thiserror = "~2.0.12"
+serde = { version = "1.0.219", optional = true, features = ["derive"] }
+serde_json = { version = "~1.0.140", optional = true }
+arbitrary = { version = "~1.4.1", optional = true, features = ["derive"] }
+tracing = { version = "~0.1.41", optional = true }
+approx = { version = "~0.5.1", optional = true }
+little-sorry = { version = "~3.0.0", optional = true, features = [] }
+chrono = { version = "~0.4.41", optional = true, features = ["serde"] }
+itertools = { version = "~0.14.0", optional = true }
+parking_lot = { version = "~0.12", optional = true }
+smallvec = { version = "~1.15", optional = true, features = [
+  "const_generics",
+  "union",
+] }
+clap = { version = "~4.6", features = ["derive"], optional = true }
+tracing-subscriber = { version = "~0.3.20", optional = true, default-features = true, features = [
+  "env-filter",
+  "fmt",
+  "json",
+] }
+ratatui = { version = "~0.30", optional = true, default-features = false, features = [
+  "crossterm",
+] }
+crossterm = { version = "~0.28", optional = true, features = ["event-stream"] }
+tachyonfx = { version = "~0.25", optional = true, features = ["std-duration"] }
+tempfile = { version = "~3.27.0", optional = true }
+tokio = { version = "~1.43", optional = true, features = [
+  "rt",
+  "rt-multi-thread",
+  "macros",
+  "parking_lot",
+  "sync",
+  "time",
+  "fs",
+  "io-util",
+] }
+async-trait = { version = "~0.1", optional = true }
+tokio-util = { version = "~0.7", optional = true }
+
+[dev-dependencies]
+criterion = "~0.8.0"
+env_logger = { version = "~0.11.8" }
+approx = { version = "~0.5.1" }
+tracing-subscriber = { version = "~0.3.20", default-features = false, features = [
+  "registry",
+  "std",
+] }
+tempfile = "~3.27.0"
+insta = "~1.41"
+tokio = { version = "~1.43", features = [
+  "rt",
+  "rt-multi-thread",
+  "macros",
+  "parking_lot",
+  "sync",
+  "time",
+  "fs",
+  "io-util",
+  "test-util",
+] }
+tokio-test = "~0.4"
+
+[target.'cfg(not(target_env = "msvc"))'.dev-dependencies]
+# Benches set jemalloc as the global allocator to match the production `rsp`
+# binary (which uses it via the `rsp` feature). Measuring CFR throughput under
+# the system allocator would overstate allocation cost relative to production.
+tikv-jemallocator = { version = "~0.6.0", features = [
+  "unprefixed_malloc_on_supported_platforms",
+] }
+
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = { version = "~0.6.0", optional = true, features = [
+  "profiling",
+  "unprefixed_malloc_on_supported_platforms",
+] }
+
+[features]
+default = ["arena", "serde", "omaha", "open-hand-history"]
+omaha = []
+serde = ["dep:serde", "dep:serde_json"]
+arena = [
+  "dep:tracing",
+  "dep:little-sorry",
+  "dep:itertools",
+  "dep:approx",
+  "dep:parking_lot",
+  "dep:smallvec",
+  "dep:tokio",
+  "dep:async-trait",
+  "dep:tokio-util",
+]
+rsp = [
+  "arena",
+  "serde",
+  "omaha",
+  "open-hand-history",
+  "dep:clap",
+  "dep:tracing-subscriber",
+  "dep:tikv-jemallocator",
+  "dep:ratatui",
+  "dep:crossterm",
+  "dep:tachyonfx",
+  "dep:tempfile",
+]
+arena-test-util = ["arena", "dep:approx"]
+open-hand-history = ["serde", "dep:chrono", "dep:approx"]
+open-hand-history-test-util = ["open-hand-history"]
+
+[[bin]]
+name = "rsp"
+path = "src/bin/rsp/main.rs"
+required-features = ["rsp"]
+
+[[bench]]
+name = "arena"
+harness = false
+required-features = ["arena"]
+
+[[bench]]
+name = "card_contains"
+harness = false
+
+[[bench]]
+name = "oracle_rank"
+harness = false
+
+[[bench]]
+name = "monte_carlo_game"
+harness = false
+
+[[bench]]
+name = "holdem_starting_hand"
+harness = false
+
+[[bench]]
+name = "iter"
+harness = false
+
+[[bench]]
+name = "parse"
+harness = false
+
+[[bench]]
+name = "rank"
+harness = false
+
+[[bench]]
+name = "icm_sim"
+harness = false
+
+[[bench]]
+name = "deal_deck"
+harness = false
+
+[[bench]]
+name = "cfr"
+harness = false
+required-features = ["arena"]
+
+[[bench]]
+name = "cfr_throughput"
+harness = false
+required-features = ["arena"]
+
+[[bench]]
+name = "node_arena"
+harness = false
+required-features = ["arena"]
+
+[[bench]]
+name = "sample_one"
+harness = false
+
+[[bench]]
+name = "action_picker"
+harness = false
+required-features = ["arena"]
+
+[[bench]]
+name = "omaha"
+harness = false
+required-features = ["omaha"]
+
+[[bench]]
+name = "player_bit_set_init"
+harness = false
+
+[[bench]]
+name = "hand_eval"
+harness = false
+
+[profile.release]
+debug = "line-tables-only"
+lto = true
+codegen-units = 1
+panic = "abort"
