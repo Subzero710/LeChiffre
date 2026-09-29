@@ -335,19 +335,32 @@ impl HoldemSimulation {
                     pot += w as f64;
                 }
 
-                // Now all the winning players get
-                // an equal share of the side pot
+                // Apply rake before splitting this main/side-pot slice. The cap is
+                // shared across all slices in the hand via `rake_collected`.
+                let gross_pot = pot;
+                let net_pot = f64::from(self.game_state.take_rake(gross_pot as f32));
+
+                // Now all the winning players get an equal share of the net pot.
                 let num_players = (group_end - start_idx) as f64;
-                let split = pot / num_players;
+                let split = net_pot / num_players;
 
                 for entry in &ranked_players[start_idx..group_end] {
                     let idx = entry.1;
                     // Record that this player won something
-                    event!(Level::DEBUG, idx, split, pot, ?rank, "pot_awarded");
+                    event!(
+                        Level::DEBUG,
+                        idx,
+                        split,
+                        gross_pot,
+                        net_pot,
+                        rake_collected = self.game_state.rake_collected,
+                        ?rank,
+                        "pot_awarded"
+                    );
                     self.game_state.award(idx, split as f32);
                     self.record_action(Action::Award(AwardPayload {
                         idx,
-                        total_pot: pot as f32,
+                        total_pot: gross_pot as f32,
                         award_amount: split as f32,
                         // Since we had a showdown we can copy the hand
                         // and the resulting rank.
@@ -814,13 +827,21 @@ impl HoldemSimulation {
         //
         if left.count() <= 1 {
             if let Some(winning_idx) = left.ones().next() {
-                let total_pot = self.game_state.total_pot;
-                event!(Level::DEBUG, winning_idx, total_pot, "folded_to_winner");
-                self.game_state.award(winning_idx, total_pot);
+                let gross_pot = self.game_state.total_pot;
+                let net_pot = self.game_state.take_rake(gross_pot);
+                event!(
+                    Level::DEBUG,
+                    winning_idx,
+                    gross_pot,
+                    net_pot,
+                    rake_collected = self.game_state.rake_collected,
+                    "folded_to_winner"
+                );
+                self.game_state.award(winning_idx, net_pot);
                 self.record_action(Action::Award(AwardPayload {
                     idx: winning_idx,
-                    total_pot,
-                    award_amount: total_pot,
+                    total_pot: gross_pot,
+                    award_amount: net_pot,
                     rank: None,
                     hand: None,
                 }))

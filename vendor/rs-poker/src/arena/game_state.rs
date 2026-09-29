@@ -9,7 +9,7 @@ use smallvec::{SmallVec, smallvec};
 
 use crate::core::{Card, CardBitSet, Hand, PlayerBitSet};
 
-use super::errors::GameStateError;
+use super::{errors::GameStateError, rake::RakeConfig};
 
 /// Maximum number of players supported (based on PlayerBitSet using u16).
 pub const MAX_PLAYERS: usize = 16;
@@ -101,6 +101,7 @@ pub struct GameStateBuilder {
     ante: Option<f32>,                        // Default: 0.0
     dealer_idx: Option<usize>,                // Default: 0
     max_raises_per_round: Option<Option<u8>>, // Default: Some(3)
+    rake: Option<RakeConfig>,                  // Default: no rake
 
     // For mid-game states (defaults for new games)
     round: Option<Round>,               // Default: Round::Starting
@@ -154,6 +155,15 @@ impl GameStateBuilder {
     /// Use `None` for unlimited raises.
     pub fn max_raises_per_round(mut self, max: Option<u8>) -> Self {
         self.max_raises_per_round = Some(max);
+        self
+    }
+
+    /// Set the rake configuration carried by this game state.
+    ///
+    /// Keeping rake on `GameState` ensures cloned CFR states and fast-forward
+    /// reward paths use the exact same economic rules as the main simulation.
+    pub fn rake(mut self, rake: RakeConfig) -> Self {
+        self.rake = Some(rake);
         self
     }
 
@@ -313,6 +323,7 @@ impl GameStateBuilder {
             .player_bet
             .unwrap_or_else(|| smallvec![0.0; num_players]);
         let max_raises_per_round = self.max_raises_per_round.unwrap_or(Some(3));
+        let rake = self.rake.unwrap_or_default();
 
         let round_data = self.round_data.unwrap_or_else(|| {
             RoundData::new(
@@ -366,6 +377,8 @@ impl GameStateBuilder {
             bb_posted: round != Round::Starting,
             sb_posted: round != Round::Starting,
             max_raises_per_round,
+            rake,
+            rake_collected: 0.0,
         })
     }
 }
@@ -638,6 +651,10 @@ pub struct GameState {
     /// Maximum raises allowed per betting round. None = unlimited.
     /// Default is Some(3). When exceeded, raises are converted to calls.
     pub max_raises_per_round: Option<u8>,
+    /// Rake rules for this hand. Cloned together with the state for CFR.
+    pub rake: RakeConfig,
+    /// Rake already collected in this hand (shared cap accounting).
+    pub rake_collected: f32,
 }
 
 impl GameState {
@@ -812,6 +829,29 @@ impl GameState {
         self.round_data.advance_action();
 
         Ok(extra_amount)
+    }
+
+
+    /// Compute the rake that would be taken from `pot_amount` without mutating
+    /// the state. `flop_dealt` is explicit so CFR board-enumeration paths can
+    /// evaluate a future showdown without materializing every board in the state.
+    pub fn rake_amount_for_pot(&self, pot_amount: f32, flop_dealt: bool) -> f32 {
+        self.rake
+            .calculate(pot_amount, flop_dealt, self.rake_collected)
+    }
+
+    /// Return the amount of a pot left for players after rake, without mutating
+    /// the state's cumulative rake counter.
+    pub fn net_pot_after_rake(&self, pot_amount: f32, flop_dealt: bool) -> f32 {
+        (pot_amount - self.rake_amount_for_pot(pot_amount, flop_dealt)).max(0.0)
+    }
+
+    /// Take rake from a completed pot and advance this hand's cumulative rake.
+    pub fn take_rake(&mut self, pot_amount: f32) -> f32 {
+        let flop_dealt = self.board.len() >= 3;
+        let rake = self.rake_amount_for_pot(pot_amount, flop_dealt);
+        self.rake_collected += rake;
+        (pot_amount - rake).max(0.0)
     }
 
     pub fn award(&mut self, player_idx: usize, amount: f32) {
@@ -1844,4 +1884,37 @@ mod tests {
 
         assert_eq!(gs.board.to_vec(), board);
     }
+
+    #[test]
+    fn test_rake_config_is_carried_by_game_state_clones() {
+        let rake = crate::arena::RakeConfig::new(0.05, 3.0, true).unwrap();
+        let gs = GameStateBuilder::new()
+            .stacks(vec![100.0, 100.0])
+            .big_blind(2.0)
+            .rake(rake)
+            .build()
+            .unwrap();
+
+        let cloned = gs.clone();
+        assert_eq!(cloned.rake, rake);
+        assert_eq!(cloned.rake_collected, 0.0);
+    }
+
+    #[test]
+    fn test_take_rake_updates_hand_cap_accounting() {
+        let rake = crate::arena::RakeConfig::new(0.10, 6.0, false).unwrap();
+        let mut gs = GameStateBuilder::new()
+            .stacks(vec![100.0, 100.0])
+            .big_blind(2.0)
+            .rake(rake)
+            .build()
+            .unwrap();
+
+        assert_eq!(gs.take_rake(40.0), 36.0);
+        assert_eq!(gs.rake_collected, 4.0);
+        assert_eq!(gs.take_rake(40.0), 38.0);
+        assert_eq!(gs.rake_collected, 6.0);
+        assert_eq!(gs.take_rake(40.0), 40.0);
+    }
+
 }

@@ -76,6 +76,8 @@ pub struct HandHistoryBuilder {
     pots: Vec<PotObj>,
     pending_pot_expected_total: Option<f32>,
     pending_pot_awarded: f32,
+    pending_pot_rake: f32,
+    observed_rake_collected: f32,
     pending_pot_player_wins: Vec<PlayerWinsObj>,
 }
 
@@ -154,6 +156,8 @@ impl HandHistoryBuilder {
             pots: Vec::new(),
             pending_pot_expected_total: None,
             pending_pot_awarded: 0.0,
+            pending_pot_rake: 0.0,
+            observed_rake_collected: 0.0,
             pending_pot_player_wins: Vec::new(),
         }
     }
@@ -430,7 +434,11 @@ impl HandHistoryBuilder {
                 let pot = PotObj {
                     number: (self.pots.len() + 1) as u64,
                     amount: expected,
-                    rake: None,
+                    rake: if self.pending_pot_rake > f32::EPSILON {
+                        Some(self.pending_pot_rake)
+                    } else {
+                        None
+                    },
                     jackpot: None,
                     player_wins: std::mem::take(&mut self.pending_pot_player_wins),
                 };
@@ -440,6 +448,7 @@ impl HandHistoryBuilder {
             }
         }
         self.pending_pot_awarded = 0.0;
+        self.pending_pot_rake = 0.0;
     }
 
     /// Records an arena action and converts it to OHH format
@@ -590,6 +599,17 @@ impl HandHistoryBuilder {
             crate::arena::action::Action::Award(payload) => {
                 self.ensure_pending_pot(payload.total_pot);
 
+                // Rake is applied once before a pot is awarded. Track the delta
+                // of GameState's cumulative rake so ties see the same pot rake
+                // without double-counting it. This also lets equal-sized adjacent
+                // side pots flush independently.
+                let rake_delta = (game_state.rake_collected - self.observed_rake_collected)
+                    .max(0.0);
+                if rake_delta > f32::EPSILON {
+                    self.pending_pot_rake += rake_delta;
+                    self.observed_rake_collected = game_state.rake_collected;
+                }
+
                 let win = PlayerWinsObj {
                     player_id: payload.idx as u64,
                     win_amount: payload.award_amount,
@@ -603,7 +623,7 @@ impl HandHistoryBuilder {
                 self.pending_pot_awarded += payload.award_amount;
 
                 if let Some(expected) = self.pending_pot_expected_total
-                    && self.pending_pot_awarded + f32::EPSILON >= expected
+                    && self.pending_pot_awarded + self.pending_pot_rake + f32::EPSILON >= expected
                 {
                     self.flush_pending_pot();
                 }
@@ -3052,4 +3072,30 @@ mod tests {
             action
         );
     }
+
+    #[test]
+    fn test_award_records_gross_pot_and_rake_separately() {
+        let mut builder = HandHistoryBuilder::new(ConverterConfig::default());
+        let mut game_state = create_test_game_state();
+        builder.init_from_game_state(777, &game_state);
+
+        // Simulate the state seen by historians after a 10-chip gross pot had
+        // 1 chip raked and 9 chips awarded.
+        game_state.rake_collected = 1.0;
+        let action = crate::arena::action::Action::Award(crate::arena::action::AwardPayload {
+            idx: 0,
+            total_pot: 10.0,
+            award_amount: 9.0,
+            rank: None,
+            hand: None,
+        });
+        builder.record_action(777, &action, &game_state).unwrap();
+
+        let hand = builder.build().unwrap();
+        assert_eq!(hand.pots.len(), 1);
+        assert_eq!(hand.pots[0].amount, 10.0);
+        assert_eq!(hand.pots[0].rake, Some(1.0));
+        assert_eq!(hand.pots[0].player_wins[0].win_amount, 9.0);
+    }
+
 }

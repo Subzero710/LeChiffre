@@ -8,6 +8,7 @@ use super::{
     cfr::{CFRHistorian, CFRState, TraversalSet},
     errors::HoldemSimulationError,
     historian::Historian,
+    rake::RakeConfig,
 };
 
 // Some builder methods to help with turning a builder struct into a ready
@@ -90,6 +91,7 @@ pub struct HoldemSimulationBuilder {
     game_state: Option<GameState>,
     deck: Option<Deck>,
     panic_on_historian_error: bool,
+    rake: Option<RakeConfig>,
     /// Optional CFR context for automatic historian creation.
     cfr_state: Option<CFRState>,
     cfr_traversal_set: Option<TraversalSet>,
@@ -150,6 +152,14 @@ impl HoldemSimulationBuilder {
         self
     }
 
+    /// Set the rake configuration for the simulation.
+    ///
+    /// Defaults to zero rake.
+    pub fn rake(mut self, rake: RakeConfig) -> Self {
+        self.rake = Some(rake);
+        self
+    }
+
     /// Provide CFR context for this simulation.
     ///
     /// When set, the builder will automatically create a `CFRHistorian` and
@@ -193,9 +203,16 @@ impl HoldemSimulationBuilder {
         self,
         mut rng: R,
     ) -> Result<HoldemSimulation, HoldemSimulationError> {
-        let game_state = self
+        let mut game_state = self
             .game_state
             .ok_or(HoldemSimulationError::NeedGameState)?;
+
+        // Rake belongs to the GameState so every clone used by CFR inherits it.
+        // Keep this simulation-builder setter as a convenient override.
+        if let Some(rake) = self.rake {
+            game_state.rake = rake;
+            game_state.rake_collected = 0.0;
+        }
 
         let agents = self
             .agents
@@ -244,6 +261,7 @@ impl Default for HoldemSimulationBuilder {
             game_state: None,
             deck: None,
             panic_on_historian_error: true,
+            rake: None,
             cfr_state: None,
             cfr_traversal_set: None,
             cfr_allow_node_mutation: true,
@@ -770,4 +788,24 @@ mod tests {
             panic!("Result action should be a Bet");
         }
     }
+
+    #[test]
+    fn test_rake_override_is_installed_on_game_state() {
+        let rake = crate::arena::RakeConfig::new(0.05, 3.0, true).unwrap();
+        let game_state = GameStateBuilder::new()
+            .num_players_with_stack(2, 100.0)
+            .blinds(2.0, 1.0)
+            .build()
+            .unwrap();
+
+        let sim = HoldemSimulationBuilder::default()
+            .game_state(game_state)
+            .rake(rake)
+            .build_with_rng(StdRng::seed_from_u64(7))
+            .unwrap();
+
+        assert_eq!(sim.game_state.rake, rake);
+        assert_eq!(sim.game_state.rake_collected, 0.0);
+    }
+
 }

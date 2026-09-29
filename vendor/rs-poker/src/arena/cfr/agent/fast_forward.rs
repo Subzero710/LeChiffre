@@ -138,10 +138,11 @@ pub(super) fn fast_forward_distribute_pot(gs: &mut GameState) {
     if count == 0 {
         return;
     }
-    let pot = gs.total_pot;
-    if pot <= 0.0 {
+    let gross_pot = gs.total_pot;
+    if gross_pot <= 0.0 {
         return;
     }
+    let pot = gs.take_rake(gross_pot);
     if count == 1 {
         let winner = contenders.ones().next().unwrap();
         gs.award(winner, pot);
@@ -221,7 +222,9 @@ fn fast_forward_uncontested_reward(
         1 => {
             let winner = contenders.ones().next().unwrap();
             let winnings = if winner == player_idx {
-                gs.total_pot
+                // An uncontested hand ends immediately; whether a flop exists in
+                // the current state therefore determines no-flop-no-drop.
+                gs.net_pot_after_rake(gs.total_pot, gs.board.len() >= 3)
             } else {
                 0.0
             };
@@ -258,10 +261,14 @@ pub(super) fn fast_forward_enumerate_showdowns(
         return reward;
     }
 
-    let pot = gs.total_pot;
-    if pot <= 0.0 {
+    let gross_pot = gs.total_pot;
+    if gross_pot <= 0.0 {
         return gs.player_reward(player_idx);
     }
+    // If three cards still need to be dealt, every enumerated showdown reaches
+    // a flop. Otherwise the current board already tells us whether a flop exists.
+    let flop_dealt = gs.board.len() >= 3 || cards_needed >= 3;
+    let pot = gs.net_pot_after_rake(gross_pot, flop_dealt);
 
     if cards_needed == 0 {
         // Board is complete — just evaluate the showdown.
@@ -352,10 +359,13 @@ pub(super) fn fast_forward_sample_flop_enumerate_runout_n<R: Rng>(
         return reward;
     }
 
-    let pot = gs.total_pot;
-    if pot <= 0.0 {
+    let gross_pot = gs.total_pot;
+    if gross_pot <= 0.0 {
         return gs.player_reward(player_idx);
     }
+    // This path explicitly samples a flop, so no-flop-no-drop never suppresses
+    // rake for the resulting showdown.
+    let pot = gs.net_pot_after_rake(gross_pot, true);
 
     let mut deck = fast_forward_remaining_deck(gs);
     let starting_stack = gs.starting_stacks[player_idx];
@@ -521,4 +531,32 @@ fn evaluate_showdown_reward(
     let base = contender_accums(gs, contenders, &mut acc_buf);
     let reward = combo_reward::<0>(base, player_idx, pot, []);
     gs.stacks[player_idx] + reward - gs.starting_stacks[player_idx]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::arena::{GameStateBuilder, RakeConfig};
+
+    #[test]
+    fn distribute_pot_applies_rake_in_fast_forward() {
+        let rake = RakeConfig::new(0.10, f32::INFINITY, false).unwrap();
+        let mut gs = GameStateBuilder::new()
+            .stacks(vec![100.0, 100.0])
+            .big_blind(2.0)
+            .rake(rake)
+            .build()
+            .unwrap();
+
+        gs.stacks[0] = 90.0;
+        gs.stacks[1] = 90.0;
+        gs.total_pot = 20.0;
+        gs.player_active.disable(1);
+
+        fast_forward_distribute_pot(&mut gs);
+
+        assert_eq!(gs.rake_collected, 2.0);
+        assert_eq!(gs.stacks[0], 108.0);
+        assert_eq!(gs.total_pot, 0.0);
+    }
 }
