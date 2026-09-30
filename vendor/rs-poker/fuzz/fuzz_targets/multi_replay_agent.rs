@@ -14,32 +14,27 @@ use rs_poker::arena::{
     historian::{self, OpenHandHistoryVecHistorian},
     test_util::assert_valid_game_state,
     test_util::assert_valid_round_data,
-    Agent,
-    GameStateBuilder,
-    HoldemSimulation,
-    HoldemSimulationBuilder,
+    Agent, GameStateBuilder, HoldemSimulation, HoldemSimulationBuilder,
 };
 use rs_poker::open_hand_history::{
-    assert_open_hand_history_matches_game_state,
-    assert_valid_open_hand_history,
+    assert_open_hand_history_matches_game_state, assert_valid_open_hand_history,
 };
 
 use libfuzzer_sys::fuzz_target;
-
-const MIN_BLIND: f32 = 1e-15;
+use rs_poker::Chips;
 
 #[derive(Debug, Clone, arbitrary::Arbitrary)]
 struct PlayerInput {
-    pub stack: f32,
+    pub stack: Chips,
     pub actions: Vec<AgentAction>,
 }
 
 #[derive(Debug, Clone, arbitrary::Arbitrary)]
 struct MultiInput {
     pub players: Vec<PlayerInput>,
-    pub sb: f32,
-    pub bb: f32,
-    pub ante: f32,
+    pub sb: Chips,
+    pub bb: Chips,
+    pub ante: Chips,
     pub dealer_idx: usize,
     pub seed: u64,
 }
@@ -54,60 +49,35 @@ fn build_agent(actions: Vec<AgentAction>) -> Box<dyn Agent> {
 }
 
 fn input_good(input: &MultiInput) -> bool {
-    for player in &input.players {
-        if player.stack.is_nan() || player.stack.is_infinite() || player.stack.is_sign_negative() {
-            return false;
-        }
-    }
-
-    if input.players.len() <= 1 {
+    if !(2..=16).contains(&input.players.len()) {
         return false;
     }
-
-    if input.players.len() > 9 {
-        return false;
-    }
-
-    // Handle floating point weirdness
-    if input.ante.is_sign_negative()
-        || input.ante.is_nan()
-        || input.ante.is_infinite()
-        || input.ante < 0.00
+    if input
+        .players
+        .iter()
+        .any(|p| !(0..=100_000_000).contains(&p.stack))
     {
         return false;
     }
-    if input.sb.is_sign_negative()
-        || input.sb.is_nan()
-        || input.sb.is_infinite()
+    if input.ante < 0
         || input.sb < input.ante
-        || input.sb < 0.00
-        || (input.sb > 0.0 && input.sb < MIN_BLIND)
-    {
-        return false;
-    }
-    if input.bb.is_sign_negative()
-        || input.bb.is_nan()
-        || input.bb.is_infinite()
+        || input.sb < 0
         || input.bb < input.sb
-        || input.bb < 1.0
-        || (input.bb > 0.0 && input.bb < MIN_BLIND)
+        || !(1..=100_000_000).contains(&input.bb)
     {
         return false;
     }
-
-    // If we can't post then what's the point?
     let min_stack = input
         .players
         .iter()
-        .map(|p| p.stack.clamp(0.0, 100_000_000.0))
-        .reduce(f32::min)
-        .unwrap_or(0.0);
-
-    if input.bb + input.ante > min_stack {
-        return false;
-    }
-
-    if input.bb > 100_000_000.0 {
+        .map(|p| p.stack)
+        .min()
+        .expect("nonempty validated player list");
+    if input
+        .bb
+        .checked_add(input.ante)
+        .is_none_or(|required| required > min_stack)
+    {
         return false;
     }
 
@@ -115,11 +85,7 @@ fn input_good(input: &MultiInput) -> bool {
     for player in &input.players {
         for action in &player.actions {
             if let AgentAction::Bet(bet) = action {
-                if bet.is_sign_negative()
-                    || bet.is_nan()
-                    || bet.is_infinite()
-                    || (*bet == 0.0 || *bet < input.bb)
-                {
+                if *bet < 0 || *bet < input.bb {
                     return false;
                 }
             }
@@ -138,11 +104,7 @@ fuzz_target!(|input: MultiInput| {
         return;
     }
 
-    let stacks: Vec<f32> = input
-        .players
-        .iter()
-        .map(|pi| (pi.stack).clamp(0.0, 100_000_000.0))
-        .collect();
+    let stacks: Vec<Chips> = input.players.iter().map(|pi| pi.stack).collect();
 
     let agents: Vec<Box<dyn Agent>> = input
         .players

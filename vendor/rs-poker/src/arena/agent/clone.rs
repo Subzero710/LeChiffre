@@ -71,8 +71,8 @@ mod tests {
 
         let generator = CloneAgentGenerator::new(template);
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .build()
             .unwrap();
 

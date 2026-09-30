@@ -11,10 +11,7 @@ fuzz_target!(|data: &[u8]| {
             if h.len() == 7 {
                 let r_seven = h.rank();
                 let cbs: CardBitSet = h.iter().copied().collect();
-                let r_five_max = CardIter::new(cbs, 5)
-                    .map(|cv| cv.rank())
-                    .max()
-                    .unwrap();
+                let r_five_max = CardIter::new(cbs, 5).map(|cv| cv.rank()).max().unwrap();
                 assert_eq!(r_five_max, r_seven);
             }
         }

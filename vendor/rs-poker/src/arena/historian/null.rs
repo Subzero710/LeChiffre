@@ -29,14 +29,14 @@ mod tests {
     async fn test_null_historian_accepts_actions() {
         let mut historian = NullHistorian;
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .build()
             .unwrap();
         let action = Action::GameStart(GameStartPayload {
-            ante: 0.0,
-            small_blind: 5.0,
-            big_blind: 10.0,
+            ante: 0,
+            small_blind: 5,
+            big_blind: 10,
         });
 
         let result = historian.record_action(123, &game_state, &action).await;

@@ -121,7 +121,7 @@ impl ComparisonResult {
         output.push_str("## Rankings (by Profit per Game)\n\n");
         let rankings = self.get_rankings();
         for (rank, (agent_name, stats)) in rankings.iter().enumerate() {
-            let profit_bb = stats.profit_per_game / self.config.big_blind;
+            let profit_bb = stats.profit_per_game / self.config.big_blind as f32;
             output.push_str(&format!(
                 "{}. **{}**: {:+.2} bb/game (ROI: {:+.1}%)\n",
                 rank + 1,
@@ -144,7 +144,7 @@ impl ComparisonResult {
             output.push_str(&format!(
                 "| Total Profit | {:+.2} chips ({:+.2} bb) |\n",
                 stats.total_profit,
-                stats.total_profit / self.config.big_blind
+                stats.total_profit as f32 / self.config.big_blind as f32
             ));
             output.push_str(&format!("| Games Played | {} |\n", stats.total_games));
             output.push_str(&format!(
@@ -176,11 +176,11 @@ impl ComparisonResult {
             ));
             output.push_str(&format!(
                 "| Profit/Game | {:+.2} bb |\n",
-                stats.profit_per_game / self.config.big_blind
+                stats.profit_per_game / self.config.big_blind as f32
             ));
             output.push_str(&format!(
                 "| Profit/100 Hands | {:+.2} bb |\n",
-                stats.profit_per_100_hands / self.config.big_blind
+                stats.profit_per_100_hands / self.config.big_blind as f32
             ));
             output.push_str(&format!("| ROI | {:+.1}% |\n", stats.roi_percent));
             output.push('\n');
@@ -250,7 +250,7 @@ impl ComparisonResult {
                     output.push_str(&format!(
                         "| Seat {} | {:+.2} bb | {} |\n",
                         pos_stat.seat_index,
-                        pos_stat.profit_per_game / self.config.big_blind,
+                        pos_stat.profit_per_game / self.config.big_blind as f32,
                         pos_stat.games_played
                     ));
                 }
@@ -290,9 +290,10 @@ impl ComparisonResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Chips;
     use crate::arena::comparison::stats::PositionStats;
 
-    fn create_test_agent_stats(name: &str, profit: f32) -> AgentStats {
+    fn create_test_agent_stats(name: &str, profit: Chips) -> AgentStats {
         AgentStats {
             agent_name: name.to_string(),
             total_profit: profit,
@@ -300,14 +301,14 @@ mod tests {
             wins: 50,
             losses: 40,
             breakeven: 10,
-            profit_per_game: profit / 100.0,
-            profit_per_100_hands: profit,
-            roi_percent: profit / 100.0,
+            profit_per_game: profit as f32 / 100.0,
+            profit_per_100_hands: profit as f32,
+            roi_percent: profit as f32 / 100.0,
             position_stats: vec![PositionStats {
                 seat_index: 0,
                 games_played: 100,
                 profit,
-                profit_per_game: profit / 100.0,
+                profit_per_game: profit as f32 / 100.0,
             }],
             vpip_percent: 25.0,
             pfr_percent: 15.0,
@@ -331,18 +332,9 @@ mod tests {
     #[test]
     fn test_get_rankings() {
         let mut agent_stats = HashMap::new();
-        agent_stats.insert(
-            "Agent1".to_string(),
-            create_test_agent_stats("Agent1", 100.0),
-        );
-        agent_stats.insert(
-            "Agent2".to_string(),
-            create_test_agent_stats("Agent2", -50.0),
-        );
-        agent_stats.insert(
-            "Agent3".to_string(),
-            create_test_agent_stats("Agent3", 200.0),
-        );
+        agent_stats.insert("Agent1".to_string(), create_test_agent_stats("Agent1", 100));
+        agent_stats.insert("Agent2".to_string(), create_test_agent_stats("Agent2", -50));
+        agent_stats.insert("Agent3".to_string(), create_test_agent_stats("Agent3", 200));
 
         let result = ComparisonResult::new(
             vec![
@@ -382,7 +374,7 @@ mod tests {
         let mut agent_stats = HashMap::new();
         agent_stats.insert(
             "TestAgent".to_string(),
-            create_test_agent_stats("TestAgent", 100.0),
+            create_test_agent_stats("TestAgent", 100),
         );
 
         let result = ComparisonResult::new(
@@ -408,7 +400,7 @@ mod tests {
         let mut agent_stats = HashMap::new();
         agent_stats.insert(
             "TestAgent".to_string(),
-            create_test_agent_stats("TestAgent", 100.0),
+            create_test_agent_stats("TestAgent", 100),
         );
 
         let result = ComparisonResult::new(
@@ -433,7 +425,7 @@ mod tests {
         let mut agent_stats = HashMap::new();
         agent_stats.insert(
             "TestAgent".to_string(),
-            create_test_agent_stats("TestAgent", 100.0),
+            create_test_agent_stats("TestAgent", 100),
         );
 
         let result = ComparisonResult::new(
@@ -468,7 +460,7 @@ mod tests {
     #[test]
     fn test_markdown_roi_format() {
         let mut agent_stats = HashMap::new();
-        let mut stats = create_test_agent_stats("Winner", 500.0);
+        let mut stats = create_test_agent_stats("Winner", 500);
         stats.roi_percent = 25.5;
         agent_stats.insert("Winner".to_string(), stats);
 
@@ -487,16 +479,13 @@ mod tests {
     #[test]
     fn test_markdown_negative_profit() {
         let mut agent_stats = HashMap::new();
-        agent_stats.insert(
-            "Loser".to_string(),
-            create_test_agent_stats("Loser", -200.0),
-        );
+        agent_stats.insert("Loser".to_string(), create_test_agent_stats("Loser", -200));
 
         let result = ComparisonResult::new(
             vec!["Loser".to_string()],
             agent_stats,
             ComparisonConfig {
-                big_blind: 10.0,
+                big_blind: 10,
                 ..Default::default()
             },
             10,
@@ -510,10 +499,7 @@ mod tests {
     #[test]
     fn test_accessor_methods() {
         let mut agent_stats = HashMap::new();
-        agent_stats.insert(
-            "Agent1".to_string(),
-            create_test_agent_stats("Agent1", 100.0),
-        );
+        agent_stats.insert("Agent1".to_string(), create_test_agent_stats("Agent1", 100));
 
         let config = ComparisonConfig {
             num_games: 50,

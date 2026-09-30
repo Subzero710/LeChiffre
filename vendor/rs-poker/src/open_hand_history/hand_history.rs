@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use crate::core::Card;
 use crate::open_hand_history::serde_utils::{empty_string_is_none, iso8601};
+use crate::{Chips, core::Card};
 use chrono::{DateTime, Utc};
 
 #[allow(clippy::enum_variant_names)]
@@ -41,7 +41,8 @@ pub struct SpeedObj {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TournamentBountyObj {
     pub player_id: u64,
-    pub bounty_won: f32,
+    #[serde(with = "crate::open_hand_history::amount")]
+    pub bounty_won: Chips,
     pub defeated_player_id: u64,
 }
 
@@ -109,13 +110,17 @@ pub struct TournamentInfoObj {
     #[serde(with = "iso8601")]
     pub start_date_utc: Option<DateTime<Utc>>,
     pub currency: String,
-    pub buyin_amount: f32,
-    pub fee_amount: f32,
-    pub bounty_fee_amount: f32,
+    #[serde(with = "crate::open_hand_history::amount")]
+    pub buyin_amount: Chips,
+    #[serde(with = "crate::open_hand_history::amount")]
+    pub fee_amount: Chips,
+    #[serde(with = "crate::open_hand_history::amount")]
+    pub bounty_fee_amount: Chips,
     pub initial_stack: u64,
     #[serde(rename = "type")]
     pub tournament_type: TournamentType,
     #[serde(
+        default,
         deserialize_with = "empty_string_is_none",
         skip_serializing_if = "Option::is_none"
     )]
@@ -126,25 +131,33 @@ pub struct TournamentInfoObj {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlayerWinsObj {
     pub player_id: u64,
-    pub win_amount: f32,
+    #[serde(with = "crate::open_hand_history::amount")]
+    pub win_amount: Chips,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cashout_amount: Option<f32>,
+    #[serde(default, with = "crate::open_hand_history::amount::optional")]
+    pub cashout_amount: Option<Chips>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cashout_fee: Option<f32>,
+    #[serde(default, with = "crate::open_hand_history::amount::optional")]
+    pub cashout_fee: Option<Chips>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bonus_amount: Option<f32>,
+    #[serde(default, with = "crate::open_hand_history::amount::optional")]
+    pub bonus_amount: Option<Chips>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub contributed_rake: Option<f32>,
+    #[serde(default, with = "crate::open_hand_history::amount::optional")]
+    pub contributed_rake: Option<Chips>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PotObj {
     pub number: u64,
-    pub amount: f32,
+    #[serde(with = "crate::open_hand_history::amount")]
+    pub amount: Chips,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub rake: Option<f32>,
+    #[serde(default, with = "crate::open_hand_history::amount::optional")]
+    pub rake: Option<Chips>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub jackpot: Option<f32>,
+    #[serde(default, with = "crate::open_hand_history::amount::optional")]
+    pub jackpot: Option<Chips>,
     pub player_wins: Vec<PlayerWinsObj>,
 }
 
@@ -206,12 +219,13 @@ pub enum Action {
     AddedToPot,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ActionObj {
     pub action_number: u64,
     pub player_id: u64,
     pub action: Action,
-    pub amount: f32,
+    #[serde(with = "crate::open_hand_history::amount")]
+    pub amount: Chips,
     pub is_allin: bool,
     #[serde(
         default,
@@ -219,6 +233,54 @@ pub struct ActionObj {
         skip_serializing_if = "Option::is_none"
     )]
     pub cards: Option<Vec<Card>>,
+}
+
+impl<'de> Deserialize<'de> for ActionObj {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Wire {
+            action_number: u64,
+            player_id: u64,
+            action: Action,
+            #[serde(default, with = "crate::open_hand_history::amount::optional")]
+            amount: Option<Chips>,
+            is_allin: bool,
+            #[serde(default, deserialize_with = "empty_string_is_none")]
+            cards: Option<Vec<Card>>,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        // The OHH specification permits omitted/null amounts only for actions
+        // that do not transfer chips. Required currency never defaults to zero.
+        let amount = match wire.amount {
+            Some(amount) => amount,
+            None if matches!(
+                wire.action,
+                Action::Fold
+                    | Action::Check
+                    | Action::DealtCards
+                    | Action::ShowsCards
+                    | Action::MucksCards
+                    | Action::SitsDown
+                    | Action::StandsUp
+            ) =>
+            {
+                0
+            }
+            None => {
+                return Err(serde::de::Error::custom(
+                    "monetary OHH action requires an amount",
+                ));
+            }
+        };
+        Ok(Self {
+            action_number: wire.action_number,
+            player_id: wire.player_id,
+            action: wire.action,
+            amount,
+            is_allin: wire.is_allin,
+            cards: wire.cards,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -241,9 +303,11 @@ pub struct PlayerObj {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display: Option<String>,
-    pub starting_stack: f32,
+    #[serde(with = "crate::open_hand_history::amount")]
+    pub starting_stack: Chips,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub player_bounty: Option<f32>,
+    #[serde(default, with = "crate::open_hand_history::amount::optional")]
+    pub player_bounty: Option<Chips>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_sitting_out: Option<bool>,
 }
@@ -262,7 +326,8 @@ pub enum BetType {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BetLimitObj {
     pub bet_type: BetType,
-    pub bet_cap: f32,
+    #[serde(with = "crate::open_hand_history::amount")]
+    pub bet_cap: Chips,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -290,45 +355,209 @@ pub enum HandFlag {
     Cap,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct HandHistory {
     // Current version is 1.4.7
     pub spec_version: String,
     pub site_name: String,
     pub network_name: String,
     pub internal_version: String,
-    #[serde(default)]
     pub tournament: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tournament_info: Option<TournamentInfoObj>,
     pub game_number: String,
-    #[serde(with = "iso8601")]
     pub start_date_utc: Option<DateTime<Utc>>,
     pub table_name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub table_handle: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub table_skin: Option<String>,
     pub game_type: GameType,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub bet_limit: Option<BetLimitObj>,
     pub table_size: u64,
     pub currency: String,
     pub dealer_seat: u64,
-    pub small_blind_amount: f32,
-    pub big_blind_amount: f32,
-    pub ante_amount: f32,
+    pub small_blind_amount: Chips,
+    pub big_blind_amount: Chips,
+    pub ante_amount: Chips,
 
     // Which player is the hero and being followed
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub hero_player_id: Option<u64>,
-    // #[serde(deserialize_with = "empty_string_is_none")]
-    // pub flags: Option<Vec<HandFlag>>,
     pub players: Vec<PlayerObj>,
     pub rounds: Vec<RoundObj>,
     pub pots: Vec<PotObj>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tournament_bounties: Option<Vec<TournamentBountyObj>>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct HandHistoryWire {
+    spec_version: String,
+    site_name: String,
+    network_name: String,
+    internal_version: String,
+    #[serde(default)]
+    tournament: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tournament_info: Option<TournamentInfoObj>,
+    game_number: String,
+    #[serde(with = "iso8601")]
+    start_date_utc: Option<DateTime<Utc>>,
+    table_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    table_handle: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    table_skin: Option<String>,
+    game_type: GameType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bet_limit: Option<BetLimitObj>,
+    table_size: u64,
+    currency: String,
+    dealer_seat: u64,
+    #[serde(with = "crate::open_hand_history::amount")]
+    small_blind_amount: Chips,
+    #[serde(with = "crate::open_hand_history::amount")]
+    big_blind_amount: Chips,
+    #[serde(with = "crate::open_hand_history::amount")]
+    ante_amount: Chips,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hero_player_id: Option<u64>,
+    players: Vec<PlayerObj>,
+    rounds: Vec<RoundObj>,
+    pots: Vec<PotObj>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tournament_bounties: Option<Vec<TournamentBountyObj>>,
+}
+
+impl From<HandHistoryWire> for HandHistory {
+    fn from(wire: HandHistoryWire) -> Self {
+        Self {
+            spec_version: wire.spec_version,
+            site_name: wire.site_name,
+            network_name: wire.network_name,
+            internal_version: wire.internal_version,
+            tournament: wire.tournament,
+            tournament_info: wire.tournament_info,
+            game_number: wire.game_number,
+            start_date_utc: wire.start_date_utc,
+            table_name: wire.table_name,
+            table_handle: wire.table_handle,
+            table_skin: wire.table_skin,
+            game_type: wire.game_type,
+            bet_limit: wire.bet_limit,
+            table_size: wire.table_size,
+            currency: wire.currency,
+            dealer_seat: wire.dealer_seat,
+            small_blind_amount: wire.small_blind_amount,
+            big_blind_amount: wire.big_blind_amount,
+            ante_amount: wire.ante_amount,
+            hero_player_id: wire.hero_player_id,
+            players: wire.players,
+            rounds: wire.rounds,
+            pots: wire.pots,
+            tournament_bounties: wire.tournament_bounties,
+        }
+    }
+}
+
+impl From<HandHistory> for HandHistoryWire {
+    fn from(hand: HandHistory) -> Self {
+        Self {
+            spec_version: hand.spec_version,
+            site_name: hand.site_name,
+            network_name: hand.network_name,
+            internal_version: hand.internal_version,
+            tournament: hand.tournament,
+            tournament_info: hand.tournament_info,
+            game_number: hand.game_number,
+            start_date_utc: hand.start_date_utc,
+            table_name: hand.table_name,
+            table_handle: hand.table_handle,
+            table_skin: hand.table_skin,
+            game_type: hand.game_type,
+            bet_limit: hand.bet_limit,
+            table_size: hand.table_size,
+            currency: hand.currency,
+            dealer_seat: hand.dealer_seat,
+            small_blind_amount: hand.small_blind_amount,
+            big_blind_amount: hand.big_blind_amount,
+            ante_amount: hand.ante_amount,
+            hero_player_id: hand.hero_player_id,
+            players: hand.players,
+            rounds: hand.rounds,
+            pots: hand.pots,
+            tournament_bounties: hand.tournament_bounties,
+        }
+    }
+}
+
+fn map_tournament_table_amounts(
+    hand: &mut HandHistory,
+    mut map: impl FnMut(Chips) -> Result<Chips, String>,
+) -> Result<(), String> {
+    if !(hand.tournament || hand.tournament_info.is_some()) {
+        return Ok(());
+    }
+
+    hand.small_blind_amount = map(hand.small_blind_amount)?;
+    hand.big_blind_amount = map(hand.big_blind_amount)?;
+    hand.ante_amount = map(hand.ante_amount)?;
+    if let Some(limit) = &mut hand.bet_limit {
+        limit.bet_cap = map(limit.bet_cap)?;
+    }
+    for player in &mut hand.players {
+        player.starting_stack = map(player.starting_stack)?;
+    }
+    for round in &mut hand.rounds {
+        for action in &mut round.actions {
+            action.amount = map(action.amount)?;
+        }
+    }
+    for pot in &mut hand.pots {
+        pot.amount = map(pot.amount)?;
+        if let Some(rake) = &mut pot.rake {
+            *rake = map(*rake)?;
+        }
+        if let Some(jackpot) = &mut pot.jackpot {
+            *jackpot = map(*jackpot)?;
+        }
+        for win in &mut pot.player_wins {
+            win.win_amount = map(win.win_amount)?;
+            if let Some(contributed_rake) = &mut win.contributed_rake {
+                *contributed_rake = map(*contributed_rake)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+impl Serialize for HandHistory {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut hand = self.clone();
+        map_tournament_table_amounts(&mut hand, |value| {
+            value
+                .checked_mul(100)
+                .ok_or_else(|| "tournament chip amount overflows OHH wire scaling".to_string())
+        })
+        .map_err(serde::ser::Error::custom)?;
+        HandHistoryWire::from(hand).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for HandHistory {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = HandHistoryWire::deserialize(deserializer)?;
+        let mut hand = HandHistory::from(wire);
+        if hand.tournament_info.is_some() {
+            // Older OHH examples can imply tournament mode solely through
+            // tournament_info, without an explicit tournament=true field.
+            hand.tournament = true;
+        }
+        map_tournament_table_amounts(&mut hand, |value| {
+            if value % 100 != 0 {
+                return Err("tournament table amount contains a fractional chip".to_string());
+            }
+            Ok(value / 100)
+        })
+        .map_err(serde::de::Error::custom)?;
+        Ok(hand)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -542,8 +771,8 @@ mod tests {
 
         let parsed: OpenHandHistoryWrapper = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.ohh.spec_version, "1.2.2");
-        assert_eq!(parsed.ohh.small_blind_amount, 0.01);
-        assert_eq!(parsed.ohh.big_blind_amount, 0.02);
+        assert_eq!(parsed.ohh.small_blind_amount, 1);
+        assert_eq!(parsed.ohh.big_blind_amount, 2);
     }
 
     #[test]
@@ -725,11 +954,27 @@ mod tests {
 
         let parsed: OpenHandHistoryWrapper = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.ohh.site_name, "PokerStars");
+        assert!(parsed.ohh.tournament);
+        assert_eq!(parsed.ohh.small_blind_amount, 10);
+        assert_eq!(parsed.ohh.big_blind_amount, 20);
+        assert_eq!(parsed.ohh.players[0].starting_stack, 500);
+        assert_eq!(parsed.ohh.rounds[0].actions[0].amount, 10);
+        assert_eq!(parsed.ohh.pots[0].amount, 40);
 
         assert_eq!(
             parsed.ohh.tournament_info.as_ref().unwrap().tournament_type,
             TournamentType::SingleTableTournament
         );
+        assert_eq!(
+            parsed.ohh.tournament_info.as_ref().unwrap().buyin_amount,
+            23
+        );
+
+        let encoded = serde_json::to_string(&parsed).unwrap();
+        assert!(encoded.contains("\"big_blind_amount\":20.00"));
+        assert!(encoded.contains("\"starting_stack\":500.00"));
+        let reparsed: OpenHandHistoryWrapper = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(reparsed, parsed);
     }
 
     #[test]
@@ -1072,5 +1317,30 @@ mod tests {
 
         assert_eq!(parsed.ohh.site_name, "Pacific Poker");
         assert_eq!(parsed.ohh.network_name, "888 Poker");
+    }
+}
+
+#[cfg(test)]
+mod action_amount_tests {
+    use super::*;
+    #[test]
+    fn optional_nonmonetary_amounts_follow_ohh_specification() {
+        for token in [
+            r#"{"action_number":0,"player_id":1,"action":"Check","is_allin":false}"#,
+            r#"{"action_number":0,"player_id":1,"action":"Fold","amount":null,"is_allin":false}"#,
+        ] {
+            assert_eq!(serde_json::from_str::<ActionObj>(token).unwrap().amount, 0);
+        }
+        for amount in ["null", "0.001"] {
+            let json = format!(
+                r#"{{"action_number":0,"player_id":1,"action":"Call","amount":{amount},"is_allin":false}}"#
+            );
+            assert!(serde_json::from_str::<ActionObj>(&json).is_err());
+        }
+        let action: ActionObj = serde_json::from_str(
+            r#"{"action_number":0,"player_id":1,"action":"Call","amount":0.01,"is_allin":false}"#,
+        )
+        .unwrap();
+        assert_eq!(action.amount, 1);
     }
 }

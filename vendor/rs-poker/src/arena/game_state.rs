@@ -1,7 +1,7 @@
+use crate::arena::Chips;
 use core::fmt;
 use std::fmt::Display;
 
-use approx::abs_diff_eq;
 use rand::rng;
 use thiserror::Error;
 
@@ -30,6 +30,15 @@ pub enum GameStateBuilderError {
     #[error("stacks are required")]
     MissingStacks,
 
+    #[error(transparent)]
+    InvalidRake(#[from] super::rake::RakeConfigError),
+
+    #[error("monetary total exceeds the Chips range")]
+    MoneyOverflow,
+
+    #[error("negative player bet at index {0}")]
+    InvalidPlayerBet(usize),
+
     #[error("big_blind is required")]
     MissingBigBlind,
 
@@ -43,16 +52,16 @@ pub enum GameStateBuilderError {
     },
 
     #[error("big_blind must be positive, got {0}")]
-    InvalidBigBlind(f32),
+    InvalidBigBlind(Chips),
 
     #[error("small_blind must be non-negative, got {0}")]
-    InvalidSmallBlind(f32),
+    InvalidSmallBlind(Chips),
 
     #[error("ante must be non-negative, got {0}")]
-    InvalidAnte(f32),
+    InvalidAnte(Chips),
 
     #[error("stack at index {index} must be non-negative, got {value}")]
-    InvalidStack { index: usize, value: f32 },
+    InvalidStack { index: usize, value: Chips },
 
     #[error("at least 2 players must have positive stacks")]
     InsufficientActivePlayers,
@@ -81,34 +90,34 @@ pub enum GameStateBuilderError {
 /// use rs_poker::arena::GameStateBuilder;
 ///
 /// let game_state = GameStateBuilder::new()
-///     .stacks(vec![100.0, 100.0])
-///     .big_blind(10.0)
+///     .stacks(vec![100, 100])
+///     .big_blind(10)
 ///     .build()
 ///     .unwrap();
 ///
 /// assert_eq!(game_state.num_players, 2);
-/// assert_eq!(game_state.big_blind, 10.0);
-/// assert_eq!(game_state.small_blind, 5.0); // defaults to big_blind / 2
+/// assert_eq!(game_state.big_blind, 10);
+/// assert_eq!(game_state.small_blind, 5); // defaults to big_blind / 2
 /// ```
 #[derive(Default, Clone)]
 pub struct GameStateBuilder {
     // Required (no defaults)
-    stacks: Option<PlayerVec<f32>>,
-    big_blind: Option<f32>,
+    stacks: Option<PlayerVec<Chips>>,
+    big_blind: Option<Chips>,
 
     // Optional with defaults
-    small_blind: Option<f32>,                 // Default: big_blind / 2
-    ante: Option<f32>,                        // Default: 0.0
+    small_blind: Option<Chips>,               // Default: big_blind / 2
+    ante: Option<Chips>,                      // Default: 0
     dealer_idx: Option<usize>,                // Default: 0
     max_raises_per_round: Option<Option<u8>>, // Default: Some(3)
-    rake: Option<RakeConfig>,                  // Default: no rake
+    rake: Option<RakeConfig>,                 // Default: no rake
 
     // For mid-game states (defaults for new games)
-    round: Option<Round>,               // Default: Round::Starting
-    board: Option<BoardVec>,            // Default: empty
-    hands: Option<PlayerVec<Hand>>,     // Default: Hand::default() per player
-    player_bet: Option<PlayerVec<f32>>, // Default: 0.0 per player
-    round_data: Option<RoundData>,      // Default: computed
+    round: Option<Round>,                 // Default: Round::Starting
+    board: Option<BoardVec>,              // Default: empty
+    hands: Option<PlayerVec<Hand>>,       // Default: Hand::default() per player
+    player_bet: Option<PlayerVec<Chips>>, // Default: 0 per player
+    round_data: Option<RoundData>,        // Default: computed
 }
 
 impl GameStateBuilder {
@@ -119,28 +128,28 @@ impl GameStateBuilder {
 
     /// Set the stack sizes for each player. Required.
     ///
-    /// Accepts any slice-like source (`&[f32]`, `[f32; N]`, `Vec<f32>`); the
+    /// Accepts any slice-like source (`&[Chips]`, `[Chips; N]`, `Vec<Chips>`); the
     /// values are copied straight into inline storage, so callers never need to
     /// heap-allocate a `Vec` just to hand it over.
-    pub fn stacks(mut self, stacks: impl AsRef<[f32]>) -> Self {
+    pub fn stacks(mut self, stacks: impl AsRef<[Chips]>) -> Self {
         self.stacks = Some(SmallVec::from_slice(stacks.as_ref()));
         self
     }
 
     /// Set the big blind size. Required.
-    pub fn big_blind(mut self, bb: f32) -> Self {
+    pub fn big_blind(mut self, bb: Chips) -> Self {
         self.big_blind = Some(bb);
         self
     }
 
     /// Set the small blind size. Defaults to `big_blind / 2`.
-    pub fn small_blind(mut self, sb: f32) -> Self {
+    pub fn small_blind(mut self, sb: Chips) -> Self {
         self.small_blind = Some(sb);
         self
     }
 
-    /// Set the ante size. Defaults to `0.0`.
-    pub fn ante(mut self, ante: f32) -> Self {
+    /// Set the ante size. Defaults to `0`.
+    pub fn ante(mut self, ante: Chips) -> Self {
         self.ante = Some(ante);
         self
     }
@@ -168,13 +177,13 @@ impl GameStateBuilder {
     }
 
     /// Convenience method to create stacks with `n` players, each with `stack` chips.
-    pub fn num_players_with_stack(mut self, n: usize, stack: f32) -> Self {
+    pub fn num_players_with_stack(mut self, n: usize, stack: Chips) -> Self {
         self.stacks = Some(smallvec![stack; n]);
         self
     }
 
     /// Convenience method to set both big and small blinds at once.
-    pub fn blinds(mut self, big: f32, small: f32) -> Self {
+    pub fn blinds(mut self, big: Chips, small: Chips) -> Self {
         self.big_blind = Some(big);
         self.small_blind = Some(small);
         self
@@ -199,7 +208,7 @@ impl GameStateBuilder {
     }
 
     /// Set the player bets.
-    pub fn player_bet(mut self, bets: impl AsRef<[f32]>) -> Self {
+    pub fn player_bet(mut self, bets: impl AsRef<[Chips]>) -> Self {
         self.player_bet = Some(SmallVec::from_slice(bets.as_ref()));
         self
     }
@@ -228,19 +237,19 @@ impl GameStateBuilder {
         }
 
         // Validate big blind
-        if big_blind <= 0.0 || big_blind.is_nan() {
+        if big_blind <= 0 {
             return Err(GameStateBuilderError::InvalidBigBlind(big_blind));
         }
 
         // Set defaults and validate small blind
-        let small_blind = self.small_blind.unwrap_or(big_blind / 2.0);
-        if small_blind < 0.0 || small_blind.is_nan() {
+        let small_blind = self.small_blind.unwrap_or(big_blind / 2);
+        if small_blind < 0 {
             return Err(GameStateBuilderError::InvalidSmallBlind(small_blind));
         }
 
         // Validate ante
-        let ante = self.ante.unwrap_or(0.0);
-        if ante < 0.0 || ante.is_nan() {
+        let ante = self.ante.unwrap_or(0);
+        if ante < 0 {
             return Err(GameStateBuilderError::InvalidAnte(ante));
         }
 
@@ -249,15 +258,15 @@ impl GameStateBuilder {
         let player_bet_ref = self.player_bet.as_deref();
         let mut active_count = 0;
         for (index, &value) in stacks.iter().enumerate() {
-            if value < 0.0 || value.is_nan() {
+            if value < 0 {
                 return Err(GameStateBuilderError::InvalidStack { index, value });
             }
             // A player is "active" if they have chips OR if they're all-in
             // (0 stack but has bet in a non-Starting round)
             let bet = player_bet_ref
                 .and_then(|bets| bets.get(index).copied())
-                .unwrap_or(0.0);
-            if value > 0.0 || (bet > 0.0 && round != Round::Starting) {
+                .unwrap_or(0);
+            if value > 0 || (bet > 0 && round != Round::Starting) {
                 active_count += 1;
             }
         }
@@ -319,13 +328,13 @@ impl GameStateBuilder {
             .unwrap_or_else(|| smallvec![Hand::default(); num_players]);
 
         // Build defaults (round was already computed during validation)
-        let player_bet = self
-            .player_bet
-            .unwrap_or_else(|| smallvec![0.0; num_players]);
+        let player_bet = self.player_bet.unwrap_or_else(|| smallvec![0; num_players]);
         let max_raises_per_round = self.max_raises_per_round.unwrap_or(Some(3));
         let rake = self.rake.unwrap_or_default();
+        rake.validate()
+            .map_err(GameStateBuilderError::InvalidRake)?;
 
-        let round_data = self.round_data.unwrap_or_else(|| {
+        let mut round_data = self.round_data.unwrap_or_else(|| {
             RoundData::new(
                 num_players,
                 big_blind,
@@ -337,15 +346,25 @@ impl GameStateBuilder {
         // Compute player_active, player_all_in, and total_pot
         let mut player_active = PlayerBitSet::new(num_players);
         let mut player_all_in = PlayerBitSet::default();
-        let mut total_pot = 0.0;
+        let mut total_pot: Chips = 0;
+        let ledger_total = stacks
+            .iter()
+            .try_fold(0_i64, |acc, &stack| acc.checked_add(stack))
+            .ok_or(GameStateBuilderError::MoneyOverflow)?;
 
         for (idx, (stack, bet)) in stacks.iter().zip(player_bet.iter()).enumerate() {
-            total_pot += *bet;
+            if *bet < 0 {
+                return Err(GameStateBuilderError::InvalidPlayerBet(idx));
+            }
+            total_pot = total_pot
+                .checked_add(*bet)
+                .ok_or(GameStateBuilderError::MoneyOverflow)?;
 
-            if *stack <= 0.0 {
-                if *bet > 0.0 && round != Round::Starting {
+            if *stack <= 0 {
+                if *bet > 0 && round != Round::Starting {
                     // Player is out of money but has bet - they're all in
                     player_all_in.enable(idx);
+                    player_active.disable(idx);
                 } else {
                     // Player has no money and can't play - sitting out
                     player_active.disable(idx);
@@ -353,12 +372,20 @@ impl GameStateBuilder {
             }
         }
 
+        ledger_total
+            .checked_add(total_pot)
+            .ok_or(GameStateBuilderError::MoneyOverflow)?;
+        round_data.needs_action = round_data.needs_action & player_active;
         Ok(GameState {
             num_players,
             // All vector fields are already inline (the builder copied them into
             // SmallVec storage when set), so the hot path — cloning a GameState
             // per CFR sample — never touches the heap.
-            starting_stacks: stacks.clone(),
+            starting_stacks: stacks
+                .iter()
+                .zip(player_bet.iter())
+                .map(|(&stack, &bet)| stack + bet)
+                .collect(),
             stacks,
             big_blind,
             small_blind,
@@ -366,7 +393,7 @@ impl GameStateBuilder {
             player_active,
             player_all_in,
             player_bet,
-            player_winnings: smallvec![0.0; num_players],
+            player_winnings: smallvec![0; num_players],
             dealer_idx,
             total_pot,
             hands,
@@ -378,7 +405,7 @@ impl GameStateBuilder {
             sb_posted: round != Round::Starting,
             max_raises_per_round,
             rake,
-            rake_collected: 0.0,
+            rake_collected: 0,
         })
     }
 }
@@ -458,11 +485,13 @@ pub struct RoundData {
     pub starting_player_active: PlayerBitSet,
     pub needs_action: PlayerBitSet,
     // The minimum allowed raise.
-    pub min_raise: f32,
+    pub min_raise: Chips,
     // The value to be called.
-    pub bet: f32,
+    pub bet: Chips,
     // How much each player has put in so far.
-    pub player_bet: PlayerVec<f32>,
+    pub player_bet: PlayerVec<Chips>,
+    /// Bet level when this player last acted voluntarily; None means unacted.
+    pub acted_at_bet: PlayerVec<Option<Chips>>,
     // The number of times anyone has put in money
     pub total_bet_count: u8,
     // The number of times anyone has increased the bet non-forced.
@@ -474,13 +503,14 @@ pub struct RoundData {
 }
 
 impl RoundData {
-    pub fn new(num_players: usize, min_raise: f32, active: PlayerBitSet, to_act: usize) -> Self {
+    pub fn new(num_players: usize, min_raise: Chips, active: PlayerBitSet, to_act: usize) -> Self {
         RoundData {
             needs_action: active,
             starting_player_active: active,
             min_raise,
-            bet: 0.0,
-            player_bet: smallvec![0.0; num_players],
+            bet: 0,
+            player_bet: smallvec![0; num_players],
+            acted_at_bet: smallvec![None; num_players],
             total_bet_count: 0,
             total_raise_count: 0,
             forced_bet_count: 0,
@@ -513,39 +543,40 @@ impl RoundData {
     /// use rs_poker::core::PlayerBitSet;
     ///
     /// let num_players = 3;
-    /// let min_raise = 10.0;
+    /// let min_raise = 10;
     /// let active = PlayerBitSet::new(num_players);
     ///
-    /// let player_bet = vec![0.0, 10.0, 20.0];
+    /// let player_bet = vec![0, 10, 20];
     /// let to_act = 0;
     ///
     /// let round_data = RoundData::new_with_bets(min_raise, active, to_act, player_bet);
     ///
-    /// assert_eq!(round_data.bet, 20.0);
+    /// assert_eq!(round_data.bet, 20);
     ///
     /// assert_eq!(round_data.total_bet_count, 2);
     ///
     /// assert_eq!(round_data.total_raise_count, 2);
     /// ```
     pub fn new_with_bets(
-        min_raise: f32,
+        min_raise: Chips,
         active: PlayerBitSet,
         to_act: usize,
-        player_bet: impl Into<PlayerVec<f32>>,
+        player_bet: impl Into<PlayerVec<Chips>>,
     ) -> Self {
         // Accept any inline-vector source (slice, Vec, SmallVec) and move it
         // straight into the round data — no extra copy when the caller already
         // has a `PlayerVec`.
         let player_bet = player_bet.into();
-        let bet: f32 = player_bet.iter().fold(0.0, |acc, &x| acc.max(x));
+        let bet: Chips = player_bet.iter().fold(0, |acc, &x| acc.max(x));
 
-        let total_raise_count = player_bet.iter().filter(|&&x| x > 0.0).count() as u8;
+        let total_raise_count = player_bet.iter().filter(|&&x| x > 0).count() as u8;
 
         RoundData {
             needs_action: active,
             starting_player_active: active,
             min_raise,
             bet,
+            acted_at_bet: smallvec![None; player_bet.len()],
             player_bet,
             // bet_count,
             total_bet_count: total_raise_count,
@@ -569,7 +600,7 @@ impl RoundData {
         }
     }
 
-    pub fn do_bet(&mut self, extra_amount: f32, is_forced: bool) {
+    pub fn do_bet(&mut self, extra_amount: Chips, is_forced: bool) {
         self.player_bet[self.to_act_idx] += extra_amount;
         self.total_bet_count += 1;
 
@@ -602,7 +633,7 @@ impl RoundData {
         self.total_bet_count == self.forced_bet_count
     }
 
-    pub fn current_player_bet(&self) -> f32 {
+    pub fn current_player_bet(&self) -> Chips {
         self.player_bet[self.to_act_idx]
     }
 }
@@ -615,19 +646,19 @@ pub struct GameState {
     pub player_active: PlayerBitSet,
     pub player_all_in: PlayerBitSet,
     /// The total amount in all pots
-    pub total_pot: f32,
+    pub total_pot: Chips,
     /// How much is left in each player's stack
-    pub stacks: PlayerVec<f32>,
+    pub stacks: PlayerVec<Chips>,
     // The amount at the start of the game (or creation of the gamestate).
-    pub starting_stacks: PlayerVec<f32>,
-    pub player_bet: PlayerVec<f32>,
-    pub player_winnings: PlayerVec<f32>,
+    pub starting_stacks: PlayerVec<Chips>,
+    pub player_bet: PlayerVec<Chips>,
+    pub player_winnings: PlayerVec<Chips>,
     /// The big blind size
-    pub big_blind: f32,
+    pub big_blind: Chips,
     /// The small blind size
-    pub small_blind: f32,
+    pub small_blind: Chips,
     /// The ante size
-    pub ante: f32,
+    pub ante: Chips,
     /// The hands for each player. We keep hands
     /// even if the player is not currently active.
     pub hands: PlayerVec<Hand>,
@@ -654,7 +685,7 @@ pub struct GameState {
     /// Rake rules for this hand. Cloned together with the state for CFR.
     pub rake: RakeConfig,
     /// Rake already collected in this hand (shared cap accounting).
-    pub rake_collected: f32,
+    pub rake_collected: Chips,
 }
 
 impl GameState {
@@ -681,35 +712,35 @@ impl GameState {
         self.round_data.to_act_idx
     }
 
-    pub fn current_player_stack(&self) -> f32 {
-        *self.stacks.get(self.to_act_idx()).unwrap_or(&0.0)
+    pub fn current_player_stack(&self) -> Chips {
+        *self.stacks.get(self.to_act_idx()).unwrap_or(&0)
     }
 
-    pub fn current_player_starting_stack(&self) -> f32 {
-        *self.starting_stacks.get(self.to_act_idx()).unwrap_or(&0.0)
+    pub fn current_player_starting_stack(&self) -> Chips {
+        *self.starting_stacks.get(self.to_act_idx()).unwrap_or(&0)
     }
 
-    pub fn current_round_current_player_bet(&self) -> f32 {
+    pub fn current_round_current_player_bet(&self) -> Chips {
         *self
             .round_data
             .player_bet
             .get(self.to_act_idx())
-            .unwrap_or(&0.0)
+            .unwrap_or(&0)
     }
 
-    pub fn current_round_bet(&self) -> f32 {
+    pub fn current_round_bet(&self) -> Chips {
         self.round_data.bet
     }
 
-    pub fn current_round_player_bet(&self, idx: usize) -> f32 {
-        self.round_data.player_bet.get(idx).copied().unwrap_or(0.0)
+    pub fn current_round_player_bet(&self, idx: usize) -> Chips {
+        self.round_data.player_bet.get(idx).copied().unwrap_or(0)
     }
 
     pub fn current_round_num_active_players(&self) -> usize {
         self.round_data.num_players_need_action()
     }
 
-    pub fn current_round_min_raise(&self) -> f32 {
+    pub fn current_round_min_raise(&self) -> Chips {
         self.round_data.min_raise
     }
 
@@ -727,10 +758,17 @@ impl GameState {
 
         self.round = self.round.advance();
 
+        // An ante all-in still receives hole cards. Betting streets only
+        // ask players with chips to act.
+        let round_players = if self.round == Round::DealPreflop {
+            self.player_active | self.player_all_in
+        } else {
+            self.player_active
+        };
         let mut round_data = RoundData::new(
             self.num_players,
             self.big_blind,
-            self.player_active,
+            round_players,
             self.dealer_idx,
         );
         round_data.advance_action();
@@ -768,7 +806,7 @@ impl GameState {
         self.round_data.advance_action();
     }
 
-    pub fn do_bet(&mut self, amount: f32, is_forced: bool) -> Result<f32, GameStateError> {
+    pub fn do_bet(&mut self, amount: Chips, is_forced: bool) -> Result<Chips, GameStateError> {
         // Which player is next to act
         let idx = self.to_act_idx();
 
@@ -782,6 +820,9 @@ impl GameState {
         //
         // Make sure the bet is a correct amount and if not
         // then cap it at the maximum the player can bet (Their stacks usually)
+        if amount < 0 {
+            return Err(GameStateError::BetInvalidSize);
+        }
         let extra_amount = if is_forced {
             self.validate_forced_bet_amount(amount)
         } else {
@@ -808,13 +849,12 @@ impl GameState {
 
         // If they put money into the pot then they are done this turn.
         if !is_forced {
+            self.round_data.acted_at_bet[idx] = Some(self.round_data.bet);
             self.round_data.needs_action.disable(idx);
         }
 
         // We're out and can't continue
-        // Use epsilon comparison to handle floating-point precision issues
-        // (e.g., when stack is 1.19e-7 instead of exactly 0)
-        if abs_diff_eq!(self.stacks[idx], 0.0) {
+        if self.stacks[idx] == 0 {
             // Keep track of who's still active.
             self.player_active.disable(idx);
             // Keep track of going all in. We'll use that later on
@@ -831,32 +871,40 @@ impl GameState {
         Ok(extra_amount)
     }
 
-
     /// Compute the rake that would be taken from `pot_amount` without mutating
     /// the state. `flop_dealt` is explicit so CFR board-enumeration paths can
     /// evaluate a future showdown without materializing every board in the state.
-    pub fn rake_amount_for_pot(&self, pot_amount: f32, flop_dealt: bool) -> f32 {
+    pub fn rake_amount_for_pot(&self, pot_amount: Chips, flop_dealt: bool) -> Chips {
         self.rake
             .calculate(pot_amount, flop_dealt, self.rake_collected)
     }
 
     /// Return the amount of a pot left for players after rake, without mutating
     /// the state's cumulative rake counter.
-    pub fn net_pot_after_rake(&self, pot_amount: f32, flop_dealt: bool) -> f32 {
-        (pot_amount - self.rake_amount_for_pot(pot_amount, flop_dealt)).max(0.0)
+    pub fn net_pot_after_rake(&self, pot_amount: Chips, flop_dealt: bool) -> Chips {
+        (pot_amount - self.rake_amount_for_pot(pot_amount, flop_dealt)).max(0)
     }
 
     /// Take rake from a completed pot and advance this hand's cumulative rake.
-    pub fn take_rake(&mut self, pot_amount: f32) -> f32 {
+    pub fn take_rake(&mut self, pot_amount: Chips) -> Chips {
         let flop_dealt = self.board.len() >= 3;
         let rake = self.rake_amount_for_pot(pot_amount, flop_dealt);
         self.rake_collected += rake;
-        (pot_amount - rake).max(0.0)
+        (pot_amount - rake).max(0)
     }
 
-    pub fn award(&mut self, player_idx: usize, amount: f32) {
+    pub fn award(&mut self, player_idx: usize, amount: Chips) {
         self.stacks[player_idx] += amount;
         self.player_winnings[player_idx] += amount;
+    }
+
+    pub fn return_uncalled_bet(&mut self, idx: usize, amount: Chips) {
+        assert!(amount >= 0 && amount <= self.player_bet[idx]);
+        self.player_bet[idx] -= amount;
+        self.total_pot -= amount;
+        self.stacks[idx] += amount;
+        // At showdown, round data no longer contains the earlier street's bet.
+        self.round_data.player_bet[idx] = self.round_data.player_bet[idx].saturating_sub(amount);
     }
 
     /// Get the total reward for a player.
@@ -865,35 +913,26 @@ impl GameState {
     ///
     /// # Arguments
     /// * `player_idx` - The index of the player to get the reward for.
-    pub fn player_reward(&self, player_idx: usize) -> f32 {
+    pub fn player_reward(&self, player_idx: usize) -> Chips {
         // The reward is the change in stack from the start of the game
         // to the end of the game.
         self.stacks[player_idx] - self.starting_stacks[player_idx]
     }
 
-    fn validate_forced_bet_amount(&self, amount: f32) -> f32 {
+    fn validate_forced_bet_amount(&self, amount: Chips) -> Chips {
         // Which player is next to act. Map the optional into the to_act_index or 0.
         let idx = self.to_act_idx();
 
         self.stacks[idx].min(amount)
     }
 
-    fn validate_bet_amount(&self, amount: f32) -> Result<f32, GameStateError> {
+    pub fn validate_bet_amount(&self, amount: Chips) -> Result<Chips, GameStateError> {
         // Which player is next to act
         let idx = self.to_act_idx();
 
-        // Use a scaled epsilon for floating point comparisons.
-        // We scale by the magnitude of the values being compared to handle
-        // both small and large bet amounts correctly.
-        let magnitude = amount.abs().max(self.round_data.bet.abs()).max(1.0);
-        let epsilon = magnitude * f32::EPSILON * 1000.0; // Scale epsilon for practical tolerance
-
-        if amount.is_sign_negative() || amount.is_nan() {
-            // You can't bet negative numbers.
-            // You can't be a NaN.
+        if amount < 0 {
             Err(GameStateError::BetInvalidSize)
-        } else if self.round_data.player_bet[idx] > amount + epsilon {
-            // We've already bet more than this. No takes backs.
+        } else if self.round_data.player_bet[idx] > amount {
             Err(GameStateError::BetSizeDoesntCallSelf)
         } else {
             // How much extra are we putting in.
@@ -905,16 +944,18 @@ impl GameState {
             let capped_new_player_bet = self.round_data.player_bet[idx] + capped_extra;
             let current_bet = self.round_data.bet;
             // How much this is a raise.
-            let raise = (capped_new_player_bet - current_bet).max(0.0);
-            // Use relative epsilon for all-in check to handle floating point precision
-            let stack_epsilon = self.stacks[idx].abs().max(1.0) * f32::EPSILON * 1000.0;
-            let is_all_in = (capped_extra - self.stacks[idx]).abs() < stack_epsilon;
-            let is_raise = raise > epsilon;
-            // Use epsilon tolerance for call check to handle floating point precision
-            if capped_new_player_bet + epsilon < self.round_data.bet && !is_all_in {
+            let raise = (capped_new_player_bet - current_bet).max(0);
+            let is_all_in = capped_extra == self.stacks[idx];
+            let is_raise = raise > 0;
+            if is_raise
+                && self.round_data.acted_at_bet[idx]
+                    .is_some_and(|acted| current_bet - acted < self.round_data.min_raise)
+            {
+                Err(GameStateError::RaiseNotReopened)
+            } else if capped_new_player_bet < self.round_data.bet && !is_all_in {
                 // If we're not even calling and it's not an all in.
                 Err(GameStateError::BetSizeDoesntCall)
-            } else if is_raise && !is_all_in && raise + epsilon < self.round_data.min_raise {
+            } else if is_raise && !is_all_in && raise < self.round_data.min_raise {
                 // There's a raise the raise is less than the min bet and it's not an all in
                 Err(GameStateError::RaiseSizeTooSmall)
             } else {
@@ -953,11 +994,11 @@ impl Iterator for CloneGameStateGenerator {
 /// and random stack sizes. The dealer button is also randomly placed.
 pub struct RandomGameStateGenerator {
     num_players: usize,
-    min_stack: f32,
-    max_stack: f32,
-    big_blind: f32,
-    small_blind: f32,
-    ante: f32,
+    min_stack: Chips,
+    max_stack: Chips,
+    big_blind: Chips,
+    small_blind: Chips,
+    ante: Chips,
     /// Optional seeded RNG for deterministic generation
     seeded_rng: Option<rand::rngs::StdRng>,
 }
@@ -965,11 +1006,11 @@ pub struct RandomGameStateGenerator {
 impl RandomGameStateGenerator {
     pub fn new(
         num_players: usize,
-        min_stack: f32,
-        max_stack: f32,
-        big_blind: f32,
-        small_blind: f32,
-        ante: f32,
+        min_stack: Chips,
+        max_stack: Chips,
+        big_blind: Chips,
+        small_blind: Chips,
+        ante: Chips,
     ) -> RandomGameStateGenerator {
         RandomGameStateGenerator {
             num_players,
@@ -985,11 +1026,11 @@ impl RandomGameStateGenerator {
     /// Create a new generator with a specific seed for deterministic results
     pub fn with_seed(
         num_players: usize,
-        min_stack: f32,
-        max_stack: f32,
-        big_blind: f32,
-        small_blind: f32,
-        ante: f32,
+        min_stack: Chips,
+        max_stack: Chips,
+        big_blind: Chips,
+        small_blind: Chips,
+        ante: Chips,
         seed: u64,
     ) -> RandomGameStateGenerator {
         use rand::SeedableRng;
@@ -1013,7 +1054,7 @@ impl Iterator for RandomGameStateGenerator {
 
         // Use seeded RNG if available, otherwise use global RNG
         let (stacks, dealer_idx) = if let Some(ref mut seeded) = self.seeded_rng {
-            let stacks: Vec<f32> = (0..self.num_players)
+            let stacks: Vec<Chips> = (0..self.num_players)
                 .map(|_| {
                     if self.min_stack == self.max_stack {
                         self.min_stack
@@ -1026,7 +1067,7 @@ impl Iterator for RandomGameStateGenerator {
             (stacks, dealer_idx)
         } else {
             let mut unseeded = rng();
-            let stacks: Vec<f32> = (0..self.num_players)
+            let stacks: Vec<Chips> = (0..self.num_players)
                 .map(|_| {
                     if self.min_stack == self.max_stack {
                         self.min_stack
@@ -1058,10 +1099,10 @@ mod tests {
 
     /// Test helper to create a game state with standard defaults
     fn test_game_state(
-        stacks: Vec<f32>,
-        big_blind: f32,
-        small_blind: f32,
-        ante: f32,
+        stacks: Vec<Chips>,
+        big_blind: Chips,
+        small_blind: Chips,
+        ante: Chips,
         dealer_idx: usize,
     ) -> GameState {
         GameStateBuilder::new()
@@ -1076,8 +1117,8 @@ mod tests {
 
     #[test]
     fn test_fold_around_call() {
-        let stacks = vec![100.0; 4];
-        let mut game_state = test_game_state(stacks, 10.0, 5.0, 0.0, 1);
+        let stacks = vec![100; 4];
+        let mut game_state = test_game_state(stacks, 10, 5, 0, 1);
 
         // starting
         game_state.advance_round();
@@ -1092,8 +1133,8 @@ mod tests {
         assert_eq!(2, game_state.to_act_idx());
 
         // Do the blinds now
-        game_state.do_bet(5.0, true).unwrap();
-        game_state.do_bet(10.0, true).unwrap();
+        game_state.do_bet(5, true).unwrap();
+        game_state.do_bet(10, true).unwrap();
 
         // The blinds posting wraps around when needed
         assert_eq!(0, game_state.to_act_idx());
@@ -1102,8 +1143,8 @@ mod tests {
         game_state.fold();
         game_state.fold();
 
-        game_state.do_bet(10.0, false).unwrap();
-        game_state.do_bet(10.0, false).unwrap();
+        game_state.do_bet(10, false).unwrap();
+        game_state.do_bet(10, false).unwrap();
         assert_eq!(0, game_state.current_round_num_active_players());
         assert_eq!(2, game_state.num_active_players());
 
@@ -1113,9 +1154,9 @@ mod tests {
         // Flop
         game_state.advance_round();
         assert_eq!(2, game_state.to_act_idx());
-        game_state.do_bet(0.0, false).unwrap();
+        game_state.do_bet(0, false).unwrap();
         assert_eq!(3, game_state.to_act_idx());
-        game_state.do_bet(0.0, false).unwrap();
+        game_state.do_bet(0, false).unwrap();
         assert_eq!(0, game_state.current_round_num_active_players());
         assert_eq!(2, game_state.num_active_players());
 
@@ -1126,8 +1167,8 @@ mod tests {
         game_state.advance_round();
         assert_eq!(2, game_state.to_act_idx());
         assert_eq!(2, game_state.current_round_num_active_players());
-        game_state.do_bet(0.0, false).unwrap();
-        game_state.do_bet(0.0, false).unwrap();
+        game_state.do_bet(0, false).unwrap();
+        game_state.do_bet(0, false).unwrap();
         assert_eq!(0, game_state.current_round_num_active_players());
         assert_eq!(2, game_state.num_active_players());
 
@@ -1136,8 +1177,8 @@ mod tests {
 
         // River
         game_state.advance_round();
-        game_state.do_bet(0.0, false).unwrap();
-        game_state.do_bet(0.0, false).unwrap();
+        game_state.do_bet(0, false).unwrap();
+        game_state.do_bet(0, false).unwrap();
         assert_eq!(0, game_state.current_round_num_active_players());
         assert_eq!(2, game_state.num_active_players());
 
@@ -1147,55 +1188,55 @@ mod tests {
 
     #[test]
     fn test_cant_bet_less_0() {
-        let stacks = vec![100.0; 5];
-        let mut game_state = test_game_state(stacks, 2.0, 1.0, 0.0, 0);
+        let stacks = vec![100; 5];
+        let mut game_state = test_game_state(stacks, 2, 1, 0, 0);
         game_state.advance_round();
         game_state.advance_round();
 
-        game_state.do_bet(33.0, false).unwrap();
+        game_state.do_bet(33, false).unwrap();
         game_state.fold();
-        let res = game_state.do_bet(20.0, false);
+        let res = game_state.do_bet(20, false);
 
         assert_eq!(res.err(), Some(GameStateError::BetSizeDoesntCall));
     }
 
     #[test]
     fn test_cant_bet_less_with_all_in() {
-        let stacks = vec![100.0, 50.0, 50.0, 100.0, 10.0];
-        let mut game_state = test_game_state(stacks, 2.0, 1.0, 0.0, 0);
+        let stacks = vec![100, 50, 50, 100, 10];
+        let mut game_state = test_game_state(stacks, 2, 1, 0, 0);
         // Do the start and ante rounds and setup next to act
         game_state.advance_round();
         game_state.advance_round();
 
         // UTG raises to 10
-        game_state.do_bet(10.0, false).unwrap();
+        game_state.do_bet(10, false).unwrap();
 
         // UTG+1 has 10 remaining so betting 100 is overbetting
         // into an all in.
-        game_state.do_bet(100.0, false).unwrap();
+        game_state.do_bet(100, false).unwrap();
 
         // Dealer gets out of the way
         game_state.fold();
 
         // Small Blind raises to 20
-        game_state.do_bet(20.0, false).unwrap();
+        game_state.do_bet(20, false).unwrap();
 
         // Big Blind can't call the previous value.
-        let res = game_state.do_bet(10.0, false);
+        let res = game_state.do_bet(10, false);
         assert_eq!(res.err(), Some(GameStateError::BetSizeDoesntCall));
     }
 
     #[test]
     fn test_cant_under_minraise_bb() {
-        let stacks = vec![500.0; 5];
-        let mut game_state = test_game_state(stacks, 20.0, 10.0, 0.0, 0);
+        let stacks = vec![500; 5];
+        let mut game_state = test_game_state(stacks, 20, 10, 0, 0);
         // Do the start and ante rounds and setup next to act
         game_state.advance_round();
         game_state.advance_round();
         game_state.advance_round();
 
-        game_state.do_bet(10.0, true).unwrap();
-        game_state.do_bet(20.0, true).unwrap();
+        game_state.do_bet(10, true).unwrap();
+        game_state.do_bet(20, true).unwrap();
 
         // UTG raises to 33
         //
@@ -1204,14 +1245,14 @@ mod tests {
         // we're not able to raise 13
         assert_eq!(
             Err(GameStateError::RaiseSizeTooSmall),
-            game_state.do_bet(33.0, false)
+            game_state.do_bet(33, false)
         );
     }
 
     #[test]
     fn test_gamestate_keeps_round_before_complete() {
-        let stacks = vec![100.0; 3];
-        let mut game_state = test_game_state(stacks, 10.0, 5.0, 0.0, 0);
+        let stacks = vec![100; 3];
+        let mut game_state = test_game_state(stacks, 10, 5, 0, 0);
         // Simulate a game where everyone folds and the big blind wins
         game_state.advance_round();
         game_state.advance_round();
@@ -1226,12 +1267,12 @@ mod tests {
     #[test]
     fn test_can_create_starting_round_data() {
         let num_players = 3;
-        let min_raise = 10.0;
+        let min_raise = 10;
         let active = PlayerBitSet::new(num_players);
 
         let round_data = RoundData::new(num_players, min_raise, active, 0);
 
-        assert_eq!(round_data.bet, 0.0);
+        assert_eq!(round_data.bet, 0);
 
         assert_eq!(round_data.total_bet_count, 0);
 
@@ -1241,15 +1282,15 @@ mod tests {
     #[test]
     fn test_can_create_inprogress_round_data() {
         let num_players = 3;
-        let min_raise = 10.0;
+        let min_raise = 10;
         let active = PlayerBitSet::new(num_players);
 
-        let player_bet = vec![0.0, 10.0, 20.0];
+        let player_bet = vec![0, 10, 20];
         let to_act = 0;
 
         let round_data = RoundData::new_with_bets(min_raise, active, to_act, player_bet);
 
-        assert_eq!(round_data.bet, 20.0);
+        assert_eq!(round_data.bet, 20);
 
         assert_eq!(round_data.total_bet_count, 2);
 
@@ -1278,18 +1319,18 @@ mod tests {
     fn test_is_action_unopened() {
         let num_players = 3;
         let active = PlayerBitSet::new(num_players);
-        let mut round_data = RoundData::new(num_players, 10.0, active, 0);
+        let mut round_data = RoundData::new(num_players, 10, active, 0);
 
         // Initially, no bets have been made
         assert!(round_data.is_action_unopened());
 
         // After a forced bet (like a blind), still unopened
-        round_data.do_bet(5.0, true);
+        round_data.do_bet(5, true);
         assert!(round_data.is_action_unopened());
 
         // After a voluntary bet, no longer unopened
         round_data.advance_action();
-        round_data.do_bet(10.0, false);
+        round_data.do_bet(10, false);
         assert!(!round_data.is_action_unopened());
     }
 
@@ -1298,28 +1339,28 @@ mod tests {
     fn test_current_player_bet() {
         let num_players = 3;
         let active = PlayerBitSet::new(num_players);
-        let mut round_data = RoundData::new(num_players, 10.0, active, 0);
+        let mut round_data = RoundData::new(num_players, 10, active, 0);
 
         // Initially 0
-        assert_eq!(round_data.current_player_bet(), 0.0);
+        assert_eq!(round_data.current_player_bet(), 0);
 
         // After betting
-        round_data.do_bet(25.0, false);
-        assert_eq!(round_data.current_player_bet(), 25.0);
+        round_data.do_bet(25, false);
+        assert_eq!(round_data.current_player_bet(), 25);
 
         // Move to next player and check their bet
         round_data.advance_action();
-        assert_eq!(round_data.current_player_bet(), 0.0);
+        assert_eq!(round_data.current_player_bet(), 0);
 
-        round_data.do_bet(50.0, false);
-        assert_eq!(round_data.current_player_bet(), 50.0);
+        round_data.do_bet(50, false);
+        assert_eq!(round_data.current_player_bet(), 50);
     }
 
     /// Verifies num_all_in_players correctly counts players who have gone all-in.
     #[test]
     fn test_num_all_in_players() {
-        let stacks = vec![100.0, 100.0, 100.0];
-        let mut game_state = test_game_state(stacks, 10.0, 5.0, 0.0, 0);
+        let stacks = vec![100, 100, 100];
+        let mut game_state = test_game_state(stacks, 10, 5, 0, 0);
 
         // Initially no one is all-in
         assert_eq!(game_state.num_all_in_players(), 0);
@@ -1331,19 +1372,19 @@ mod tests {
         assert_eq!(game_state.num_all_in_players(), 0);
 
         // Go all-in
-        game_state.do_bet(100.0, false).unwrap();
+        game_state.do_bet(100, false).unwrap();
         assert_eq!(game_state.num_all_in_players(), 1);
 
         // Another player goes all-in
-        game_state.do_bet(100.0, false).unwrap();
+        game_state.do_bet(100, false).unwrap();
         assert_eq!(game_state.num_all_in_players(), 2);
     }
 
     /// Verifies is_complete correctly identifies when a game has ended.
     #[test]
     fn test_is_complete() {
-        let stacks = vec![100.0, 100.0, 100.0];
-        let mut game_state = test_game_state(stacks, 10.0, 5.0, 0.0, 0);
+        let stacks = vec![100, 100, 100];
+        let mut game_state = test_game_state(stacks, 10, 5, 0, 0);
 
         // Not complete at start
         assert!(!game_state.is_complete());
@@ -1365,27 +1406,27 @@ mod tests {
     fn test_do_bet_arithmetic() {
         let num_players = 3;
         let active = PlayerBitSet::new(num_players);
-        let mut round_data = RoundData::new(num_players, 10.0, active, 0);
+        let mut round_data = RoundData::new(num_players, 10, active, 0);
 
         // First bet of 20
-        round_data.do_bet(20.0, false);
-        assert_eq!(round_data.player_bet[0], 20.0);
-        assert_eq!(round_data.bet, 20.0);
+        round_data.do_bet(20, false);
+        assert_eq!(round_data.player_bet[0], 20);
+        assert_eq!(round_data.bet, 20);
         assert_eq!(round_data.total_bet_count, 1);
         assert_eq!(round_data.total_raise_count, 1);
 
         // Advance and second player raises to 40
         round_data.advance_action();
-        round_data.do_bet(40.0, false);
-        assert_eq!(round_data.player_bet[1], 40.0);
-        assert_eq!(round_data.bet, 40.0);
+        round_data.do_bet(40, false);
+        assert_eq!(round_data.player_bet[1], 40);
+        assert_eq!(round_data.bet, 40);
         assert_eq!(round_data.total_bet_count, 2);
         assert_eq!(round_data.total_raise_count, 2);
-        assert_eq!(round_data.min_raise, 20.0); // 40 - 20 = 20
+        assert_eq!(round_data.min_raise, 20); // 40 - 20 = 20
 
         // Test forced bet tracking
-        let mut round_data2 = RoundData::new(num_players, 10.0, active, 0);
-        round_data2.do_bet(5.0, true); // forced
+        let mut round_data2 = RoundData::new(num_players, 10, active, 0);
+        round_data2.do_bet(5, true); // forced
         assert_eq!(round_data2.forced_bet_count, 1);
         assert_eq!(round_data2.total_raise_count, 0); // forced bets don't count as raises
     }
@@ -1393,47 +1434,47 @@ mod tests {
     /// Verifies current_player_starting_stack returns the player's initial stack amount.
     #[test]
     fn test_current_player_starting_stack() {
-        let stacks = vec![100.0, 200.0, 300.0];
-        let game_state = test_game_state(stacks.clone(), 10.0, 5.0, 0.0, 0);
+        let stacks = vec![100, 200, 300];
+        let game_state = test_game_state(stacks.clone(), 10, 5, 0, 0);
 
         // Player 1 is to act first (after dealer at position 0)
         let starting_stack = game_state.current_player_starting_stack();
         // Starting stacks should be what we passed in
         assert_eq!(starting_stack, stacks[game_state.to_act_idx()]);
-        assert!(starting_stack > 1.0, "Starting stack should be > 1.0");
-        assert!(starting_stack > 0.0, "Starting stack should be > 0.0");
+        assert!(starting_stack > 1, "Starting stack should be > 1");
+        assert!(starting_stack > 0, "Starting stack should be > 0");
     }
 
     /// Verifies current_round_current_player_bet returns what the current player has bet this round.
     #[test]
     fn test_current_round_current_player_bet() {
-        let stacks = vec![100.0, 200.0];
-        let mut game_state = test_game_state(stacks, 10.0, 5.0, 0.0, 0);
+        let stacks = vec![100, 200];
+        let mut game_state = test_game_state(stacks, 10, 5, 0, 0);
         game_state.advance_round(); // Move to preflop
 
         // Post blinds
-        let _ = game_state.do_bet(5.0, true); // Small blind
+        let _ = game_state.do_bet(5, true); // Small blind
         let _player_bet = game_state.current_round_current_player_bet();
 
-        // After posting SB, player should have bet 5.0
+        // After posting SB, player should have bet 5
         // Now it's BB's turn
         let bb_bet = game_state.current_round_current_player_bet();
         // BB hasn't bet yet
-        assert_eq!(bb_bet, 0.0);
+        assert_eq!(bb_bet, 0);
 
         // Post BB
-        let _ = game_state.do_bet(10.0, true);
+        let _ = game_state.do_bet(10, true);
         // Now SB's turn again
         let sb_current_bet = game_state.current_round_current_player_bet();
-        // SB has bet 5.0
-        assert_eq!(sb_current_bet, 5.0);
+        // SB has bet 5
+        assert_eq!(sb_current_bet, 5);
     }
 
     /// Verifies advance_round is a no-op when the game is already complete.
     #[test]
     fn test_advance_round_when_complete() {
-        let stacks = vec![100.0, 100.0];
-        let mut game_state = test_game_state(stacks, 10.0, 5.0, 0.0, 0);
+        let stacks = vec![100, 100];
+        let mut game_state = test_game_state(stacks, 10, 5, 0, 0);
         game_state.complete();
 
         assert_eq!(game_state.round, Round::Complete);
@@ -1446,31 +1487,28 @@ mod tests {
         assert_eq!(game_state.round_before, round_before);
     }
 
-    /// Verifies validate_bet_amount rejects negative and NaN amounts.
+    /// Verifies validate_bet_amount rejects negative amounts.
     #[test]
     fn test_validate_bet_amount_negative() {
-        let stacks = vec![100.0, 100.0];
-        let mut game_state = test_game_state(stacks, 10.0, 5.0, 0.0, 0);
+        let stacks = vec![100, 100];
+        let mut game_state = test_game_state(stacks, 10, 5, 0, 0);
         game_state.advance_round();
 
-        let result = game_state.validate_bet_amount(-10.0);
+        let result = game_state.validate_bet_amount(-10);
         assert!(result.is_err());
-
-        let nan_result = game_state.validate_bet_amount(f32::NAN);
-        assert!(nan_result.is_err());
     }
 
     /// Verifies RandomGameStateGenerator produces game states with valid properties.
     #[test]
     fn test_random_game_state_generator() {
-        let mut generator = RandomGameStateGenerator::new(3, 50.0, 150.0, 10.0, 5.0, 0.0);
+        let mut generator = RandomGameStateGenerator::new(3, 50, 150, 10, 5, 0);
 
         for _ in 0..10 {
             let gs = generator.next().unwrap();
             assert_eq!(gs.num_players, 3);
             assert!(gs.dealer_idx < gs.num_players);
             for stack in &gs.stacks {
-                assert!(*stack >= 50.0 && *stack <= 150.0);
+                assert!(*stack >= 50 && *stack <= 150);
             }
         }
     }
@@ -1480,15 +1518,15 @@ mod tests {
     #[test]
     fn test_builder_minimal_valid() {
         let gs = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .big_blind(10.0)
+            .stacks(vec![100, 100])
+            .big_blind(10)
             .build()
             .unwrap();
 
         assert_eq!(gs.num_players, 2);
-        assert_eq!(gs.big_blind, 10.0);
-        assert_eq!(gs.small_blind, 5.0); // defaults to bb/2
-        assert_eq!(gs.ante, 0.0);
+        assert_eq!(gs.big_blind, 10);
+        assert_eq!(gs.small_blind, 5); // defaults to bb/2
+        assert_eq!(gs.ante, 0);
         assert_eq!(gs.dealer_idx, 0);
         assert_eq!(gs.round, Round::Starting);
         assert_eq!(gs.max_raises_per_round, Some(3));
@@ -1497,31 +1535,31 @@ mod tests {
     #[test]
     fn test_builder_small_blind_computed_from_big_blind() {
         let gs = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .big_blind(20.0)
+            .stacks(vec![100, 100])
+            .big_blind(20)
             .build()
             .unwrap();
 
-        assert_eq!(gs.small_blind, 10.0);
+        assert_eq!(gs.small_blind, 10);
     }
 
     #[test]
     fn test_builder_num_players_with_stack_convenience() {
         let gs = GameStateBuilder::new()
-            .num_players_with_stack(4, 500.0)
-            .big_blind(10.0)
+            .num_players_with_stack(4, 500)
+            .big_blind(10)
             .build()
             .unwrap();
 
         assert_eq!(gs.num_players, 4);
-        assert_eq!(gs.stacks.to_vec(), vec![500.0; 4]);
+        assert_eq!(gs.stacks.to_vec(), vec![500; 4]);
     }
 
     #[test]
     fn test_builder_max_raises_default_is_three() {
         let gs = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .big_blind(10.0)
+            .stacks(vec![100, 100])
+            .big_blind(10)
             .build()
             .unwrap();
 
@@ -1531,8 +1569,8 @@ mod tests {
     #[test]
     fn test_builder_max_raises_unlimited() {
         let gs = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .big_blind(10.0)
+            .stacks(vec![100, 100])
+            .big_blind(10)
             .max_raises_per_round(None)
             .build()
             .unwrap();
@@ -1543,25 +1581,25 @@ mod tests {
     #[test]
     fn test_builder_blinds_convenience_method() {
         let gs = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .blinds(20.0, 10.0)
+            .stacks(vec![100, 100])
+            .blinds(20, 10)
             .build()
             .unwrap();
 
-        assert_eq!(gs.big_blind, 20.0);
-        assert_eq!(gs.small_blind, 10.0);
+        assert_eq!(gs.big_blind, 20);
+        assert_eq!(gs.small_blind, 10);
     }
 
     #[test]
     fn test_builder_error_missing_stacks() {
-        let result = GameStateBuilder::new().big_blind(10.0).build();
+        let result = GameStateBuilder::new().big_blind(10).build();
 
         assert_eq!(result.unwrap_err(), GameStateBuilderError::MissingStacks);
     }
 
     #[test]
     fn test_builder_error_missing_big_blind() {
-        let result = GameStateBuilder::new().stacks(vec![100.0, 100.0]).build();
+        let result = GameStateBuilder::new().stacks(vec![100, 100]).build();
 
         assert_eq!(result.unwrap_err(), GameStateBuilderError::MissingBigBlind);
     }
@@ -1569,8 +1607,8 @@ mod tests {
     #[test]
     fn test_builder_error_too_few_players() {
         let result = GameStateBuilder::new()
-            .stacks(vec![100.0])
-            .big_blind(10.0)
+            .stacks(vec![100])
+            .big_blind(10)
             .build();
 
         assert_eq!(
@@ -1582,8 +1620,8 @@ mod tests {
     #[test]
     fn test_builder_error_too_many_players() {
         let result = GameStateBuilder::new()
-            .stacks(vec![100.0; 17])
-            .big_blind(10.0)
+            .stacks(vec![100; 17])
+            .big_blind(10)
             .build();
 
         assert_eq!(
@@ -1595,8 +1633,8 @@ mod tests {
     #[test]
     fn test_builder_error_invalid_dealer_index() {
         let result = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .big_blind(10.0)
+            .stacks(vec![100, 100])
+            .big_blind(10)
             .dealer_idx(5)
             .build();
 
@@ -1612,37 +1650,36 @@ mod tests {
     #[test]
     fn test_builder_error_negative_big_blind() {
         let result = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .big_blind(-10.0)
+            .stacks(vec![100, 100])
+            .big_blind(-10)
             .build();
 
         assert_eq!(
             result.unwrap_err(),
-            GameStateBuilderError::InvalidBigBlind(-10.0)
+            GameStateBuilderError::InvalidBigBlind(-10)
         );
     }
 
     #[test]
     fn test_builder_error_zero_big_blind() {
         let result = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .big_blind(0.0)
+            .stacks(vec![100, 100])
+            .big_blind(0)
             .build();
 
         assert_eq!(
             result.unwrap_err(),
-            GameStateBuilderError::InvalidBigBlind(0.0)
+            GameStateBuilderError::InvalidBigBlind(0)
         );
     }
 
     #[test]
-    fn test_builder_error_nan_big_blind() {
+    fn test_builder_error_negative_big_blind_variant() {
         let result = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .big_blind(f32::NAN)
+            .stacks(vec![100, 100])
+            .big_blind(-1)
             .build();
 
-        // NaN != NaN, so we check the variant
         assert!(matches!(
             result.unwrap_err(),
             GameStateBuilderError::InvalidBigBlind(_)
@@ -1652,43 +1689,40 @@ mod tests {
     #[test]
     fn test_builder_error_negative_small_blind() {
         let result = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .big_blind(10.0)
-            .small_blind(-5.0)
+            .stacks(vec![100, 100])
+            .big_blind(10)
+            .small_blind(-5)
             .build();
 
         assert_eq!(
             result.unwrap_err(),
-            GameStateBuilderError::InvalidSmallBlind(-5.0)
+            GameStateBuilderError::InvalidSmallBlind(-5)
         );
     }
 
     #[test]
     fn test_builder_error_negative_ante() {
         let result = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .big_blind(10.0)
-            .ante(-1.0)
+            .stacks(vec![100, 100])
+            .big_blind(10)
+            .ante(-1)
             .build();
 
-        assert_eq!(
-            result.unwrap_err(),
-            GameStateBuilderError::InvalidAnte(-1.0)
-        );
+        assert_eq!(result.unwrap_err(), GameStateBuilderError::InvalidAnte(-1));
     }
 
     #[test]
     fn test_builder_error_negative_stack() {
         let result = GameStateBuilder::new()
-            .stacks(vec![100.0, -50.0])
-            .big_blind(10.0)
+            .stacks(vec![100, -50])
+            .big_blind(10)
             .build();
 
         assert_eq!(
             result.unwrap_err(),
             GameStateBuilderError::InvalidStack {
                 index: 1,
-                value: -50.0
+                value: -50
             }
         );
     }
@@ -1696,8 +1730,8 @@ mod tests {
     #[test]
     fn test_builder_error_insufficient_active_players() {
         let result = GameStateBuilder::new()
-            .stacks(vec![100.0, 0.0])
-            .big_blind(10.0)
+            .stacks(vec![100, 0])
+            .big_blind(10)
             .build();
 
         assert_eq!(
@@ -1709,8 +1743,8 @@ mod tests {
     #[test]
     fn test_builder_error_hands_length_mismatch() {
         let result = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .big_blind(10.0)
+            .stacks(vec![100, 100])
+            .big_blind(10)
             .hands(vec![Hand::default()])
             .build();
 
@@ -1726,9 +1760,9 @@ mod tests {
     #[test]
     fn test_builder_error_player_bet_length_mismatch() {
         let result = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .big_blind(10.0)
-            .player_bet(vec![0.0, 0.0, 0.0])
+            .stacks(vec![100, 100])
+            .big_blind(10)
+            .player_bet(vec![0, 0, 0])
             .build();
 
         assert_eq!(
@@ -1744,8 +1778,8 @@ mod tests {
     fn test_builder_error_invalid_board_size_one() {
         use crate::core::{Card, Suit, Value};
         let result = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .big_blind(10.0)
+            .stacks(vec![100, 100])
+            .big_blind(10)
             .board(vec![Card::new(Value::Ace, Suit::Spade)])
             .build();
 
@@ -1759,8 +1793,8 @@ mod tests {
     fn test_builder_error_invalid_board_size_two() {
         use crate::core::{Card, Suit, Value};
         let result = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .big_blind(10.0)
+            .stacks(vec![100, 100])
+            .big_blind(10)
             .board(vec![
                 Card::new(Value::Ace, Suit::Spade),
                 Card::new(Value::King, Suit::Spade),
@@ -1778,8 +1812,8 @@ mod tests {
         use crate::core::{Card, Suit, Value};
         let card = Card::new(Value::Ace, Suit::Spade);
         let result = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .big_blind(10.0)
+            .stacks(vec![100, 100])
+            .big_blind(10)
             .board(vec![card, Card::new(Value::King, Suit::Spade), card])
             .build();
 
@@ -1792,8 +1826,8 @@ mod tests {
     #[test]
     fn test_builder_heads_up_valid() {
         let gs = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .big_blind(10.0)
+            .stacks(vec![100, 100])
+            .big_blind(10)
             .build()
             .unwrap();
 
@@ -1803,8 +1837,8 @@ mod tests {
     #[test]
     fn test_builder_ten_players_valid() {
         let gs = GameStateBuilder::new()
-            .stacks(vec![100.0; 10])
-            .big_blind(10.0)
+            .stacks(vec![100; 10])
+            .big_blind(10)
             .build()
             .unwrap();
 
@@ -1813,13 +1847,13 @@ mod tests {
 
     #[test]
     fn test_builder_all_but_two_players_zero_stack() {
-        let mut stacks = vec![0.0; 6];
-        stacks[2] = 100.0;
-        stacks[5] = 100.0;
+        let mut stacks = vec![0; 6];
+        stacks[2] = 100;
+        stacks[5] = 100;
 
         let gs = GameStateBuilder::new()
             .stacks(stacks)
-            .big_blind(10.0)
+            .big_blind(10)
             .build()
             .unwrap();
 
@@ -1830,20 +1864,20 @@ mod tests {
     #[test]
     fn test_builder_with_ante() {
         let gs = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .big_blind(10.0)
-            .ante(1.0)
+            .stacks(vec![100, 100])
+            .big_blind(10)
+            .ante(1)
             .build()
             .unwrap();
 
-        assert_eq!(gs.ante, 1.0);
+        assert_eq!(gs.ante, 1);
     }
 
     #[test]
     fn test_builder_with_dealer_idx() {
         let gs = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0, 100.0])
-            .big_blind(10.0)
+            .stacks(vec![100, 100, 100])
+            .big_blind(10)
             .dealer_idx(2)
             .build()
             .unwrap();
@@ -1854,8 +1888,8 @@ mod tests {
     #[test]
     fn test_builder_with_round() {
         let gs = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .big_blind(10.0)
+            .stacks(vec![100, 100])
+            .big_blind(10)
             .round(Round::Preflop)
             .build()
             .unwrap();
@@ -1876,8 +1910,8 @@ mod tests {
         ];
 
         let gs = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .big_blind(10.0)
+            .stacks(vec![100, 100])
+            .big_blind(10)
             .board(board.clone())
             .build()
             .unwrap();
@@ -1887,34 +1921,104 @@ mod tests {
 
     #[test]
     fn test_rake_config_is_carried_by_game_state_clones() {
-        let rake = crate::arena::RakeConfig::new(0.05, 3.0, true).unwrap();
+        let rake = crate::arena::RakeConfig::new(
+            crate::arena::RakeRate::new(5, 100).unwrap(),
+            Some(3),
+            true,
+            crate::arena::RakeRounding::HalfToEven,
+        )
+        .unwrap();
         let gs = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .big_blind(2.0)
+            .stacks(vec![100, 100])
+            .big_blind(2)
             .rake(rake)
             .build()
             .unwrap();
 
         let cloned = gs.clone();
         assert_eq!(cloned.rake, rake);
-        assert_eq!(cloned.rake_collected, 0.0);
+        assert_eq!(cloned.rake_collected, 0);
     }
 
     #[test]
     fn test_take_rake_updates_hand_cap_accounting() {
-        let rake = crate::arena::RakeConfig::new(0.10, 6.0, false).unwrap();
+        let rake = crate::arena::RakeConfig::new(
+            crate::arena::RakeRate::new(10, 100).unwrap(),
+            Some(6),
+            false,
+            crate::arena::RakeRounding::HalfToEven,
+        )
+        .unwrap();
         let mut gs = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .big_blind(2.0)
+            .stacks(vec![100, 100])
+            .big_blind(2)
             .rake(rake)
             .build()
             .unwrap();
 
-        assert_eq!(gs.take_rake(40.0), 36.0);
-        assert_eq!(gs.rake_collected, 4.0);
-        assert_eq!(gs.take_rake(40.0), 38.0);
-        assert_eq!(gs.rake_collected, 6.0);
-        assert_eq!(gs.take_rake(40.0), 40.0);
+        assert_eq!(gs.take_rake(40), 36);
+        assert_eq!(gs.rake_collected, 4);
+        assert_eq!(gs.take_rake(40), 38);
+        assert_eq!(gs.rake_collected, 6);
+        assert_eq!(gs.take_rake(40), 40);
     }
+}
 
+#[cfg(test)]
+mod exact_money_tests {
+    use super::*;
+    #[test]
+    fn exact_call_allin_min_raise_and_overflow() {
+        let mut gs = GameStateBuilder::new()
+            .stacks([101, 101])
+            .blinds(2, 1)
+            .round(Round::Preflop)
+            .build()
+            .unwrap();
+        gs.do_bet(10, false).unwrap();
+        assert_eq!(
+            gs.validate_bet_amount(19),
+            Err(GameStateError::RaiseSizeTooSmall)
+        );
+        gs.do_bet(10, false).unwrap();
+        assert_eq!(gs.total_pot, 20);
+        assert_eq!(gs.stacks.as_slice(), &[91, 91]);
+        gs.advance_round();
+        gs.advance_round();
+        gs.do_bet(91, false).unwrap();
+        gs.do_bet(91, false).unwrap();
+        assert_eq!(gs.stacks.as_slice(), &[0, 0]);
+        assert_eq!(gs.total_pot, 202);
+        assert_eq!(gs.player_all_in.count(), 2);
+        assert_eq!(
+            GameStateBuilder::new()
+                .stacks([Chips::MAX, 1])
+                .blinds(2, 1)
+                .build()
+                .unwrap_err(),
+            GameStateBuilderError::MoneyOverflow
+        );
+    }
+    #[test]
+    fn short_allin_does_not_reopen_acted_players_but_unacted_can_raise() {
+        let mut gs = GameStateBuilder::new()
+            .stacks([100, 15, 100])
+            .blinds(10, 5)
+            .round(Round::Flop)
+            .build()
+            .unwrap();
+        gs.round_data.to_act_idx = 0;
+        gs.do_bet(10, false).unwrap();
+        gs.do_bet(15, false).unwrap();
+        assert_eq!(gs.to_act_idx(), 2);
+        assert!(gs.validate_bet_amount(25).is_ok());
+        gs.do_bet(15, false).unwrap();
+        assert_eq!(gs.to_act_idx(), 0);
+        assert_eq!(
+            gs.validate_bet_amount(25),
+            Err(GameStateError::RaiseNotReopened)
+        );
+        gs.do_bet(15, false).unwrap();
+        assert_eq!(gs.round_data.needs_action.count(), 0);
+    }
 }

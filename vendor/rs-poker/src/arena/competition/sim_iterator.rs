@@ -123,10 +123,10 @@ mod tests {
             Box::<FoldingAgentGenerator>::default(),
             Box::<FoldingAgentGenerator>::default(),
         ];
-        let stacks = vec![100.0; 3];
+        let stacks = vec![100; 3];
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
         let mut sim_gen = StandardSimulationIterator::new(
@@ -152,8 +152,8 @@ mod tests {
                 Box::<FoldingAgentGenerator>::default(),
             ];
             let game_state = GameStateBuilder::new()
-                .stacks(vec![100.0; 2])
-                .blinds(10.0, 5.0)
+                .stacks(vec![100; 2])
+                .blinds(10, 5)
                 .build()
                 .unwrap();
             StandardSimulationIterator::with_rng(

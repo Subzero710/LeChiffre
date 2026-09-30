@@ -5,6 +5,7 @@
 //! probability in the chart for the current (hand, position, scenario).
 //! For post-flop, it delegates to configurable action generation.
 
+use crate::arena::money::apply_ratio;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -230,17 +231,17 @@ impl PreflopChartConfig {
         if self.positions.is_empty() {
             return Err(PreflopChartConfigError::NoCharts);
         }
-        if self.raise_size_bb <= 0.0 {
+        if !self.raise_size_bb.is_finite() || self.raise_size_bb <= 0.0 {
             return Err(PreflopChartConfigError::NonPositiveRaiseSizeBb(
                 self.raise_size_bb,
             ));
         }
-        if self.three_bet_multiplier <= 0.0 {
+        if !self.three_bet_multiplier.is_finite() || self.three_bet_multiplier <= 0.0 {
             return Err(PreflopChartConfigError::NonPositiveThreeBetMultiplier(
                 self.three_bet_multiplier,
             ));
         }
-        if self.four_bet_plus_multiplier <= 0.0 {
+        if !self.four_bet_plus_multiplier.is_finite() || self.four_bet_plus_multiplier <= 0.0 {
             return Err(PreflopChartConfigError::NonPositiveFourBetPlusMultiplier(
                 self.four_bet_plus_multiplier,
             ));
@@ -305,8 +306,8 @@ pub struct PreflopChartActionConfig {
 /// };
 ///
 /// let game_state = GameStateBuilder::new()
-///     .num_players_with_stack(2, 100.0)
-///     .blinds(10.0, 5.0)
+///     .num_players_with_stack(2, 100)
+///     .blinds(10, 5)
 ///     .build()
 ///     .unwrap();
 ///
@@ -419,7 +420,7 @@ impl PreflopChartActionGenerator {
             }
         }
         if strategy.fold_freq() > 0.0 {
-            let action = if to_call > 0.0 {
+            let action = if to_call > 0 {
                 AgentAction::Fold
             } else {
                 AgentAction::Call // Check when no bet to face.
@@ -432,7 +433,7 @@ impl PreflopChartActionGenerator {
         // Never leave the picker with an empty action set (it panics on
         // empty-range sampling). Fall back to Check or Fold.
         if actions.is_empty() {
-            if to_call > 0.0 {
+            if to_call > 0 {
                 actions.push(AgentAction::Fold);
             } else {
                 actions.push(AgentAction::Call); // Check
@@ -464,13 +465,16 @@ impl PreflopChartActionGenerator {
         }
 
         let amount = match scenario {
-            PreflopScenario::Rfi => self.config.preflop_config.raise_size_bb * big_blind,
+            PreflopScenario::Rfi => {
+                apply_ratio(big_blind, self.config.preflop_config.raise_size_bb)
+            }
             PreflopScenario::VsOpen => {
-                current_bet * self.config.preflop_config.three_bet_multiplier
+                apply_ratio(current_bet, self.config.preflop_config.three_bet_multiplier)
             }
-            PreflopScenario::Vs3Bet => {
-                current_bet * self.config.preflop_config.four_bet_plus_multiplier
-            }
+            PreflopScenario::Vs3Bet => apply_ratio(
+                current_bet,
+                self.config.preflop_config.four_bet_plus_multiplier,
+            ),
             PreflopScenario::Vs4Bet => return None,
         };
         Some(bet_or_all_in(amount, player_stack, player_bet))
@@ -492,7 +496,11 @@ impl PreflopChartActionGenerator {
 }
 
 /// Return a Bet action, or AllIn if the bet amount would consume the stack.
-fn bet_or_all_in(amount: f32, stack: f32, player_bet: f32) -> AgentAction {
+fn bet_or_all_in(
+    amount: crate::Chips,
+    stack: crate::Chips,
+    player_bet: crate::Chips,
+) -> AgentAction {
     let all_in_amount = stack + player_bet;
     if amount >= all_in_amount {
         AgentAction::AllIn
@@ -593,8 +601,8 @@ mod tests {
 
     fn create_test_game_state() -> GameState {
         GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .build()
             .unwrap()
     }
@@ -634,11 +642,11 @@ mod tests {
 
         // 6-handed preflop, three raises already in the pot.
         let num_players = 6;
-        let big_blind = 5.0;
-        let small_blind = 2.5;
+        let big_blind = 10;
+        let small_blind = 5;
 
-        let round_player_bet = vec![0.0, 12.5, 0.0, 37.5, 0.0, 112.5];
-        let stacks: Vec<f32> = vec![500.0; num_players];
+        let round_player_bet = vec![0, 25, 0, 75, 0, 225];
+        let stacks: Vec<crate::Chips> = vec![500; num_players];
         let player_bet = round_player_bet.clone();
 
         let mut round_data = RoundData::new_with_bets(
@@ -710,10 +718,10 @@ mod tests {
 
     #[test]
     fn test_postflop_delegates_to_configurable() {
-        let stacks = vec![500.0; 2];
+        let stacks = vec![500; 2];
         let mut game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
         game_state.advance_round();
@@ -745,22 +753,10 @@ mod tests {
 
     #[test]
     fn test_bet_or_all_in() {
-        assert!(matches!(
-            bet_or_all_in(50.0, 100.0, 0.0),
-            AgentAction::Bet(_)
-        ));
-        assert!(matches!(
-            bet_or_all_in(100.0, 100.0, 0.0),
-            AgentAction::AllIn
-        ));
-        assert!(matches!(
-            bet_or_all_in(150.0, 100.0, 0.0),
-            AgentAction::AllIn
-        ));
-        assert!(matches!(
-            bet_or_all_in(110.0, 90.0, 10.0),
-            AgentAction::AllIn
-        ));
+        assert!(matches!(bet_or_all_in(50, 100, 0), AgentAction::Bet(_)));
+        assert!(matches!(bet_or_all_in(100, 100, 0), AgentAction::AllIn));
+        assert!(matches!(bet_or_all_in(150, 100, 0), AgentAction::AllIn));
+        assert!(matches!(bet_or_all_in(110, 90, 10), AgentAction::AllIn));
     }
 
     #[test]
@@ -793,8 +789,8 @@ mod tests {
         use std::sync::Arc;
 
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .build()
             .unwrap();
 

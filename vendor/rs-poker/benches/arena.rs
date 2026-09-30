@@ -1,5 +1,6 @@
 use criterion::BenchmarkId;
 use criterion::Criterion;
+use rs_poker::Chips;
 
 use criterion::criterion_group;
 use criterion::criterion_main;
@@ -10,10 +11,10 @@ use rs_poker::arena::HoldemSimulationBuilder;
 use rs_poker::arena::agent::RandomAgent;
 use rs_poker::arena::agent::RandomPotControlAgent;
 
-const STARTING_STACK: f32 = 100_000.0;
-const ANTE: f32 = 50.0;
-const SMALL_BLIND: f32 = 250.0;
-const BIG_BLIND: f32 = 500.0;
+const STARTING_STACK: Chips = 100_000;
+const ANTE: Chips = 50;
+const SMALL_BLIND: Chips = 250;
+const BIG_BLIND: Chips = 500;
 
 const DEFAULT_FOLD: f64 = 0.15;
 const DEFAULT_CALL: f64 = 0.5;

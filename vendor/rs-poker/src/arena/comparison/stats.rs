@@ -1,3 +1,4 @@
+use crate::Chips;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -11,7 +12,7 @@ pub struct PositionStats {
     /// Number of games played in this position
     pub games_played: usize,
     /// Total profit in this position
-    pub profit: f32,
+    pub profit: Chips,
     /// Average profit per game in this position
     pub profit_per_game: f32,
 }
@@ -24,7 +25,7 @@ pub struct AgentStats {
 
     // Financial Performance
     /// Total profit across all games
-    pub total_profit: f32,
+    pub total_profit: Chips,
     /// Total number of games played
     pub total_games: usize,
     /// Number of games won (profit > 0)
@@ -90,7 +91,7 @@ pub struct AgentStatsBuilder {
     /// Accumulated stats for each agent (indexed by agent_idx)
     agent_accumulated: Vec<StatsStorage>,
     /// Position tracking: agent_idx -> seat_idx -> (games_played, total_profit)
-    position_tracking: Vec<HashMap<usize, (usize, f32)>>,
+    position_tracking: Vec<HashMap<usize, (usize, Chips)>>,
     /// Agent names (indexed by agent_idx)
     agent_names: Vec<String>,
 }
@@ -180,7 +181,7 @@ impl AgentStatsBuilder {
 
             // Track position-specific stats
             let pos_map = &mut self.position_tracking[agent_idx];
-            let (games, profit) = pos_map.entry(seat_idx).or_insert((0, 0.0));
+            let (games, profit) = pos_map.entry(seat_idx).or_insert((0, 0));
             *games += 1;
             *profit += stats.total_profit[seat_idx];
         }
@@ -199,7 +200,7 @@ impl AgentStatsBuilder {
             if let Some(pos_map) = self.position_tracking.get(agent_idx) {
                 for (seat_idx, (games_played, total_profit)) in pos_map {
                     let profit_per_game = if *games_played > 0 {
-                        total_profit / *games_played as f32
+                        *total_profit as f32 / *games_played as f32
                     } else {
                         0.0
                     };
@@ -286,7 +287,7 @@ mod tests {
         let agent_stats = stats.get("Agent1").unwrap();
         assert_eq!(agent_stats.agent_name, "Agent1");
         assert_eq!(agent_stats.total_games, 0);
-        assert_eq!(agent_stats.total_profit, 0.0);
+        assert_eq!(agent_stats.total_profit, 0);
     }
 
     #[test]
@@ -296,10 +297,10 @@ mod tests {
 
         // Create mock stats for a 2-player game
         let mut stats = StatsStorage::new_with_num_players(2);
-        stats.total_profit[0] = 50.0; // Seat 0 won 50
-        stats.total_profit[1] = -50.0; // Seat 1 lost 50
-        stats.total_invested[0] = 100.0;
-        stats.total_invested[1] = 100.0;
+        stats.total_profit[0] = 50; // Seat 0 won 50
+        stats.total_profit[1] = -50; // Seat 1 lost 50
+        stats.total_invested[0] = 100;
+        stats.total_invested[1] = 100;
         stats.games_won[0] = 1;
         stats.games_lost[1] = 1;
         stats.hands_played[0] = 1;
@@ -311,12 +312,12 @@ mod tests {
         let result = builder.build();
 
         let agent0 = result.get("Agent0").unwrap();
-        assert_eq!(agent0.total_profit, 50.0);
+        assert_eq!(agent0.total_profit, 50);
         assert_eq!(agent0.wins, 1);
         assert_eq!(agent0.losses, 0);
 
         let agent1 = result.get("Agent1").unwrap();
-        assert_eq!(agent1.total_profit, -50.0);
+        assert_eq!(agent1.total_profit, -50);
         assert_eq!(agent1.wins, 0);
         assert_eq!(agent1.losses, 1);
     }
@@ -328,20 +329,20 @@ mod tests {
 
         // Game 1: Agent0 at seat 0, Agent1 at seat 1
         let mut stats1 = StatsStorage::new_with_num_players(2);
-        stats1.total_profit[0] = 50.0;
-        stats1.total_profit[1] = -50.0;
-        stats1.total_invested[0] = 100.0;
-        stats1.total_invested[1] = 100.0;
+        stats1.total_profit[0] = 50;
+        stats1.total_profit[1] = -50;
+        stats1.total_invested[0] = 100;
+        stats1.total_invested[1] = 100;
         stats1.games_won[0] = 1;
         stats1.games_lost[1] = 1;
         builder.merge_permutation_stats(&[0, 1], &stats1);
 
         // Game 2: Agent1 at seat 0, Agent0 at seat 1 (swapped positions)
         let mut stats2 = StatsStorage::new_with_num_players(2);
-        stats2.total_profit[0] = 30.0; // Agent1 at seat 0 won
-        stats2.total_profit[1] = -30.0; // Agent0 at seat 1 lost
-        stats2.total_invested[0] = 80.0;
-        stats2.total_invested[1] = 80.0;
+        stats2.total_profit[0] = 30; // Agent1 at seat 0 won
+        stats2.total_profit[1] = -30; // Agent0 at seat 1 lost
+        stats2.total_invested[0] = 80;
+        stats2.total_invested[1] = 80;
         stats2.games_won[0] = 1;
         stats2.games_lost[1] = 1;
         builder.merge_permutation_stats(&[1, 0], &stats2);
@@ -350,13 +351,13 @@ mod tests {
 
         // Agent0: won 50 in game 1, lost 30 in game 2 = net +20
         let agent0 = result.get("Agent0").unwrap();
-        assert_eq!(agent0.total_profit, 20.0);
+        assert_eq!(agent0.total_profit, 20);
         assert_eq!(agent0.wins, 1);
         assert_eq!(agent0.losses, 1);
 
         // Agent1: lost 50 in game 1, won 30 in game 2 = net -20
         let agent1 = result.get("Agent1").unwrap();
-        assert_eq!(agent1.total_profit, -20.0);
+        assert_eq!(agent1.total_profit, -20);
         assert_eq!(agent1.wins, 1);
         assert_eq!(agent1.losses, 1);
     }
@@ -368,13 +369,13 @@ mod tests {
 
         // Agent0 plays at seat 0
         let mut stats1 = StatsStorage::new_with_num_players(2);
-        stats1.total_profit[0] = 100.0;
+        stats1.total_profit[0] = 100;
         stats1.games_won[0] = 1;
         builder.merge_permutation_stats(&[0, 1], &stats1);
 
         // Agent0 plays at seat 1
         let mut stats2 = StatsStorage::new_with_num_players(2);
-        stats2.total_profit[1] = -20.0;
+        stats2.total_profit[1] = -20;
         stats2.games_lost[1] = 1;
         builder.merge_permutation_stats(&[1, 0], &stats2);
 
@@ -390,7 +391,7 @@ mod tests {
             .find(|p| p.seat_index == 0)
             .unwrap();
         assert_eq!(seat0_stats.games_played, 1);
-        assert_eq!(seat0_stats.profit, 100.0);
+        assert_eq!(seat0_stats.profit, 100);
 
         let seat1_stats = agent0
             .position_stats
@@ -398,7 +399,7 @@ mod tests {
             .find(|p| p.seat_index == 1)
             .unwrap();
         assert_eq!(seat1_stats.games_played, 1);
-        assert_eq!(seat1_stats.profit, -20.0);
+        assert_eq!(seat1_stats.profit, -20);
     }
 
     #[test]
@@ -407,8 +408,8 @@ mod tests {
         let mut builder = AgentStatsBuilder::new(names);
 
         let mut stats = StatsStorage::new_with_num_players(2);
-        stats.total_profit[0] = 50.0;
-        stats.total_invested[0] = 200.0;
+        stats.total_profit[0] = 50;
+        stats.total_invested[0] = 200;
         stats.games_won[0] = 1;
         builder.merge_permutation_stats(&[0, 1], &stats);
 
@@ -423,7 +424,7 @@ mod tests {
     fn test_agent_stats_serialization() {
         let stats = AgentStats {
             agent_name: "Test".to_string(),
-            total_profit: 100.0,
+            total_profit: 100,
             total_games: 10,
             wins: 6,
             losses: 3,
@@ -434,7 +435,7 @@ mod tests {
             position_stats: vec![PositionStats {
                 seat_index: 0,
                 games_played: 10,
-                profit: 100.0,
+                profit: 100,
                 profit_per_game: 10.0,
             }],
             vpip_percent: 30.0,
@@ -458,13 +459,13 @@ mod tests {
         // Test that it can be serialized to JSON
         let json = serde_json::to_string(&stats).unwrap();
         assert!(json.contains("\"agent_name\":\"Test\""));
-        assert!(json.contains("\"total_profit\":100.0"));
+        assert!(json.contains("\"total_profit\":100"));
         assert!(json.contains("\"roi_percent\":25.0"));
 
         // Test that it can be deserialized back
         let deserialized: AgentStats = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.agent_name, "Test");
-        assert_eq!(deserialized.total_profit, 100.0);
+        assert_eq!(deserialized.total_profit, 100);
         assert_eq!(deserialized.roi_percent, 25.0);
     }
 
@@ -803,7 +804,7 @@ mod tests {
         let mut builder = AgentStatsBuilder::new(names);
 
         let mut stats = StatsStorage::new_with_num_players(1);
-        stats.total_profit[0] = 50.0;
+        stats.total_profit[0] = 50;
         stats.games_won[0] = 3;
         stats.games_lost[0] = 2;
         stats.games_breakeven[0] = 0;
@@ -827,12 +828,12 @@ mod tests {
 
         // Play multiple games at seat 0
         let mut stats1 = StatsStorage::new_with_num_players(1);
-        stats1.total_profit[0] = 30.0;
+        stats1.total_profit[0] = 30;
         stats1.games_won[0] = 1;
         builder.merge_permutation_stats(&[0], &stats1);
 
         let mut stats2 = StatsStorage::new_with_num_players(1);
-        stats2.total_profit[0] = 20.0;
+        stats2.total_profit[0] = 20;
         stats2.games_won[0] = 1;
         builder.merge_permutation_stats(&[0], &stats2);
 
@@ -847,7 +848,7 @@ mod tests {
             .find(|p| p.seat_index == 0)
             .unwrap();
         assert_eq!(seat0.games_played, 2);
-        assert!((seat0.profit - 50.0).abs() < 0.01);
+        assert!((seat0.profit - 50) == 0);
         assert!(
             (seat0.profit_per_game - 25.0).abs() < 0.01,
             "profit_per_game should be 50.0 / 2 = 25.0, got {}",

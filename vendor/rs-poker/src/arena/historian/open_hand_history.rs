@@ -259,8 +259,8 @@ mod tests {
 
     fn create_test_game_state() -> GameState {
         GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .blinds(2.0, 1.0)
+            .stacks(vec![100, 100])
+            .blinds(2, 1)
             .build()
             .unwrap()
     }
@@ -272,9 +272,9 @@ mod tests {
                 game_id,
                 &game_state,
                 &Action::GameStart(GameStartPayload {
-                    small_blind: 1.0,
-                    big_blind: 2.0,
-                    ante: 0.0,
+                    small_blind: 1,
+                    big_blind: 2,
+                    ante: 0,
                 }),
             )
             .await
@@ -287,8 +287,8 @@ mod tests {
                 &game_state,
                 &Action::Award(AwardPayload {
                     idx: 0,
-                    award_amount: 10.0,
-                    total_pot: 10.0,
+                    award_amount: 10,
+                    total_pot: 10,
                     rank: None,
                     hand: None,
                 }),
@@ -352,9 +352,9 @@ mod tests {
                 12345,
                 &game_state,
                 &Action::GameStart(GameStartPayload {
-                    small_blind: 1.0,
-                    big_blind: 2.0,
-                    ante: 0.0,
+                    small_blind: 1,
+                    big_blind: 2,
+                    ante: 0,
                 }),
             )
             .await
@@ -367,8 +367,8 @@ mod tests {
                 &game_state,
                 &Action::Award(AwardPayload {
                     idx: 0,
-                    award_amount: 10.0,
-                    total_pot: 10.0,
+                    award_amount: 10,
+                    total_pot: 10,
                     rank: None,
                     hand: None,
                 }),
@@ -403,9 +403,9 @@ mod tests {
                 67890,
                 &game_state,
                 &Action::GameStart(GameStartPayload {
-                    small_blind: 1.0,
-                    big_blind: 2.0,
-                    ante: 0.0,
+                    small_blind: 1,
+                    big_blind: 2,
+                    ante: 0,
                 }),
             )
             .await
@@ -418,8 +418,8 @@ mod tests {
                 &game_state,
                 &Action::Award(AwardPayload {
                     idx: 1,
-                    award_amount: 5.0,
-                    total_pot: 5.0,
+                    award_amount: 5,
+                    total_pot: 5,
                     rank: None,
                     hand: None,
                 }),
@@ -450,9 +450,9 @@ mod tests {
                 12345,
                 &game_state,
                 &Action::GameStart(GameStartPayload {
-                    small_blind: 1.0,
-                    big_blind: 2.0,
-                    ante: 0.0,
+                    small_blind: 1,
+                    big_blind: 2,
+                    ante: 0,
                 }),
             )
             .await
@@ -469,8 +469,8 @@ mod tests {
                 &game_state,
                 &Action::Award(AwardPayload {
                     idx: 0,
-                    award_amount: 10.0,
-                    total_pot: 10.0,
+                    award_amount: 10,
+                    total_pot: 10,
                     rank: None,
                     hand: None,
                 }),
@@ -497,9 +497,9 @@ mod tests {
                 12345,
                 &game_state,
                 &Action::GameStart(GameStartPayload {
-                    small_blind: 1.0,
-                    big_blind: 2.0,
-                    ante: 0.0,
+                    small_blind: 1,
+                    big_blind: 2,
+                    ante: 0,
                 }),
             )
             .await
@@ -513,8 +513,8 @@ mod tests {
                 &game_state,
                 &Action::Award(AwardPayload {
                     idx: 0,
-                    award_amount: 200.0,
-                    total_pot: 200.0,
+                    award_amount: 200,
+                    total_pot: 200,
                     rank: None,
                     hand: None,
                 }),
@@ -539,14 +539,14 @@ mod tests {
         let historian = Box::new(OpenHandHistoryVecHistorian::new());
         let storage = historian.get_storage();
 
-        let stacks = vec![50.0; 2];
+        let stacks = vec![50; 2];
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<CallingAgent>::default(),
             Box::<CallingAgent>::default(),
         ];
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(2.0, 1.0)
+            .blinds(2, 1)
             .build()
             .unwrap();
 
@@ -588,9 +588,9 @@ mod tests {
                 12345,
                 &game_state,
                 &Action::GameStart(GameStartPayload {
-                    small_blind: 1.0,
-                    big_blind: 2.0,
-                    ante: 0.0,
+                    small_blind: 1,
+                    big_blind: 2,
+                    ante: 0,
                 }),
             )
             .await
@@ -603,8 +603,8 @@ mod tests {
                 &game_state,
                 &Action::Award(AwardPayload {
                     idx: 0,
-                    award_amount: 3.0,
-                    total_pot: 3.0,
+                    award_amount: 3,
+                    total_pot: 3,
                     rank: None,
                     hand: None,
                 }),
@@ -619,9 +619,9 @@ mod tests {
         // Verify structure
         assert_eq!(wrapper.ohh.spec_version, "1.4.7");
         assert_eq!(wrapper.ohh.game_number, "12345");
-        assert_eq!(wrapper.ohh.small_blind_amount, 1.0);
-        assert_eq!(wrapper.ohh.big_blind_amount, 2.0);
-        assert_eq!(wrapper.ohh.ante_amount, 0.0);
+        assert_eq!(wrapper.ohh.small_blind_amount, 1);
+        assert_eq!(wrapper.ohh.big_blind_amount, 2);
+        assert_eq!(wrapper.ohh.ante_amount, 0);
         assert_eq!(wrapper.ohh.table_size, 2);
     }
 }

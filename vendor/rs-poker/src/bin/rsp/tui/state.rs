@@ -1,3 +1,4 @@
+use rs_poker::Chips;
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     fmt,
@@ -5,19 +6,19 @@ use std::{
 };
 
 use rs_poker::arena::historian::StatsStorage;
-use rs_poker::open_hand_history::{Action, HandHistory};
+use rs_poker::open_hand_history::{Action, HandHistory, RoundObj};
 
 use crate::tui::event::SimError;
 use crate::tui::widgets::stats_table::SortColumn;
 
 /// Threshold for classifying profits as win/loss/breakeven.
-pub const PROFIT_EPSILON: f32 = 0.01;
+pub const ZERO_PROFIT: Chips = 0;
 
 /// Compute per-player profits from an OHH `HandHistory`.
 ///
 /// Returns `(id_to_idx, profits)` where `id_to_idx` maps player IDs to seat
 /// indices and `profits[i]` is the net profit for the player at seat `i`.
-pub fn compute_hand_profits(hand: &HandHistory) -> (HashMap<u64, usize>, Vec<f32>) {
+pub fn compute_hand_profits(hand: &HandHistory) -> (HashMap<u64, usize>, Vec<Chips>) {
     let num_players = hand.players.len();
 
     let id_to_idx: HashMap<u64, usize> = hand
@@ -27,7 +28,7 @@ pub fn compute_hand_profits(hand: &HandHistory) -> (HashMap<u64, usize>, Vec<f32
         .map(|(i, p)| (p.id, i))
         .collect();
 
-    let mut wins = vec![0.0_f32; num_players];
+    let mut wins = vec![0; num_players];
     for pot in &hand.pots {
         for pw in &pot.player_wins {
             if let Some(&idx) = id_to_idx.get(&pw.player_id) {
@@ -36,35 +37,81 @@ pub fn compute_hand_profits(hand: &HandHistory) -> (HashMap<u64, usize>, Vec<f32
         }
     }
 
-    let mut invested = vec![0.0_f32; num_players];
-    for round in &hand.rounds {
-        for action in &round.actions {
-            if let Some(&idx) = id_to_idx.get(&action.player_id)
-                && matches!(
-                    action.action,
-                    Action::Bet
-                        | Action::Raise
-                        | Action::Call
-                        | Action::PostSmallBlind
-                        | Action::PostBigBlind
-                        | Action::PostAnte
-                        | Action::Straddle
-                        | Action::PostDead
-                        | Action::PostExtraBlind
-                        | Action::AddedToPot
-                )
-            {
-                invested[idx] += action.amount;
-            }
-        }
-    }
+    let invested = net_hand_investments(hand);
 
-    let mut profits = vec![0.0_f32; num_players];
+    let mut profits = vec![0; num_players];
     for i in 0..num_players {
         profits[i] = wins[i] - invested[i];
     }
 
     (id_to_idx, profits)
+}
+
+/// Net chips committed by each player, excluding an uncalled street excess.
+/// OHH has no return-bet action; the unique unmatched amount is determined
+/// exactly from the other wagers on each NLHE betting street. This display
+/// calculation assumes a normalized hand; use `replay_hand` for validation.
+pub fn net_hand_investments(hand: &HandHistory) -> Vec<Chips> {
+    let by_id: HashMap<u64, usize> = hand
+        .players
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.id, i))
+        .collect();
+    let mut invested = vec![0; hand.players.len()];
+    for round in &hand.rounds {
+        for action in &round.actions {
+            if matches!(
+                action.action,
+                Action::Bet
+                    | Action::Raise
+                    | Action::Call
+                    | Action::PostSmallBlind
+                    | Action::PostBigBlind
+                    | Action::PostAnte
+                    | Action::Straddle
+                    | Action::PostDead
+                    | Action::PostExtraBlind
+                    | Action::AddedToPot
+            ) {
+                let idx = *by_id
+                    .get(&action.player_id)
+                    .expect("monetary action references a known player");
+                invested[idx] += action.amount;
+            }
+        }
+        if let Some((id, refund)) = uncalled_street_bet(round) {
+            invested[by_id[&id]] -= refund;
+        }
+    }
+    invested
+}
+
+/// The unique amount unmatched by any other live wager on this street.
+pub fn uncalled_street_bet(round: &RoundObj) -> Option<(u64, Chips)> {
+    let mut live: HashMap<u64, Chips> = HashMap::new();
+    for action in &round.actions {
+        if matches!(
+            action.action,
+            Action::Bet
+                | Action::Raise
+                | Action::Call
+                | Action::PostSmallBlind
+                | Action::PostBigBlind
+                | Action::Straddle
+                | Action::PostExtraBlind
+        ) {
+            *live.entry(action.player_id).or_default() += action.amount;
+        }
+    }
+    let (&id, &largest) = live.iter().max_by_key(|(_, amount)| *amount)?;
+    let second = live
+        .iter()
+        .filter(|(other, _)| **other != id)
+        .map(|(_, amount)| *amount)
+        .max()
+        .unwrap_or(0);
+    (largest > second).then_some((id, largest - second))
 }
 
 /// Determine the ending round from a completed game's stats snapshot.
@@ -99,7 +146,7 @@ pub fn ending_round_from_stats(stats: &StatsStorage, num_players: usize) -> Roun
 pub struct SeatStats {
     pub actions_count: usize,
     pub vpip_count: usize,
-    pub vpip_total: f32,
+    pub vpip_total: Chips,
     pub raise_count: usize,
     pub hands_played: usize,
     pub hands_vpip: usize,
@@ -110,8 +157,8 @@ pub struct SeatStats {
     pub three_bet_opportunities: usize,
     pub call_count: usize,
     pub bet_count: usize,
-    pub total_profit: f32,
-    pub total_invested: f32,
+    pub total_profit: Chips,
+    pub total_invested: Chips,
     pub games_won: usize,
     pub games_lost: usize,
     pub games_breakeven: usize,
@@ -248,10 +295,10 @@ impl SeatStats {
 #[derive(Debug, Clone)]
 pub struct GameResult {
     pub agent_names: Vec<String>,
-    pub profits: Vec<f32>,
+    pub profits: Vec<Chips>,
     pub ending_round: RoundLabel,
     pub seat_stats: Vec<SeatStats>,
-    pub big_blind: f32,
+    pub big_blind: Chips,
 }
 
 /// Simplified round label for display.
@@ -294,7 +341,7 @@ impl fmt::Display for RoundLabel {
 #[derive(Debug, Clone)]
 pub struct AgentDisplayData {
     pub name: String,
-    pub total_profit: f32,
+    pub total_profit: Chips,
     /// Cumulative profit in big blinds, accumulated per-game using each game's BB.
     pub profit_bb: f32,
     pub games_played: usize,
@@ -542,16 +589,16 @@ impl GameLogEntry {
     pub fn new(
         game_number: usize,
         agent_names: Vec<String>,
-        profits: Vec<f32>,
+        profits: Vec<Chips>,
         ending_round: RoundLabel,
-        big_blind: f32,
+        big_blind: Chips,
     ) -> Self {
         // Normalize chip amounts to big blinds. A non-positive big blind never
         // occurs in a real game; we treat it as 0 bb so the value still buckets
         // as `ProfitBucket::Small` rather than producing inf/NaN from a divide.
-        let to_bb = |chips: f32| {
-            if big_blind > 0.0 {
-                chips / big_blind
+        let to_bb = |chips: Chips| {
+            if big_blind > 0 {
+                chips as f32 / big_blind as f32
             } else {
                 0.0
             }
@@ -560,18 +607,18 @@ impl GameLogEntry {
         let (winner_name, winner_profit) = agent_names
             .iter()
             .zip(profits.iter())
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| a.1.cmp(b.1))
             .map(|(n, &p)| (n.clone(), to_bb(p)))
             .unwrap_or_default();
 
         let (loser_name, loser_loss) = agent_names
             .iter()
             .zip(profits.iter())
-            .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .min_by(|a, b| a.1.cmp(b.1))
             .map(|(n, &p)| (n.clone(), to_bb(p)))
             .unwrap_or_default();
 
-        let pot_size: f32 = to_bb(profits.iter().filter(|&&p| p > 0.0).sum());
+        let pot_size: f32 = to_bb(profits.iter().filter(|&&p| p > 0).sum());
 
         Self {
             game_number,
@@ -617,7 +664,7 @@ impl GameLogEntry {
 #[derive(Debug, Default, Clone)]
 pub struct ProfitHistory {
     pub first_game_index: usize,
-    pub values: Vec<f32>,
+    pub values: Vec<Chips>,
 }
 
 impl ProfitHistory {
@@ -816,16 +863,16 @@ mod tests {
         StatsStorage::new_with_num_players(num_players)
     }
 
-    fn make_game_result(names: &[&str], profits: &[f32], round: RoundLabel) -> GameResult {
+    fn make_game_result(names: &[&str], profits: &[Chips], round: RoundLabel) -> GameResult {
         let num_players = names.len();
         let mut stats = make_stats(num_players);
         for (i, &profit) in profits.iter().enumerate() {
             stats.total_profit[i] = profit;
             stats.hands_played[i] = 1;
-            stats.total_invested[i] = 10.0;
-            if profit > 0.0 {
+            stats.total_invested[i] = 10;
+            if profit > 0 {
                 stats.games_won[i] = 1;
-            } else if profit < 0.0 {
+            } else if profit < 0 {
                 stats.games_lost[i] = 1;
             } else {
                 stats.games_breakeven[i] = 1;
@@ -839,7 +886,7 @@ mod tests {
             profits: profits.to_vec(),
             ending_round: round,
             seat_stats,
-            big_blind: 10.0,
+            big_blind: 10,
         }
     }
 
@@ -855,7 +902,7 @@ mod tests {
     #[test]
     fn test_update_single_game() {
         let mut state = TuiState::new(Some(10));
-        let result = make_game_result(&["Alice", "Bob"], &[15.0, -15.0], RoundLabel::River);
+        let result = make_game_result(&["Alice", "Bob"], &[15, -15], RoundLabel::River);
         state.update(&result);
 
         assert_eq!(state.games_completed(), 1);
@@ -865,9 +912,9 @@ mod tests {
         assert_eq!(agents.len(), 2);
         // Sorted by profit desc, Alice should be first
         assert_eq!(agents[0].name, "Alice");
-        assert_eq!(agents[0].total_profit, 15.0);
+        assert_eq!(agents[0].total_profit, 15);
         assert_eq!(agents[1].name, "Bob");
-        assert_eq!(agents[1].total_profit, -15.0);
+        assert_eq!(agents[1].total_profit, -15);
     }
 
     #[test]
@@ -875,19 +922,19 @@ mod tests {
         let mut state = TuiState::new(None);
         state.update(&make_game_result(
             &["Alice", "Bob"],
-            &[10.0, -10.0],
+            &[10, -10],
             RoundLabel::Flop,
         ));
         state.update(&make_game_result(
             &["Alice", "Bob"],
-            &[-5.0, 5.0],
+            &[-5, 5],
             RoundLabel::River,
         ));
 
         assert_eq!(state.games_completed(), 2);
         let agents = state.agent_display_data();
         let alice = agents.iter().find(|a| a.name == "Alice").unwrap();
-        assert!((alice.total_profit - 5.0).abs() < 0.01);
+        assert!((alice.total_profit - 5) == 0);
         assert_eq!(alice.games_played, 2);
         assert_eq!(alice.wins, 1);
     }
@@ -895,16 +942,16 @@ mod tests {
     #[test]
     fn test_agent_profit_history_tracks_running_total() {
         let mut state = TuiState::new(None);
-        state.update(&make_game_result(&["Alice"], &[10.0], RoundLabel::Preflop));
-        state.update(&make_game_result(&["Alice"], &[-3.0], RoundLabel::Preflop));
-        state.update(&make_game_result(&["Alice"], &[7.0], RoundLabel::Preflop));
+        state.update(&make_game_result(&["Alice"], &[10], RoundLabel::Preflop));
+        state.update(&make_game_result(&["Alice"], &[-3], RoundLabel::Preflop));
+        state.update(&make_game_result(&["Alice"], &[7], RoundLabel::Preflop));
 
         let histories = state.profit_histories();
         let alice_history = histories.get("Alice").unwrap();
         assert_eq!(alice_history.values.len(), 3);
-        assert!((alice_history.values[0] - 10.0).abs() < 0.01);
-        assert!((alice_history.values[1] - 7.0).abs() < 0.01);
-        assert!((alice_history.values[2] - 14.0).abs() < 0.01);
+        assert!((alice_history.values[0] - 10) == 0);
+        assert!((alice_history.values[1] - 7) == 0);
+        assert!((alice_history.values[2] - 14) == 0);
     }
 
     /// Regression test for M8: once the profit history's ring buffer
@@ -916,7 +963,7 @@ mod tests {
         let mut state = TuiState::new(None);
         let extra = 5;
         for _ in 0..(MAX_PROFIT_HISTORY + extra) {
-            state.update(&make_game_result(&["Alice"], &[1.0], RoundLabel::Preflop));
+            state.update(&make_game_result(&["Alice"], &[1], RoundLabel::Preflop));
         }
 
         let histories = state.profit_histories();
@@ -936,11 +983,11 @@ mod tests {
     #[test]
     fn test_street_distribution_counts_all_rounds() {
         let mut state = TuiState::new(None);
-        state.update(&make_game_result(&["A"], &[1.0], RoundLabel::Preflop));
-        state.update(&make_game_result(&["A"], &[1.0], RoundLabel::Flop));
-        state.update(&make_game_result(&["A"], &[1.0], RoundLabel::Turn));
-        state.update(&make_game_result(&["A"], &[1.0], RoundLabel::River));
-        state.update(&make_game_result(&["A"], &[1.0], RoundLabel::Showdown));
+        state.update(&make_game_result(&["A"], &[1], RoundLabel::Preflop));
+        state.update(&make_game_result(&["A"], &[1], RoundLabel::Flop));
+        state.update(&make_game_result(&["A"], &[1], RoundLabel::Turn));
+        state.update(&make_game_result(&["A"], &[1], RoundLabel::River));
+        state.update(&make_game_result(&["A"], &[1], RoundLabel::Showdown));
 
         assert_eq!(state.street_dist().preflop, 1);
         assert_eq!(state.street_dist().flop, 1);
@@ -954,7 +1001,7 @@ mod tests {
     fn test_progress_calculations() {
         let mut state = TuiState::new(Some(100));
         for _ in 0..50 {
-            state.update(&make_game_result(&["A"], &[1.0], RoundLabel::Preflop));
+            state.update(&make_game_result(&["A"], &[1], RoundLabel::Preflop));
         }
         assert_eq!(state.games_completed(), 50);
         assert!(state.games_per_second() > 0.0);
@@ -969,7 +1016,7 @@ mod tests {
     #[test]
     fn test_eta_returns_none_when_complete() {
         let mut state = TuiState::new(Some(1));
-        state.update(&make_game_result(&["A"], &[1.0], RoundLabel::Preflop));
+        state.update(&make_game_result(&["A"], &[1], RoundLabel::Preflop));
         assert!(state.eta().is_none());
     }
 
@@ -978,7 +1025,7 @@ mod tests {
         let mut state = TuiState::new(None);
         state.update(&make_game_result(
             &["Worst", "Best", "Mid"],
-            &[-10.0, 20.0, 5.0],
+            &[-10, 20, 5],
             RoundLabel::River,
         ));
 
@@ -994,7 +1041,7 @@ mod tests {
         // Same agent in both seats (random with replacement)
         state.update(&make_game_result(
             &["Bot", "Bot"],
-            &[10.0, -10.0],
+            &[10, -10],
             RoundLabel::River,
         ));
 
@@ -1002,12 +1049,12 @@ mod tests {
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0].name, "Bot");
         // Net profit: 10 + (-10) = 0
-        assert!((agents[0].total_profit - 0.0).abs() < 0.01);
+        assert!((agents[0].total_profit - 0) == 0);
         // Should have exactly 1 history entry, not 2
         let histories = state.profit_histories();
         let bot_history = histories.get("Bot").unwrap();
         assert_eq!(bot_history.values.len(), 1);
-        assert!((bot_history.values[0] - 0.0).abs() < 0.01);
+        assert!((bot_history.values[0] - 0) == 0);
         // Both seats count as hands played
         assert_eq!(agents[0].games_played, 2);
     }
@@ -1015,18 +1062,18 @@ mod tests {
     #[test]
     fn test_seat_stats_roundtrip() {
         let mut source = make_stats(3);
-        source.total_profit[1] = 42.0;
+        source.total_profit[1] = 42;
         source.hands_played[1] = 5;
         source.games_won[1] = 3;
 
         let seat = SeatStats::from_storage(&source, 1);
-        assert_eq!(seat.total_profit, 42.0);
+        assert_eq!(seat.total_profit, 42);
         assert_eq!(seat.hands_played, 5);
         assert_eq!(seat.games_won, 3);
 
         let mut dest = make_stats(1);
         seat.merge_into(&mut dest);
-        assert_eq!(dest.total_profit[0], 42.0);
+        assert_eq!(dest.total_profit[0], 42);
         assert_eq!(dest.hands_played[0], 5);
         assert_eq!(dest.games_won[0], 3);
     }
@@ -1087,7 +1134,7 @@ mod tests {
     fn make_entry(
         game_number: usize,
         names: &[&str],
-        profits: &[f32],
+        profits: &[Chips],
         round: RoundLabel,
     ) -> GameLogEntry {
         GameLogEntry::new(
@@ -1095,14 +1142,14 @@ mod tests {
             names.iter().map(|s| s.to_string()).collect(),
             profits.to_vec(),
             round,
-            10.0,
+            10,
         )
     }
 
     #[test]
     fn test_game_log_entry_new_derived_fields() {
         // big blind of 10.0 → chip amounts normalized to big blinds.
-        let entry = make_entry(1, &["Alice", "Bob"], &[15.0, -15.0], RoundLabel::River);
+        let entry = make_entry(1, &["Alice", "Bob"], &[15, -15], RoundLabel::River);
         assert_eq!(entry.winner_name, "Alice");
         assert!((entry.winner_profit - 1.5).abs() < 0.01);
         assert_eq!(entry.loser_name, "Bob");
@@ -1112,12 +1159,7 @@ mod tests {
 
     #[test]
     fn test_game_log_entry_three_players() {
-        let entry = make_entry(
-            1,
-            &["A", "B", "C"],
-            &[20.0, -5.0, -15.0],
-            RoundLabel::Showdown,
-        );
+        let entry = make_entry(1, &["A", "B", "C"], &[20, -5, -15], RoundLabel::Showdown);
         assert_eq!(entry.winner_name, "A");
         assert!((entry.winner_profit - 2.0).abs() < 0.01);
         assert_eq!(entry.loser_name, "C");
@@ -1148,7 +1190,7 @@ mod tests {
     #[test]
     fn test_filter_matches_entry_no_filters() {
         let filter = FilterState::default();
-        let entry = make_entry(1, &["Alice", "Bob"], &[10.0, -10.0], RoundLabel::River);
+        let entry = make_entry(1, &["Alice", "Bob"], &[10, -10], RoundLabel::River);
         assert!(filter.matches_entry(&entry));
     }
 
@@ -1156,7 +1198,7 @@ mod tests {
     fn test_filter_matches_winner() {
         let mut filter = FilterState::default();
         filter.toggle_winner("Alice");
-        let entry = make_entry(1, &["Alice", "Bob"], &[10.0, -10.0], RoundLabel::River);
+        let entry = make_entry(1, &["Alice", "Bob"], &[10, -10], RoundLabel::River);
         assert!(filter.matches_entry(&entry));
 
         // Bob is not a winner in this entry
@@ -1169,7 +1211,7 @@ mod tests {
     fn test_filter_matches_loser() {
         let mut filter = FilterState::default();
         filter.toggle_loser("Bob");
-        let entry = make_entry(1, &["Alice", "Bob"], &[10.0, -10.0], RoundLabel::River);
+        let entry = make_entry(1, &["Alice", "Bob"], &[10, -10], RoundLabel::River);
         assert!(filter.matches_entry(&entry));
 
         let mut filter2 = FilterState::default();
@@ -1181,7 +1223,7 @@ mod tests {
     fn test_filter_matches_participant() {
         let mut filter = FilterState::default();
         filter.toggle_participant("Bob");
-        let entry = make_entry(1, &["Alice", "Bob"], &[10.0, -10.0], RoundLabel::River);
+        let entry = make_entry(1, &["Alice", "Bob"], &[10, -10], RoundLabel::River);
         assert!(filter.matches_entry(&entry));
 
         let mut filter2 = FilterState::default();
@@ -1193,8 +1235,8 @@ mod tests {
     fn test_filter_matches_street() {
         let mut filter = FilterState::default();
         filter.toggle_street(RoundLabel::River);
-        let river_entry = make_entry(1, &["A"], &[1.0], RoundLabel::River);
-        let flop_entry = make_entry(2, &["A"], &[1.0], RoundLabel::Flop);
+        let river_entry = make_entry(1, &["A"], &[1], RoundLabel::River);
+        let flop_entry = make_entry(2, &["A"], &[1], RoundLabel::Flop);
         assert!(filter.matches_entry(&river_entry));
         assert!(!filter.matches_entry(&flop_entry));
     }
@@ -1204,10 +1246,10 @@ mod tests {
         let mut filter = FilterState::default();
         filter.toggle_win_size(ProfitBucket::Medium);
         // 10.0 profit / 10.0 bb = 1.0bb => Small, should not match
-        let entry = make_entry(1, &["A", "B"], &[10.0, -10.0], RoundLabel::River);
+        let entry = make_entry(1, &["A", "B"], &[10, -10], RoundLabel::River);
         assert!(!filter.matches_entry(&entry));
         // 100.0 profit / 10.0 bb = 10.0bb => Medium, should match
-        let entry2 = make_entry(2, &["A", "B"], &[100.0, -100.0], RoundLabel::River);
+        let entry2 = make_entry(2, &["A", "B"], &[100, -100], RoundLabel::River);
         assert!(filter.matches_entry(&entry2));
     }
 
@@ -1216,10 +1258,10 @@ mod tests {
         let mut filter = FilterState::default();
         filter.toggle_loss_size(ProfitBucket::Large);
         // loss = 10.0 / 10.0bb = 1.0bb => Small, should not match
-        let entry = make_entry(1, &["A", "B"], &[10.0, -10.0], RoundLabel::River);
+        let entry = make_entry(1, &["A", "B"], &[10, -10], RoundLabel::River);
         assert!(!filter.matches_entry(&entry));
         // loss = 500.0 / 10.0bb = 50.0bb => Large, should match
-        let entry2 = make_entry(2, &["A", "B"], &[500.0, -500.0], RoundLabel::River);
+        let entry2 = make_entry(2, &["A", "B"], &[500, -500], RoundLabel::River);
         assert!(filter.matches_entry(&entry2));
     }
 
@@ -1230,15 +1272,15 @@ mod tests {
         filter.toggle_winner("Alice");
         filter.toggle_street(RoundLabel::River);
 
-        let matching = make_entry(1, &["Alice", "Bob"], &[10.0, -10.0], RoundLabel::River);
+        let matching = make_entry(1, &["Alice", "Bob"], &[10, -10], RoundLabel::River);
         assert!(filter.matches_entry(&matching));
 
         // Alice wins but wrong street
-        let wrong_street = make_entry(2, &["Alice", "Bob"], &[10.0, -10.0], RoundLabel::Flop);
+        let wrong_street = make_entry(2, &["Alice", "Bob"], &[10, -10], RoundLabel::Flop);
         assert!(!filter.matches_entry(&wrong_street));
 
         // Right street but Alice lost
-        let alice_lost = make_entry(3, &["Alice", "Bob"], &[-10.0, 10.0], RoundLabel::River);
+        let alice_lost = make_entry(3, &["Alice", "Bob"], &[-10, 10], RoundLabel::River);
         assert!(!filter.matches_entry(&alice_lost));
     }
 
@@ -1247,12 +1289,12 @@ mod tests {
         let mut state = TuiState::new(None);
         state.update(&make_game_result(
             &["Charlie", "Alice"],
-            &[10.0, -10.0],
+            &[10, -10],
             RoundLabel::River,
         ));
         state.update(&make_game_result(
             &["Bob", "Alice"],
-            &[5.0, -5.0],
+            &[5, -5],
             RoundLabel::Flop,
         ));
         let names = state.all_agent_names();

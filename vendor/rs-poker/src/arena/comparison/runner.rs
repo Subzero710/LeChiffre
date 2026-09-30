@@ -392,7 +392,7 @@ impl ArenaComparison {
         println!("Game Settings:");
         println!("  Big Blind: {}", self.config.big_blind);
         println!("  Small Blind: {}", self.config.small_blind);
-        if self.config.ante > 0.0 {
+        if self.config.ante > 0 {
             println!("  Ante: {}", self.config.ante);
         }
         println!(
@@ -683,7 +683,7 @@ mod tests {
         // Total profit should sum to approximately zero (within floating point tolerance)
         let total_profit = a_stats.total_profit + b_stats.total_profit;
         assert!(
-            total_profit.abs() < 1.0,
+            total_profit.abs() < 1,
             "Total profit should be approximately zero, got {}",
             total_profit
         );
@@ -794,7 +794,7 @@ mod tests {
         // When ante == 0.0, the ante line should NOT be printed
         let comparison_with_ante = ComparisonBuilder::new()
             .players_per_table(2)
-            .ante(1.0)
+            .ante(1)
             .add_agent_config(AgentConfig::Folding {
                 name: Some("A".to_string()),
             })
@@ -806,7 +806,7 @@ mod tests {
 
         let comparison_without_ante = ComparisonBuilder::new()
             .players_per_table(2)
-            .ante(0.0)
+            .ante(0)
             .add_agent_config(AgentConfig::Folding {
                 name: Some("A".to_string()),
             })
@@ -817,8 +817,8 @@ mod tests {
             .unwrap();
 
         // Verify ante values are correctly stored
-        assert!(comparison_with_ante.config().ante > 0.0);
-        assert_eq!(comparison_without_ante.config().ante, 0.0);
+        assert!(comparison_with_ante.config().ante > 0);
+        assert_eq!(comparison_without_ante.config().ante, 0);
 
         // Print both - they should not panic and use different code paths
         comparison_with_ante.print_configuration_summary();

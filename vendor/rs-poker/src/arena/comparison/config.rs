@@ -1,3 +1,4 @@
+use crate::arena::{Chips, money::apply_ratio};
 use std::path::PathBuf;
 
 use super::error::{ComparisonConfigError, Result};
@@ -10,15 +11,15 @@ pub struct ComparisonConfig {
     /// Number of players per table
     pub players_per_table: usize,
     /// Big blind amount
-    pub big_blind: f32,
+    pub big_blind: Chips,
     /// Small blind amount
-    pub small_blind: f32,
+    pub small_blind: Chips,
     /// Minimum starting stack in big blinds
     pub min_stack_bb: f32,
     /// Maximum starting stack in big blinds
     pub max_stack_bb: f32,
     /// Ante amount (0.0 for no ante)
-    pub ante: f32,
+    pub ante: Chips,
     /// Optional directory to save game history and results
     pub output_dir: Option<PathBuf>,
     /// Optional random seed for reproducibility
@@ -30,11 +31,11 @@ impl Default for ComparisonConfig {
         Self {
             num_games: 1000,
             players_per_table: 3,
-            big_blind: 10.0,
-            small_blind: 5.0,
+            big_blind: 10,
+            small_blind: 5,
             min_stack_bb: 100.0,
             max_stack_bb: 100.0,
-            ante: 0.0,
+            ante: 0,
             output_dir: None,
             seed: None,
         }
@@ -67,11 +68,11 @@ impl ComparisonConfig {
             return Err(ComparisonConfigError::NumGamesZero.into());
         }
 
-        if self.big_blind <= 0.0 {
+        if self.big_blind <= 0 {
             return Err(ComparisonConfigError::NonPositiveBigBlind(self.big_blind).into());
         }
 
-        if self.small_blind <= 0.0 {
+        if self.small_blind <= 0 {
             return Err(ComparisonConfigError::NonPositiveSmallBlind(self.small_blind).into());
         }
 
@@ -99,7 +100,7 @@ impl ComparisonConfig {
             .into());
         }
 
-        if self.ante < 0.0 {
+        if self.ante < 0 {
             return Err(ComparisonConfigError::NegativeAnte(self.ante).into());
         }
 
@@ -107,13 +108,13 @@ impl ComparisonConfig {
     }
 
     /// Get the minimum stack size in chips
-    pub fn min_stack(&self) -> f32 {
-        self.min_stack_bb * self.big_blind
+    pub fn min_stack(&self) -> Chips {
+        apply_ratio(self.big_blind, self.min_stack_bb)
     }
 
     /// Get the maximum stack size in chips
-    pub fn max_stack(&self) -> f32 {
-        self.max_stack_bb * self.big_blind
+    pub fn max_stack(&self) -> Chips {
+        apply_ratio(self.big_blind, self.max_stack_bb)
     }
 }
 
@@ -126,11 +127,11 @@ mod tests {
         let config = ComparisonConfig::default();
         assert_eq!(config.num_games, 1000);
         assert_eq!(config.players_per_table, 3);
-        assert_eq!(config.big_blind, 10.0);
-        assert_eq!(config.small_blind, 5.0);
+        assert_eq!(config.big_blind, 10);
+        assert_eq!(config.small_blind, 5);
         assert_eq!(config.min_stack_bb, 100.0);
         assert_eq!(config.max_stack_bb, 100.0);
-        assert_eq!(config.ante, 0.0);
+        assert_eq!(config.ante, 0);
         assert!(config.output_dir.is_none());
         assert!(config.seed.is_none());
     }
@@ -171,8 +172,8 @@ mod tests {
     #[test]
     fn test_validate_invalid_blinds() {
         let config = ComparisonConfig {
-            big_blind: 5.0,
-            small_blind: 10.0,
+            big_blind: 5,
+            small_blind: 10,
             ..Default::default()
         };
         assert!(config.validate(5).is_err());
@@ -191,12 +192,12 @@ mod tests {
     #[test]
     fn test_stack_calculations() {
         let config = ComparisonConfig {
-            big_blind: 10.0,
+            big_blind: 10,
             min_stack_bb: 100.0,
             max_stack_bb: 200.0,
             ..Default::default()
         };
-        assert_eq!(config.min_stack(), 1000.0);
-        assert_eq!(config.max_stack(), 2000.0);
+        assert_eq!(config.min_stack(), 1000);
+        assert_eq!(config.max_stack(), 2000);
     }
 }

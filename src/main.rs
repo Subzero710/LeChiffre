@@ -1,15 +1,10 @@
-use rs_poker::arena::{
-    Agent,
-    GameStateBuilder,
-    HoldemSimulationBuilder,
-    agent::RandomAgent,
-};
+use rs_poker::arena::{Agent, GameStateBuilder, HoldemSimulationBuilder, agent::RandomAgent};
 
 #[tokio::main]
 async fn main() {
     let game_state = GameStateBuilder::new()
-        .num_players_with_stack(2, 100.0)
-        .blinds(2.0, 1.0)
+        .num_players_with_stack(2, 100)
+        .blinds(2, 1)
         .dealer_idx(0)
         .max_raises_per_round(None)
         .build()

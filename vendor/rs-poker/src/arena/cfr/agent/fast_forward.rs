@@ -1,7 +1,12 @@
+use crate::arena::{
+    Chips,
+    game_state::MAX_PLAYERS,
+    pot::{PotSlice, plan_pots, winnings_for_ranks},
+};
 use rand::Rng;
 
 use crate::arena::{GameState, action::AgentAction, game_state::Round};
-use crate::core::{Card, Deck, PlayerBitSet, Rank, Rankable, SevenCardAccum, Suit, Value};
+use crate::core::{Card, Deck, PlayerBitSet, Rankable, SevenCardAccum, Suit, Value};
 
 /// Upper bound on simultaneous contenders. `PlayerBitSet` is `u16`-backed, so a
 /// table seats at most 16 players; contenders never exceed that. Lets the
@@ -21,32 +26,19 @@ const DECK_LEN: usize = 52;
 // assuming every further action is a check/call, and distribute a single pot.
 // -----------------------------------------------------------------------------
 
-/// Apply a single action on behalf of the current to-act player.
-///
-/// If the action fails validation (e.g. an illegal raise size because the
-/// game state has drifted), we fall back to calling the current bet. An
-/// unreachable edge case should degrade gracefully rather than poisoning
-/// the reward signal.
+/// Apply a validated generated action; illegal actions cannot change the reward silently.
 pub(super) fn fast_forward_apply_action(gs: &mut GameState, action: &AgentAction) {
-    let call_current_bet = |gs: &mut GameState| {
-        let _ = gs.do_bet(gs.current_round_bet(), false);
+    let amount = match action {
+        AgentAction::Fold => {
+            gs.fold();
+            return;
+        }
+        AgentAction::Call => gs.current_round_bet(),
+        AgentAction::Bet(amount) => *amount,
+        AgentAction::AllIn => gs.current_round_current_player_bet() + gs.current_player_stack(),
     };
-    match action {
-        AgentAction::Fold => gs.fold(),
-        AgentAction::Call => call_current_bet(gs),
-        AgentAction::Bet(amount) => {
-            if gs.do_bet(*amount, false).is_err() {
-                call_current_bet(gs);
-            }
-        }
-        AgentAction::AllIn => {
-            let idx = gs.to_act_idx();
-            let target = gs.stacks[idx] + gs.current_round_player_bet(idx);
-            if gs.do_bet(target, false).is_err() {
-                call_current_bet(gs);
-            }
-        }
-    }
+    gs.do_bet(amount, false)
+        .expect("illegal CFR fast-forward action");
 }
 
 /// Walk the game state forward through any remaining rounds. Betting rounds
@@ -92,11 +84,8 @@ fn fast_forward_everyone_calls(gs: &mut GameState) {
             break;
         }
         let to_match = gs.current_round_bet();
-        if gs.do_bet(to_match, false).is_err() {
-            // The call validator can reject in pathological states (e.g.
-            // NaN). Fall back to a check so we don't loop forever.
-            let _ = gs.do_bet(0.0, false);
-        }
+        gs.do_bet(to_match, false)
+            .expect("illegal fast-forward call");
     }
 }
 
@@ -122,7 +111,9 @@ fn fast_forward_deal_community_cards<R: Rng>(
     rng: &mut R,
 ) {
     for _ in 0..num_cards {
-        let Some(card) = deck.deal(rng) else { return };
+        let card = deck
+            .deal(rng)
+            .expect("valid NLHE deck must have the remaining community cards");
         gs.board.push(card);
         for hand in gs.hands.iter_mut() {
             hand.insert(card);
@@ -130,56 +121,9 @@ fn fast_forward_deal_community_cards<R: Rng>(
     }
 }
 
-/// Award the full pot to the best hand(s) among players still in the pot.
-/// Uses a single pot (no side pots): ties split evenly.
+/// Settle exactly the same main/side pots, rake and odd chips as the full simulation.
 pub(super) fn fast_forward_distribute_pot(gs: &mut GameState) {
-    let contenders = gs.player_active | gs.player_all_in;
-    let count = contenders.count();
-    if count == 0 {
-        return;
-    }
-    let gross_pot = gs.total_pot;
-    if gross_pot <= 0.0 {
-        return;
-    }
-    let pot = gs.take_rake(gross_pot);
-    if count == 1 {
-        let winner = contenders.ones().next().unwrap();
-        gs.award(winner, pot);
-        gs.total_pot = 0.0;
-        return;
-    }
-    let winners = find_winners(&contenders, &gs.hands);
-    let split = pot / winners.count() as f32;
-    for idx in winners.ones() {
-        gs.award(idx, split);
-    }
-    gs.total_pot = 0.0;
-}
-
-/// Rank each contender's hand and return the set of player indices that share
-/// the best rank. Ties are reported as multiple winners; the caller decides how
-/// to split the pot.
-fn find_winners(contenders: &PlayerBitSet, hands: &[crate::core::Hand]) -> PlayerBitSet {
-    let mut best_rank = None;
-    let mut winners = PlayerBitSet::default();
-    for idx in contenders.ones() {
-        let rank = hands[idx].rank();
-        match best_rank {
-            None => {
-                best_rank = Some(rank);
-                winners.enable(idx);
-            }
-            Some(current) if rank > current => {
-                best_rank = Some(rank);
-                winners = PlayerBitSet::default();
-                winners.enable(idx);
-            }
-            Some(current) if rank == current => winners.enable(idx),
-            _ => {}
-        }
-    }
-    winners
+    crate::arena::pot::settle_pots(gs);
 }
 
 /// Advance the game state through all remaining betting rounds (everyone
@@ -217,21 +161,16 @@ fn fast_forward_uncontested_reward(
     contenders: PlayerBitSet,
     player_idx: usize,
 ) -> Option<f32> {
-    match contenders.count() {
-        0 => Some(gs.player_reward(player_idx)),
-        1 => {
-            let winner = contenders.ones().next().unwrap();
-            let winnings = if winner == player_idx {
-                // An uncontested hand ends immediately; whether a flop exists in
-                // the current state therefore determines no-flop-no-drop.
-                gs.net_pot_after_rake(gs.total_pot, gs.board.len() >= 3)
-            } else {
-                0.0
-            };
-            Some(gs.stacks[player_idx] + winnings - gs.starting_stacks[player_idx])
-        }
-        _ => None,
+    if contenders.count() > 1 {
+        return None;
     }
+    let pots = plan_pots(gs, gs.board.len() >= 3);
+    let mut ranks = [None; MAX_PLAYERS];
+    for idx in contenders.ones() {
+        ranks[idx] = Some(gs.hands[idx].rank());
+    }
+    let winnings = winnings_for_ranks(&pots, &ranks, gs, player_idx);
+    Some((gs.stacks[player_idx] + winnings - gs.starting_stacks[player_idx]) as f32)
 }
 
 /// Enumerate all possible board completions and compute the exact expected
@@ -253,6 +192,10 @@ pub(super) fn fast_forward_enumerate_showdowns(
     player_idx: usize,
     cards_needed: usize,
 ) -> f32 {
+    assert!(
+        cards_needed <= 2,
+        "enumeration accepts at most two remaining cards"
+    );
     let contenders = gs.player_active | gs.player_all_in;
 
     // No contenders (everyone folded; pot already awarded) or a single
@@ -262,17 +205,17 @@ pub(super) fn fast_forward_enumerate_showdowns(
     }
 
     let gross_pot = gs.total_pot;
-    if gross_pot <= 0.0 {
-        return gs.player_reward(player_idx);
+    if gross_pot <= 0 {
+        return gs.player_reward(player_idx) as f32;
     }
     // If three cards still need to be dealt, every enumerated showdown reaches
     // a flop. Otherwise the current board already tells us whether a flop exists.
     let flop_dealt = gs.board.len() >= 3 || cards_needed >= 3;
-    let pot = gs.net_pot_after_rake(gross_pot, flop_dealt);
+    let pots = plan_pots(gs, flop_dealt);
 
     if cards_needed == 0 {
         // Board is complete — just evaluate the showdown.
-        return evaluate_showdown_reward(gs, &contenders, pot, player_idx);
+        return evaluate_showdown_reward(gs, &contenders, &pots, player_idx);
     }
 
     // Collect the remaining deck into a stack buffer for indexed access.
@@ -303,8 +246,8 @@ pub(super) fn fast_forward_enumerate_showdowns(
     if cards_needed == 1 {
         // Enumerate single card (river).
         for &card in remaining {
-            let reward = combo_reward::<1>(base, player_idx, pot, [card]);
-            total_reward += f64::from(remaining_stack + reward - starting_stack);
+            let reward = combo_reward::<1>(base, player_idx, &pots, gs, [card]);
+            total_reward += (remaining_stack + reward - starting_stack) as f64;
             count += 1;
         }
     } else {
@@ -312,8 +255,9 @@ pub(super) fn fast_forward_enumerate_showdowns(
         // Card order doesn't matter for hand evaluation, so visit each once.
         for i in 0..remaining.len() {
             for j in (i + 1)..remaining.len() {
-                let reward = combo_reward::<2>(base, player_idx, pot, [remaining[i], remaining[j]]);
-                total_reward += f64::from(remaining_stack + reward - starting_stack);
+                let reward =
+                    combo_reward::<2>(base, player_idx, &pots, gs, [remaining[i], remaining[j]]);
+                total_reward += (remaining_stack + reward - starting_stack) as f64;
                 count += 1;
             }
         }
@@ -351,6 +295,10 @@ pub(super) fn fast_forward_sample_flop_enumerate_runout_n<R: Rng>(
     rng: &mut R,
     num_samples: usize,
 ) -> f32 {
+    assert!(
+        num_samples > 0,
+        "flop expectation requires at least one sample"
+    );
     let contenders = gs.player_active | gs.player_all_in;
 
     // No contenders (everyone folded) or a single contender (wins regardless of
@@ -360,12 +308,12 @@ pub(super) fn fast_forward_sample_flop_enumerate_runout_n<R: Rng>(
     }
 
     let gross_pot = gs.total_pot;
-    if gross_pot <= 0.0 {
-        return gs.player_reward(player_idx);
+    if gross_pot <= 0 {
+        return gs.player_reward(player_idx) as f32;
     }
     // This path explicitly samples a flop, so no-flop-no-drop never suppresses
     // rake for the resulting showdown.
-    let pot = gs.net_pot_after_rake(gross_pot, true);
+    let pots = plan_pots(gs, true);
 
     let mut deck = fast_forward_remaining_deck(gs);
     let starting_stack = gs.starting_stacks[player_idx];
@@ -424,8 +372,9 @@ pub(super) fn fast_forward_sample_flop_enumerate_runout_n<R: Rng>(
         let remaining = &card_buf[..rn];
         for i in 0..remaining.len() {
             for j in (i + 1)..remaining.len() {
-                let reward = combo_reward::<2>(base, player_idx, pot, [remaining[i], remaining[j]]);
-                total_reward += f64::from(remaining_stack + reward - starting_stack);
+                let reward =
+                    combo_reward::<2>(base, player_idx, &pots, gs, [remaining[i], remaining[j]]);
+                total_reward += (remaining_stack + reward - starting_stack) as f64;
                 total_count += 1;
             }
         }
@@ -437,7 +386,7 @@ pub(super) fn fast_forward_sample_flop_enumerate_runout_n<R: Rng>(
     }
 
     if total_count == 0 {
-        return gs.player_reward(player_idx);
+        return gs.player_reward(player_idx) as f32;
     }
 
     (total_reward / total_count as f64) as f32
@@ -483,39 +432,19 @@ fn contender_accums<'b>(
 fn combo_reward<const N: usize>(
     base: &[(usize, SevenCardAccum)],
     player_idx: usize,
-    pot: f32,
+    pots: &[PotSlice],
+    gs: &GameState,
     extra: [crate::core::Card; N],
-) -> f32 {
-    let mut best: Option<Rank> = None;
-    let mut win_count = 0u32;
-    let mut player_wins = false;
+) -> Chips {
+    let mut ranks = [None; MAX_PLAYERS];
     for &(idx, base_acc) in base {
         let mut acc = base_acc;
         for card in extra {
             acc.add(card);
         }
-        let rank = acc.rank();
-        match best {
-            // A strictly worse hand never affects the winner set.
-            Some(b) if rank < b => {}
-            // A tie for the lead adds another contender to the split.
-            Some(b) if rank == b => {
-                win_count += 1;
-                player_wins |= idx == player_idx;
-            }
-            // `None` (first contender) or a new strict leader resets the set.
-            _ => {
-                best = Some(rank);
-                win_count = 1;
-                player_wins = idx == player_idx;
-            }
-        }
+        ranks[idx] = Some(acc.rank());
     }
-    if player_wins {
-        pot / win_count as f32
-    } else {
-        0.0
-    }
+    winnings_for_ranks(pots, &ranks, gs, player_idx)
 }
 
 /// Evaluate showdown with the current board (no extra cards).
@@ -524,13 +453,13 @@ fn combo_reward<const N: usize>(
 fn evaluate_showdown_reward(
     gs: &GameState,
     contenders: &PlayerBitSet,
-    pot: f32,
+    pots: &[PotSlice],
     player_idx: usize,
 ) -> f32 {
     let mut acc_buf = [(0usize, SevenCardAccum::new()); MAX_CONTENDERS];
     let base = contender_accums(gs, contenders, &mut acc_buf);
-    let reward = combo_reward::<0>(base, player_idx, pot, []);
-    gs.stacks[player_idx] + reward - gs.starting_stacks[player_idx]
+    let reward = combo_reward::<0>(base, player_idx, &pots, gs, []);
+    (gs.stacks[player_idx] + reward - gs.starting_stacks[player_idx]) as f32
 }
 
 #[cfg(test)]
@@ -540,23 +469,30 @@ mod tests {
 
     #[test]
     fn distribute_pot_applies_rake_in_fast_forward() {
-        let rake = RakeConfig::new(0.10, f32::INFINITY, false).unwrap();
+        let rake = RakeConfig::new(
+            crate::arena::RakeRate::new(10, 100).unwrap(),
+            None,
+            false,
+            crate::arena::RakeRounding::HalfToEven,
+        )
+        .unwrap();
         let mut gs = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .big_blind(2.0)
+            .stacks(vec![100, 100])
+            .big_blind(2)
             .rake(rake)
             .build()
             .unwrap();
 
-        gs.stacks[0] = 90.0;
-        gs.stacks[1] = 90.0;
-        gs.total_pot = 20.0;
+        gs.stacks[0] = 90;
+        gs.stacks[1] = 90;
+        gs.total_pot = 20;
+        gs.player_bet = vec![10, 10].into();
         gs.player_active.disable(1);
 
         fast_forward_distribute_pot(&mut gs);
 
-        assert_eq!(gs.rake_collected, 2.0);
-        assert_eq!(gs.stacks[0], 108.0);
-        assert_eq!(gs.total_pot, 0.0);
+        assert_eq!(gs.rake_collected, 2);
+        assert_eq!(gs.stacks[0], 108);
+        assert_eq!(gs.total_pot, 20);
     }
 }

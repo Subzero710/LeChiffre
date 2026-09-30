@@ -166,7 +166,7 @@ impl CFRHistorian {
         // (which should net to zero in a zero-sum game). This field is only used
         // for export/visualization, not by the CFR algorithm itself.
         let total_reward: f32 = (0..self.traversal_set.num_players())
-            .map(|idx| game_state.player_reward(idx))
+            .map(|idx| game_state.player_reward(idx) as f32)
             .sum();
 
         if total_reward != 0.0 {
@@ -200,7 +200,7 @@ impl Historian for CFRHistorian {
             Action::RoundAdvance(_) => Ok(()),
             // Rather than use award since it can be for a side pot we use the final award amount
             // in the terminal node.
-            Action::Award(_) => Ok(()),
+            Action::Award(_) | Action::ReturnUncalledBet(_) => Ok(()),
             Action::DealStartingHand(payload) => self.record_starting_hand_card(payload.card),
             Action::PlayedAction(payload) => CFRHistorian::record_action(self, game_state, payload),
             Action::FailedAction(failed_action_payload) => {

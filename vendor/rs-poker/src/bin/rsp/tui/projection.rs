@@ -1,3 +1,4 @@
+use rs_poker::Chips;
 use std::collections::HashMap;
 
 use rs_poker::arena::historian::StatsStorage;
@@ -73,14 +74,14 @@ impl Projection {
 
         // Group profits by agent name so an agent in multiple seats gets one
         // history entry per game, not one per seat.
-        let mut agent_profits: HashMap<&str, f32> = HashMap::new();
+        let mut agent_profits: HashMap<&str, Chips> = HashMap::new();
         for (seat_idx, name) in result.agent_names.iter().enumerate() {
             *agent_profits.entry(name.as_str()).or_default() += result.profits[seat_idx];
         }
         for (name, profit) in agent_profits {
-            if result.big_blind > 0.0 {
+            if result.big_blind > 0 {
                 *self.agent_profit_bb.entry(name.to_string()).or_default() +=
-                    profit / result.big_blind;
+                    profit as f32 / result.big_blind as f32;
             }
             let history = self
                 .agent_profit_history
@@ -89,7 +90,7 @@ impl Projection {
                     first_game_index: self.game_count,
                     values: Vec::new(),
                 });
-            let prev = history.values.last().copied().unwrap_or(0.0);
+            let prev = history.values.last().copied().unwrap_or(0);
             history.values.push(prev + profit);
             if history.values.len() > MAX_PROFIT_HISTORY {
                 let drop_count = history.values.len() - MAX_PROFIT_HISTORY;
@@ -223,16 +224,16 @@ mod tests {
     use crate::tui::widgets::stats_table::SortColumn;
     use rs_poker::arena::historian::StatsStorage;
 
-    fn make_game_result(names: &[&str], profits: &[f32], round: RoundLabel) -> GameResult {
+    fn make_game_result(names: &[&str], profits: &[Chips], round: RoundLabel) -> GameResult {
         let n = names.len();
         let mut stats = StatsStorage::new_with_num_players(n);
         for (i, &p) in profits.iter().enumerate() {
             stats.total_profit[i] = p;
             stats.hands_played[i] = 1;
-            stats.total_invested[i] = 10.0;
-            if p > 0.0 {
+            stats.total_invested[i] = 10;
+            if p > 0 {
                 stats.games_won[i] = 1;
-            } else if p < 0.0 {
+            } else if p < 0 {
                 stats.games_lost[i] = 1;
             } else {
                 stats.games_breakeven[i] = 1;
@@ -244,7 +245,7 @@ mod tests {
             profits: profits.to_vec(),
             ending_round: round,
             seat_stats,
-            big_blind: 10.0,
+            big_blind: 10,
         }
     }
 
@@ -253,12 +254,12 @@ mod tests {
         let mut p = Projection::new();
         p.fold(&make_game_result(
             &["Alice", "Bob"],
-            &[10.0, -10.0],
+            &[10, -10],
             RoundLabel::Flop,
         ));
         p.fold(&make_game_result(
             &["Alice", "Bob"],
-            &[-5.0, 5.0],
+            &[-5, 5],
             RoundLabel::River,
         ));
         assert_eq!(p.game_count(), 2);
@@ -267,7 +268,7 @@ mod tests {
 
         let agents = p.agent_display_data(SortColumn::Profit);
         let alice = agents.iter().find(|a| a.name == "Alice").unwrap();
-        assert!((alice.total_profit - 5.0).abs() < 0.01);
+        assert!((alice.total_profit - 5) == 0);
         assert_eq!(alice.games_played, 2);
         assert_eq!(alice.wins, 1);
     }
@@ -275,7 +276,7 @@ mod tests {
     #[test]
     fn test_filtered_projection_indexes_profit_history_from_one() {
         let mut p = Projection::new();
-        p.fold(&make_game_result(&["Alice"], &[3.0], RoundLabel::Preflop));
+        p.fold(&make_game_result(&["Alice"], &[3], RoundLabel::Preflop));
         let hist = p.profit_histories().get("Alice").unwrap();
         assert_eq!(hist.first_game_index, 1);
         assert_eq!(hist.x_at(0), 1);
@@ -284,7 +285,7 @@ mod tests {
     #[test]
     fn test_display_cache_invalidation() {
         let mut p = Projection::new();
-        p.fold(&make_game_result(&["A"], &[1.0], RoundLabel::Preflop));
+        p.fold(&make_game_result(&["A"], &[1], RoundLabel::Preflop));
         let first = p.agent_display_data(SortColumn::Profit);
         p.invalidate_display_cache();
         let second = p.agent_display_data(SortColumn::Name);
@@ -301,7 +302,7 @@ mod tests {
         let mut p = Projection::new();
         p.fold(&make_game_result(
             &["Zeb", "Amy"],
-            &[20.0, -20.0],
+            &[20, -20],
             RoundLabel::River,
         ));
 

@@ -274,14 +274,14 @@ mod tests {
 
     fn create_test_game_state() -> GameState {
         GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .build()
             .unwrap()
     }
 
     fn create_mapper() -> ActionIndexMapper {
-        ActionIndexMapper::new(ActionIndexMapperConfig::new(10.0, 100.0))
+        ActionIndexMapper::new(ActionIndexMapperConfig::new(10, 100))
     }
 
     fn create_seeded_rng() -> rand::rngs::StdRng {
@@ -293,11 +293,7 @@ mod tests {
     fn test_pick_action_uniform_no_regret_matcher() {
         let game_state = create_test_game_state();
         let mapper = create_mapper();
-        let actions = vec![
-            AgentAction::Fold,
-            AgentAction::Bet(10.0),
-            AgentAction::AllIn,
-        ];
+        let actions = vec![AgentAction::Fold, AgentAction::Bet(10), AgentAction::AllIn];
         let mut rng = create_seeded_rng();
 
         let picker = ActionPicker::new(&mapper, &actions, None, &game_state);
@@ -315,11 +311,7 @@ mod tests {
     fn test_pick_action_with_regret_matcher() {
         let game_state = create_test_game_state();
         let mapper = create_mapper();
-        let actions = vec![
-            AgentAction::Fold,
-            AgentAction::Bet(10.0),
-            AgentAction::AllIn,
-        ];
+        let actions = vec![AgentAction::Fold, AgentAction::Bet(10), AgentAction::AllIn];
         let mut rng = create_seeded_rng();
 
         // Create a regret matcher with 52 experts (our standard action space)
@@ -355,11 +347,7 @@ mod tests {
     fn test_pick_best_action_no_regret_matcher() {
         let game_state = create_test_game_state();
         let mapper = create_mapper();
-        let actions = vec![
-            AgentAction::Fold,
-            AgentAction::Bet(10.0),
-            AgentAction::AllIn,
-        ];
+        let actions = vec![AgentAction::Fold, AgentAction::Bet(10), AgentAction::AllIn];
 
         let picker = ActionPicker::new(&mapper, &actions, None, &game_state);
 
@@ -372,11 +360,7 @@ mod tests {
     fn test_pick_best_action_with_regret_matcher() {
         let game_state = create_test_game_state();
         let mapper = create_mapper();
-        let actions = vec![
-            AgentAction::Fold,
-            AgentAction::Bet(10.0),
-            AgentAction::AllIn,
-        ];
+        let actions = vec![AgentAction::Fold, AgentAction::Bet(10), AgentAction::AllIn];
 
         // Create a regret matcher that favors all-in
         let mut matcher = PcfrPlusRegretMatcher::new(NUM_ACTION_INDICES);
@@ -399,7 +383,7 @@ mod tests {
         let mapper = create_mapper();
 
         // Only one valid action
-        let actions = vec![AgentAction::Bet(10.0)];
+        let actions = vec![AgentAction::Bet(10)];
 
         // Create a regret matcher that would favor other actions
         let mut matcher = PcfrPlusRegretMatcher::new(NUM_ACTION_INDICES);
@@ -414,18 +398,14 @@ mod tests {
 
         // Must return the only valid action
         let picked = picker.pick_action(&mut rng);
-        assert_eq!(picked, AgentAction::Bet(10.0));
+        assert_eq!(picked, AgentAction::Bet(10));
     }
 
     #[test]
     fn test_handles_zero_weights() {
         let game_state = create_test_game_state();
         let mapper = create_mapper();
-        let actions = vec![
-            AgentAction::Fold,
-            AgentAction::Bet(10.0),
-            AgentAction::AllIn,
-        ];
+        let actions = vec![AgentAction::Fold, AgentAction::Bet(10), AgentAction::AllIn];
         let mut rng = create_seeded_rng();
 
         // Create a regret matcher with all zero weights
@@ -446,11 +426,7 @@ mod tests {
     fn test_pick_best_action_deterministic() {
         let game_state = create_test_game_state();
         let mapper = create_mapper();
-        let actions = vec![
-            AgentAction::Fold,
-            AgentAction::Bet(50.0),
-            AgentAction::AllIn,
-        ];
+        let actions = vec![AgentAction::Fold, AgentAction::Bet(50), AgentAction::AllIn];
 
         // Create a regret matcher that strongly favors fold
         let mut matcher = PcfrPlusRegretMatcher::new(NUM_ACTION_INDICES);
@@ -477,9 +453,9 @@ mod tests {
         let mapper = create_mapper();
 
         // Different bet amounts should map to different indices
-        let small_bet = AgentAction::Bet(15.0);
-        let medium_bet = AgentAction::Bet(50.0);
-        let large_bet = AgentAction::Bet(90.0);
+        let small_bet = AgentAction::Bet(15);
+        let medium_bet = AgentAction::Bet(50);
+        let large_bet = AgentAction::Bet(90);
 
         let small_idx = mapper.action_to_idx(&small_bet, &game_state);
         let medium_idx = mapper.action_to_idx(&medium_bet, &game_state);
@@ -545,7 +521,7 @@ mod tests {
         let mapper = create_mapper();
 
         // Scenario: only fold and call are valid (common after an all-in)
-        let actions = vec![AgentAction::Fold, AgentAction::Bet(10.0)];
+        let actions = vec![AgentAction::Fold, AgentAction::Bet(10)];
 
         // Matcher strongly prefers call (index 1 = check/call)
         let mut matcher = PcfrPlusRegretMatcher::new(NUM_ACTION_INDICES);
@@ -555,7 +531,7 @@ mod tests {
 
         // Note: Bet(10.0) maps to a raise index, not call index.
         // Let's update for the actual index the bet maps to.
-        let bet_idx = mapper.action_to_idx(&AgentAction::Bet(10.0), &game_state);
+        let bet_idx = mapper.action_to_idx(&AgentAction::Bet(10), &game_state);
         rewards[bet_idx] = 50.0;
 
         matcher.update_regret(&rewards);
@@ -583,17 +559,13 @@ mod tests {
     fn test_pick_best_handles_ties() {
         let game_state = create_test_game_state();
         let mapper = create_mapper();
-        let actions = vec![
-            AgentAction::Fold,
-            AgentAction::Bet(50.0),
-            AgentAction::AllIn,
-        ];
+        let actions = vec![AgentAction::Fold, AgentAction::Bet(50), AgentAction::AllIn];
 
         // All actions have equal weight
         let mut matcher = PcfrPlusRegretMatcher::new(NUM_ACTION_INDICES);
         let mut rewards = vec![0.0; NUM_ACTION_INDICES];
         rewards[0] = 10.0; // Fold
-        let bet_idx = mapper.action_to_idx(&AgentAction::Bet(50.0), &game_state);
+        let bet_idx = mapper.action_to_idx(&AgentAction::Bet(50), &game_state);
         rewards[bet_idx] = 10.0; // Same weight
         rewards[ACTION_IDX_ALL_IN] = 10.0; // All-in same weight
         matcher.update_regret(&rewards);
@@ -625,8 +597,8 @@ mod tests {
         // the same weight as the call index; if the picker double-counts
         // the raise it will be sampled with probability 2/3 instead of
         // 1/2.
-        let bet_a = AgentAction::Bet(60.0);
-        let bet_b = AgentAction::Bet(63.0);
+        let bet_a = AgentAction::Bet(60);
+        let bet_b = AgentAction::Bet(63);
         let bet_a_idx = mapper.action_to_idx(&bet_a, &game_state);
         let bet_b_idx = mapper.action_to_idx(&bet_b, &game_state);
         assert_eq!(
@@ -634,8 +606,8 @@ mod tests {
             "test setup: pick two bet sizes that collide on a raise slot"
         );
 
-        let call_idx = mapper.action_to_idx(&AgentAction::Bet(10.0), &game_state);
-        let actions = vec![AgentAction::Bet(10.0), bet_a.clone(), bet_b.clone()];
+        let call_idx = mapper.action_to_idx(&AgentAction::Bet(10), &game_state);
+        let actions = vec![AgentAction::Bet(10), bet_a.clone(), bet_b.clone()];
 
         let mut matcher = PcfrPlusRegretMatcher::new(NUM_ACTION_INDICES);
         let mut rewards = vec![0.0; NUM_ACTION_INDICES];
@@ -649,7 +621,7 @@ mod tests {
         let mut raise_count = 0;
         let iterations = 2000;
         for _ in 0..iterations {
-            if matches!(picker.pick_action(&mut rng), AgentAction::Bet(x) if x > 50.0) {
+            if matches!(picker.pick_action(&mut rng), AgentAction::Bet(x) if x > 50) {
                 raise_count += 1;
             }
         }
@@ -703,7 +675,7 @@ mod tests {
         let mapper = create_mapper();
 
         // Scenario: Fold (idx 0) or Call (idx 1), only these are valid
-        let actions = vec![AgentAction::Fold, AgentAction::Bet(10.0)]; // Bet(current_bet) = Call
+        let actions = vec![AgentAction::Fold, AgentAction::Bet(10)]; // Bet(current_bet) = Call
 
         let mut matcher = PcfrPlusRegretMatcher::new(NUM_ACTION_INDICES);
 
@@ -713,7 +685,7 @@ mod tests {
         let fold_reward = 0.0;
         let invalid_penalty = -100.0;
 
-        let bet_idx = mapper.action_to_idx(&AgentAction::Bet(10.0), &game_state);
+        let bet_idx = mapper.action_to_idx(&AgentAction::Bet(10), &game_state);
 
         for _ in 0..100 {
             let mut rewards = vec![invalid_penalty; NUM_ACTION_INDICES];
@@ -749,11 +721,11 @@ mod tests {
         let game_state = create_test_game_state();
         let mapper = create_mapper();
 
-        let actions = vec![AgentAction::Fold, AgentAction::Bet(10.0)];
+        let actions = vec![AgentAction::Fold, AgentAction::Bet(10)];
 
         let mut matcher = PcfrPlusRegretMatcher::new(NUM_ACTION_INDICES);
 
-        let bet_idx = mapper.action_to_idx(&AgentAction::Bet(10.0), &game_state);
+        let bet_idx = mapper.action_to_idx(&AgentAction::Bet(10), &game_state);
 
         // Both valid actions have equal reward
         for _ in 0..100 {
@@ -791,7 +763,7 @@ mod tests {
         let mut matcher = PcfrPlusRegretMatcher::new(NUM_ACTION_INDICES);
 
         // Get the actual call index (should be 1 for ACTION_IDX_CALL)
-        let bet_idx = mapper.action_to_idx(&AgentAction::Bet(10.0), &game_state);
+        let bet_idx = mapper.action_to_idx(&AgentAction::Bet(10), &game_state);
         println!("bet_idx for Bet(10.0) = {}", bet_idx);
 
         // Clear winner: Call gets +900, Fold gets 0
@@ -854,17 +826,17 @@ mod tests {
         use crate::core::PlayerBitSet;
 
         // Recreate the game state from test_should_go_all_in
-        let stacks: Vec<f32> = vec![0.0, 900.0];
-        let player_bet = vec![1000.0, 100.0];
-        let player_bet_round = vec![900.0, 0.0];
-        let round_data = RoundData::new_with_bets(100.0, PlayerBitSet::new(2), 1, player_bet_round);
+        let stacks: Vec<crate::Chips> = vec![0, 900];
+        let player_bet = vec![1000, 100];
+        let player_bet_round = vec![900, 0];
+        let round_data = RoundData::new_with_bets(100, PlayerBitSet::new(2), 1, player_bet_round);
         let game_state = GameStateBuilder::new()
             .round(Round::River)
             .round_data(round_data)
             .stacks(stacks)
             .player_bet(player_bet)
-            .big_blind(5.0)
-            .small_blind(0.0)
+            .big_blind(5)
+            .small_blind(0)
             .build()
             .unwrap();
 
@@ -879,7 +851,7 @@ mod tests {
         assert_eq!(fold_idx, ACTION_IDX_FOLD, "Fold should map to index 0");
 
         // Call (matching current bet of 900) should map to 1
-        let call_idx = mapper.action_to_idx(&AgentAction::Bet(900.0), &game_state);
+        let call_idx = mapper.action_to_idx(&AgentAction::Bet(900), &game_state);
         println!("Bet(900.0) maps to index {}", call_idx);
         assert_eq!(
             call_idx, ACTION_IDX_CALL,
@@ -900,7 +872,7 @@ mod tests {
         println!("Player 1 all-in amount = {}", player_allin);
 
         // Bet(1000) should map to AllIn since it equals player's all-in
-        let bet_1000_idx = mapper.action_to_idx(&AgentAction::Bet(1000.0), &game_state);
+        let bet_1000_idx = mapper.action_to_idx(&AgentAction::Bet(1000), &game_state);
         println!("Bet(1000.0) maps to index {}", bet_1000_idx);
     }
 }

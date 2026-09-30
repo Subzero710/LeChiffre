@@ -10,6 +10,8 @@ pub enum GameStateError {
     BetSizeDoesntCallSelf,
     #[error("The raise is below the minimum raise size")]
     RaiseSizeTooSmall,
+    #[error("A short all-in has not reopened this player's right to raise")]
+    RaiseNotReopened,
     #[error("Can't advance after showdown")]
     CantAdvanceRound,
 }

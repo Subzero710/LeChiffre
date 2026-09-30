@@ -1,0 +1,30 @@
+CoinPoker Hand #synthetic-sidepots: NLH (₮0.01/₮0.02) 2026/07/21 00:19:28 UTC
+Table 'synthetic' 3-max Seat #1 is the button
+Seat 1: Button (₮0.03 in chips)
+Seat 2: Small (₮0.04 in chips)
+Seat 3: Big (₮0.04 in chips)
+Small: posts small blind ₮0.01
+Big: posts big blind ₮0.02
+*** HOLE CARDS ***
+Dealt to Button [2c 2d]
+Button: raises ₮0.01 to ₮0.03 and is all-in
+Small: raises ₮0.01 to ₮0.04 and is all-in
+Big: calls ₮0.02 and is all-in
+*** FLOP *** [As Ks Qs]
+*** TURN *** [As Ks Qs] [Js]
+*** RIVER *** [As Ks Qs Js] [Ts]
+*** SHOWDOWN ***
+Button: shows [2c 2d]
+Small: shows [3c 3d]
+Big: shows [4c 4d]
+Button collected ₮0.02 from main pot
+Small collected ₮0.03 from main pot
+Big collected ₮0.03 from main pot
+Small collected ₮0.01 from side pot
+Big collected ₮0.01 from side pot
+*** SUMMARY ***
+Total pot ₮0.11 | Rake ₮0.01
+Board [As Ks Qs Js Ts]
+Seat 1: Button showed [2c 2d] and won (₮0.02)
+Seat 2: Small showed [3c 3d] and won (₮0.04)
+Seat 3: Big showed [4c 4d] and won (₮0.04)

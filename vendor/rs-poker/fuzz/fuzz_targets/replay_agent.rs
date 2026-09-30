@@ -6,8 +6,8 @@ extern crate libfuzzer_sys;
 extern crate rand;
 extern crate rs_poker;
 
-use approx::assert_relative_ne;
 use rand::{rngs::StdRng, SeedableRng};
+use rs_poker::Chips;
 
 use rs_poker::arena::{
     action::AgentAction,
@@ -18,8 +18,7 @@ use rs_poker::arena::{
     Agent, GameStateBuilder, HoldemSimulation, HoldemSimulationBuilder,
 };
 use rs_poker::open_hand_history::{
-    assert_open_hand_history_matches_game_state,
-    assert_valid_open_hand_history,
+    assert_open_hand_history_matches_game_state, assert_valid_open_hand_history,
 };
 
 use libfuzzer_sys::fuzz_target;
@@ -33,12 +32,15 @@ struct Input {
 
 fuzz_target!(|input: Input| {
     let game_state = GameStateBuilder::new()
-        .num_players_with_stack(2, 50.0)
-        .blinds(2.0, 1.0)
+        .num_players_with_stack(2, 50)
+        .blinds(2, 1)
         .build()
         .unwrap();
     let agents: Vec<Box<dyn Agent>> = vec![
-        Box::<VecReplayAgent>::new(VecReplayAgent::new("replay-agent-dealer", input.dealer_actions)),
+        Box::<VecReplayAgent>::new(VecReplayAgent::new(
+            "replay-agent-dealer",
+            input.dealer_actions,
+        )),
         Box::<VecReplayAgent>::new(VecReplayAgent::new("replay-agent-sb", input.sb_actions)),
     ];
 
@@ -63,7 +65,7 @@ fuzz_target!(|input: Input| {
     rt.block_on(sim.run());
 
     assert_eq!(Round::Complete, sim.game_state.round);
-    assert_relative_ne!(0.0_f32, sim.game_state.player_bet.iter().sum());
+    assert_ne!(0, sim.game_state.player_bet.iter().sum::<Chips>());
 
     assert_valid_round_data(&sim.game_state.round_data);
     assert_valid_game_state(&sim.game_state);

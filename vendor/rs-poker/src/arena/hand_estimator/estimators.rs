@@ -96,8 +96,8 @@ mod tests {
     fn two_player_state() -> GameState {
         // Two players, each dealt distinct hole cards, no board.
         let mut gs = GameStateBuilder::default()
-            .num_players_with_stack(2, 100.0)
-            .big_blind(2.0)
+            .num_players_with_stack(2, 100)
+            .big_blind(2)
             .build()
             .unwrap();
         gs.hands[0] = Hand::new_with_cards(vec![Card::from(0), Card::from(1)]);

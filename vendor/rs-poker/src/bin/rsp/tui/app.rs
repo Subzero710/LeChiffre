@@ -1,3 +1,5 @@
+#[cfg(test)]
+use rs_poker::Chips;
 use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -731,10 +733,10 @@ mod tests {
         let mut app = App::new(Some(10));
         let result = GameResult {
             agent_names: vec!["A".into()],
-            profits: vec![10.0],
+            profits: vec![10],
             ending_round: RoundLabel::Preflop,
             seat_stats: vec![SeatStats::default()],
-            big_blind: 10.0,
+            big_blind: 10,
         };
         app.handle_sim_message(SimMessage::GameResult(result));
         assert_eq!(app.state.games_completed(), 1);
@@ -752,11 +754,11 @@ mod tests {
         use crate::tui::state::{GameResult, RoundLabel, SeatStats};
         use rs_poker::arena::historian::StatsStorage;
 
-        fn gr(name: &str, profit: f32, round: RoundLabel) -> GameResult {
+        fn gr(name: &str, profit: Chips, round: RoundLabel) -> GameResult {
             let mut s = StatsStorage::new_with_num_players(1);
             s.total_profit[0] = profit;
             s.hands_played[0] = 1;
-            if profit > 0.0 {
+            if profit > 0 {
                 s.games_won[0] = 1;
             } else {
                 s.games_lost[0] = 1;
@@ -766,7 +768,7 @@ mod tests {
                 profits: vec![profit],
                 ending_round: round,
                 seat_stats: vec![SeatStats::from_storage(&s, 0)],
-                big_blind: 10.0,
+                big_blind: 10,
             }
         }
 
@@ -779,12 +781,12 @@ mod tests {
         // A flop game (no match) then a river game (match).
         app.handle_sim_message(crate::tui::event::SimMessage::GameResult(gr(
             "A",
-            5.0,
+            5,
             RoundLabel::Flop,
         )));
         app.handle_sim_message(crate::tui::event::SimMessage::GameResult(gr(
             "A",
-            7.0,
+            7,
             RoundLabel::River,
         )));
 
@@ -793,7 +795,7 @@ mod tests {
         assert_eq!(app.state.matching_games(), 1);
     }
 
-    fn add_game(app: &mut App, names: &[&str], profits: &[f32], round: RoundLabel) {
+    fn add_game(app: &mut App, names: &[&str], profits: &[Chips], round: RoundLabel) {
         let seat_stats: Vec<SeatStats> = profits
             .iter()
             .map(|&p| SeatStats {
@@ -807,7 +809,7 @@ mod tests {
             profits: profits.to_vec(),
             ending_round: round,
             seat_stats,
-            big_blind: 10.0,
+            big_blind: 10,
         }));
     }
 
@@ -857,12 +859,7 @@ mod tests {
     #[test]
     fn test_filter_panel_navigation() {
         let mut app = App::new(Some(10));
-        add_game(
-            &mut app,
-            &["Alice", "Bob"],
-            &[10.0, -10.0],
-            RoundLabel::River,
-        );
+        add_game(&mut app, &["Alice", "Bob"], &[10, -10], RoundLabel::River);
 
         app.state.active_panel = Panel::Filter;
         assert_eq!(app.state.filter.selected, 0);
@@ -881,12 +878,7 @@ mod tests {
     #[test]
     fn test_filter_panel_enter_toggles_winner() {
         let mut app = App::new(Some(10));
-        add_game(
-            &mut app,
-            &["Alice", "Bob"],
-            &[10.0, -10.0],
-            RoundLabel::River,
-        );
+        add_game(&mut app, &["Alice", "Bob"], &[10, -10], RoundLabel::River);
 
         app.state.active_panel = Panel::Filter;
         // Item 0 is "Winner" header, item 1 is Winner("Alice")
@@ -902,12 +894,7 @@ mod tests {
     #[test]
     fn test_filter_panel_space_toggles_item() {
         let mut app = App::new(Some(10));
-        add_game(
-            &mut app,
-            &["Alice", "Bob"],
-            &[10.0, -10.0],
-            RoundLabel::River,
-        );
+        add_game(&mut app, &["Alice", "Bob"], &[10, -10], RoundLabel::River);
 
         app.state.active_panel = Panel::Filter;
         app.state.filter.selected = 1; // Winner("Alice")
@@ -918,12 +905,7 @@ mod tests {
     #[test]
     fn test_filter_panel_enter_toggles_loser() {
         let mut app = App::new(Some(10));
-        add_game(
-            &mut app,
-            &["Alice", "Bob"],
-            &[10.0, -10.0],
-            RoundLabel::River,
-        );
+        add_game(&mut app, &["Alice", "Bob"], &[10, -10], RoundLabel::River);
 
         app.state.active_panel = Panel::Filter;
         // Header "Winner" + 2 winners + Header "Loser" = index 3 is header
@@ -939,12 +921,7 @@ mod tests {
     #[test]
     fn test_filter_panel_enter_toggles_win_size() {
         let mut app = App::new(Some(10));
-        add_game(
-            &mut app,
-            &["Alice", "Bob"],
-            &[10.0, -10.0],
-            RoundLabel::River,
-        );
+        add_game(&mut app, &["Alice", "Bob"], &[10, -10], RoundLabel::River);
 
         app.state.active_panel = Panel::Filter;
         // Winner(2) + Loser(2) + Participant(2) + headers(3) = 9
@@ -968,12 +945,7 @@ mod tests {
     #[test]
     fn test_filter_panel_enter_toggles_loss_size() {
         let mut app = App::new(Some(10));
-        add_game(
-            &mut app,
-            &["Alice", "Bob"],
-            &[10.0, -10.0],
-            RoundLabel::River,
-        );
+        add_game(&mut app, &["Alice", "Bob"], &[10, -10], RoundLabel::River);
 
         app.state.active_panel = Panel::Filter;
         // After Win Size section: 16-19 are WinSize buckets
@@ -991,12 +963,7 @@ mod tests {
     #[test]
     fn test_filter_panel_header_is_noop() {
         let mut app = App::new(Some(10));
-        add_game(
-            &mut app,
-            &["Alice", "Bob"],
-            &[10.0, -10.0],
-            RoundLabel::River,
-        );
+        add_game(&mut app, &["Alice", "Bob"], &[10, -10], RoundLabel::River);
 
         app.state.active_panel = Panel::Filter;
         app.state.filter.selected = 0; // Header("Winner")
@@ -1007,12 +974,7 @@ mod tests {
     #[test]
     fn test_c_clears_filters() {
         let mut app = App::new(Some(10));
-        add_game(
-            &mut app,
-            &["Alice", "Bob"],
-            &[10.0, -10.0],
-            RoundLabel::River,
-        );
+        add_game(&mut app, &["Alice", "Bob"], &[10, -10], RoundLabel::River);
 
         app.state.active_panel = Panel::Filter;
         app.state.filter.toggle_winner("Alice");
@@ -1026,13 +988,8 @@ mod tests {
     #[test]
     fn test_filter_resets_log_selection() {
         let mut app = App::new(Some(10));
-        add_game(
-            &mut app,
-            &["Alice", "Bob"],
-            &[10.0, -10.0],
-            RoundLabel::River,
-        );
-        add_game(&mut app, &["Alice", "Bob"], &[-5.0, 5.0], RoundLabel::Flop);
+        add_game(&mut app, &["Alice", "Bob"], &[10, -10], RoundLabel::River);
+        add_game(&mut app, &["Alice", "Bob"], &[-5, 5], RoundLabel::Flop);
 
         app.state.log_selected = Some(1);
         app.state.log_scroll = 5;
@@ -1049,14 +1006,9 @@ mod tests {
     #[test]
     fn test_game_log_j_uses_filtered_length() {
         let mut app = App::new(Some(10));
-        add_game(
-            &mut app,
-            &["Alice", "Bob"],
-            &[10.0, -10.0],
-            RoundLabel::River,
-        );
-        add_game(&mut app, &["Alice", "Bob"], &[-5.0, 5.0], RoundLabel::Flop);
-        add_game(&mut app, &["Alice", "Bob"], &[3.0, -3.0], RoundLabel::River);
+        add_game(&mut app, &["Alice", "Bob"], &[10, -10], RoundLabel::River);
+        add_game(&mut app, &["Alice", "Bob"], &[-5, 5], RoundLabel::Flop);
+        add_game(&mut app, &["Alice", "Bob"], &[3, -3], RoundLabel::River);
 
         // Simulate River-only filter: games 1 and 3 pass (2 of 3)
         app.state.filter.toggle_street(RoundLabel::River);
@@ -1074,7 +1026,7 @@ mod tests {
         let mut app = App::new(Some(200));
         // Add 100 games
         for _ in 0..100 {
-            add_game(&mut app, &["A", "B"], &[10.0, -10.0], RoundLabel::River);
+            add_game(&mut app, &["A", "B"], &[10, -10], RoundLabel::River);
         }
 
         app.state.active_panel = Panel::GameLog;
@@ -1130,7 +1082,7 @@ mod tests {
     fn test_scroll_wheel_on_game_log() {
         let mut app = App::new(Some(200));
         for _ in 0..50 {
-            add_game(&mut app, &["A", "B"], &[10.0, -10.0], RoundLabel::River);
+            add_game(&mut app, &["A", "B"], &[10, -10], RoundLabel::River);
         }
         set_test_panel_rects(&mut app);
         // game_log rect is 20 rows, page_size = 20 - 4 = 16
@@ -1162,7 +1114,7 @@ mod tests {
         add_game(
             &mut app,
             &["A", "B", "C", "D", "E"],
-            &[10.0, -5.0, -3.0, -1.0, -1.0],
+            &[10, -5, -3, -1, -1],
             RoundLabel::River,
         );
         set_test_panel_rects(&mut app);
@@ -1217,9 +1169,9 @@ mod tests {
             table_size: 2,
             currency: "USD".into(),
             dealer_seat: 0,
-            small_blind_amount: 5.0,
-            big_blind_amount: 10.0,
-            ante_amount: 0.0,
+            small_blind_amount: 5,
+            big_blind_amount: 10,
+            ante_amount: 0,
             hero_player_id: None,
             players: vec![],
             rounds: vec![],

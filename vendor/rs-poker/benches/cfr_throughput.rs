@@ -32,14 +32,15 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
+use rs_poker::Chips;
 use rs_poker::arena::agent::ConfigAgentBuilder;
 use rs_poker::arena::cfr::{CFRState, TraversalSet};
 use rs_poker::arena::{Agent, GameStateBuilder, HoldemSimulation, HoldemSimulationBuilder};
 
-const STARTING_STACK: f32 = 100_000.0;
-const ANTE: f32 = 50.0;
-const SMALL_BLIND: f32 = 250.0;
-const BIG_BLIND: f32 = 500.0;
+const STARTING_STACK: Chips = 100_000;
+const ANTE: Chips = 50;
+const SMALL_BLIND: Chips = 250;
+const BIG_BLIND: Chips = 500;
 const BENCH_SEED: u64 = 0xDEAD_BEEF;
 
 fn cfr_configurable_json(counts: &str) -> String {

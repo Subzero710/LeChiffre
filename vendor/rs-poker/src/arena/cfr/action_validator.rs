@@ -7,10 +7,8 @@
 //! - Enforcing raise caps (read from GameState.max_raises_per_round)
 
 use super::action_generator::ActionVec;
+use crate::arena::Chips;
 use crate::arena::{GameState, action::AgentAction};
-
-/// Epsilon for floating point comparisons.
-const EPSILON: f32 = 0.01;
 
 /// Main entry point - validate and filter actions.
 ///
@@ -28,6 +26,18 @@ pub fn validate_actions(actions: impl Into<ActionVec>, game_state: &GameState) -
     actions = filter_all_in_equivalents(actions, game_state);
     actions = filter_duplicate_bets(actions);
     actions = filter_raises_when_capped(actions, game_state);
+    actions.retain(|action| match *action {
+        AgentAction::Fold => true,
+        AgentAction::Call => game_state
+            .validate_bet_amount(game_state.current_round_bet())
+            .is_ok(),
+        AgentAction::Bet(amount) => game_state.validate_bet_amount(amount).is_ok(),
+        AgentAction::AllIn => game_state
+            .validate_bet_amount(
+                game_state.current_round_current_player_bet() + game_state.current_player_stack(),
+            )
+            .is_ok(),
+    });
 
     actions
 }
@@ -39,7 +49,7 @@ pub fn filter_invalid_fold(actions: impl Into<ActionVec>, game_state: &GameState
     let actions = actions.into();
     let to_call = game_state.current_round_bet() - game_state.current_round_current_player_bet();
 
-    if to_call <= 0.0 {
+    if to_call <= 0 {
         // Nothing to call, remove Fold
         actions
             .into_iter()
@@ -64,8 +74,8 @@ pub fn filter_call_equivalents(actions: impl Into<ActionVec>, game_state: &GameS
             .into_iter()
             .filter(|a| {
                 if let AgentAction::Bet(amount) = a {
-                    // Remove Bet if it's approximately equal to current bet (i.e., a call)
-                    (amount - current_bet).abs() >= EPSILON
+                    // Remove Bet if it's equal to current bet (i.e., a call)
+                    *amount != current_bet
                 } else {
                     true
                 }
@@ -94,8 +104,8 @@ pub fn filter_all_in_equivalents(
             .into_iter()
             .filter(|a| {
                 if let AgentAction::Bet(amount) = a {
-                    // Remove Bet if it's approximately equal to all-in amount
-                    (amount - all_in_amount).abs() >= EPSILON
+                    // Remove Bet if it's equal to all-in amount
+                    *amount != all_in_amount
                 } else {
                     true
                 }
@@ -111,16 +121,14 @@ pub fn filter_all_in_equivalents(
 /// If multiple Bet actions have the same amount, keep only the first one.
 pub fn filter_duplicate_bets(actions: impl Into<ActionVec>) -> ActionVec {
     let actions = actions.into();
-    let mut seen_amounts: Vec<f32> = Vec::new();
+    let mut seen_amounts: Vec<Chips> = Vec::new();
     let mut result = ActionVec::with_capacity(actions.len());
 
     for action in actions {
         match &action {
             AgentAction::Bet(amount) => {
-                // Check if we've seen a similar amount
-                let is_duplicate = seen_amounts
-                    .iter()
-                    .any(|seen| (seen - amount).abs() < EPSILON);
+                // Check if we've seen a equal amount
+                let is_duplicate = seen_amounts.iter().any(|seen| seen == amount);
                 if !is_duplicate {
                     seen_amounts.push(*amount);
                     result.push(action);
@@ -160,7 +168,7 @@ pub fn filter_raises_when_capped(
             match a {
                 AgentAction::Bet(amount) => {
                     // Keep only if it's a call (not a raise)
-                    (amount - current_bet).abs() < EPSILON
+                    *amount == current_bet
                 }
                 AgentAction::AllIn => true, // AllIn always allowed
                 _ => true,                  // Fold, Call always allowed
@@ -177,16 +185,16 @@ mod tests {
     // Helper to create a simple game state for testing
     fn create_test_game_state() -> GameState {
         GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .build()
             .unwrap()
     }
 
-    fn create_flop_game_state_with_bet(bet_amount: f32) -> GameState {
+    fn create_flop_game_state_with_bet(bet_amount: Chips) -> GameState {
         let mut game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 500.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 500)
+            .blinds(10, 5)
             .build()
             .unwrap();
         game_state.advance_round(); // To flop
@@ -200,8 +208,8 @@ mod tests {
     fn test_fold_removed_when_nothing_to_call() {
         // On flop with no bet, there's nothing to call
         let mut game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .build()
             .unwrap();
         game_state.advance_round(); // To flop, player bets are reset
@@ -216,7 +224,7 @@ mod tests {
 
     #[test]
     fn test_fold_kept_when_facing_bet() {
-        let game_state = create_flop_game_state_with_bet(30.0);
+        let game_state = create_flop_game_state_with_bet(30);
 
         let actions = vec![AgentAction::Fold, AgentAction::Call, AgentAction::AllIn];
         let filtered = filter_invalid_fold(actions, &game_state);
@@ -228,25 +236,25 @@ mod tests {
 
     #[test]
     fn test_bet_equal_to_call_removed_when_call_exists() {
-        let game_state = create_flop_game_state_with_bet(30.0);
+        let game_state = create_flop_game_state_with_bet(30);
         let call_amount = game_state.current_round_bet();
 
         let actions = vec![
             AgentAction::Call,
             AgentAction::Bet(call_amount),
-            AgentAction::Bet(50.0),
+            AgentAction::Bet(50),
         ];
         let filtered = filter_call_equivalents(actions, &game_state);
 
         assert!(filtered.contains(&AgentAction::Call));
-        assert!(filtered.iter().any(|a| matches!(a, AgentAction::Bet(50.0))));
+        assert!(filtered.iter().any(|a| matches!(a, AgentAction::Bet(50))));
         // The Bet(30.0) should be removed
         assert_eq!(filtered.len(), 2);
     }
 
     #[test]
     fn test_bet_equal_to_call_kept_when_no_call() {
-        let game_state = create_flop_game_state_with_bet(30.0);
+        let game_state = create_flop_game_state_with_bet(30);
         let call_amount = game_state.current_round_bet();
 
         // No Call action, just Bet(call_amount)
@@ -262,8 +270,8 @@ mod tests {
     #[test]
     fn test_bet_equal_to_all_in_removed_when_all_in_exists() {
         let mut game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .build()
             .unwrap();
         game_state.advance_round();
@@ -275,12 +283,12 @@ mod tests {
         let actions = vec![
             AgentAction::AllIn,
             AgentAction::Bet(all_in),
-            AgentAction::Bet(50.0),
+            AgentAction::Bet(50),
         ];
         let filtered = filter_all_in_equivalents(actions, &game_state);
 
         assert!(filtered.contains(&AgentAction::AllIn));
-        assert!(filtered.iter().any(|a| matches!(a, AgentAction::Bet(50.0))));
+        assert!(filtered.iter().any(|a| matches!(a, AgentAction::Bet(50))));
         // The Bet(all_in) should be removed
         assert_eq!(filtered.len(), 2);
     }
@@ -288,17 +296,17 @@ mod tests {
     #[test]
     fn test_bet_less_than_all_in_kept() {
         let mut game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .build()
             .unwrap();
         game_state.advance_round();
 
-        let actions = vec![AgentAction::AllIn, AgentAction::Bet(50.0)];
+        let actions = vec![AgentAction::AllIn, AgentAction::Bet(50)];
         let filtered = filter_all_in_equivalents(actions, &game_state);
 
         assert!(filtered.contains(&AgentAction::AllIn));
-        assert!(filtered.iter().any(|a| matches!(a, AgentAction::Bet(50.0))));
+        assert!(filtered.iter().any(|a| matches!(a, AgentAction::Bet(50))));
         assert_eq!(filtered.len(), 2);
     }
 
@@ -308,9 +316,9 @@ mod tests {
     fn test_duplicate_bet_amounts_removed() {
         let actions = vec![
             AgentAction::Fold,
-            AgentAction::Bet(30.0),
-            AgentAction::Bet(30.0),
-            AgentAction::Bet(50.0),
+            AgentAction::Bet(30),
+            AgentAction::Bet(30),
+            AgentAction::Bet(50),
         ];
         let filtered = filter_duplicate_bets(actions);
 
@@ -318,7 +326,7 @@ mod tests {
         // Should have only one Bet(30.0)
         let bet_30_count = filtered
             .iter()
-            .filter(|a| matches!(a, AgentAction::Bet(x) if (*x - 30.0).abs() < EPSILON))
+            .filter(|a| matches!(a, AgentAction::Bet(x) if *x == 30))
             .count();
         assert_eq!(bet_30_count, 1);
         assert_eq!(filtered.len(), 3); // Fold + Bet(30) + Bet(50)
@@ -327,9 +335,9 @@ mod tests {
     #[test]
     fn test_different_bet_amounts_kept() {
         let actions = vec![
-            AgentAction::Bet(20.0),
-            AgentAction::Bet(30.0),
-            AgentAction::Bet(50.0),
+            AgentAction::Bet(20),
+            AgentAction::Bet(30),
+            AgentAction::Bet(50),
         ];
         let filtered = filter_duplicate_bets(actions);
 
@@ -340,7 +348,7 @@ mod tests {
 
     #[test]
     fn test_raises_removed_when_capped() {
-        let mut game_state = create_flop_game_state_with_bet(30.0);
+        let mut game_state = create_flop_game_state_with_bet(30);
         game_state.round_data.total_raise_count = 3;
         game_state.max_raises_per_round = Some(3);
 
@@ -348,7 +356,7 @@ mod tests {
         let actions = vec![
             AgentAction::Fold,
             AgentAction::Bet(current_bet), // Call-equivalent
-            AgentAction::Bet(60.0),        // Raise
+            AgentAction::Bet(60),          // Raise
             AgentAction::AllIn,
         ];
         let filtered = filter_raises_when_capped(actions, &game_state);
@@ -359,19 +367,19 @@ mod tests {
         assert!(
             filtered
                 .iter()
-                .any(|a| matches!(a, AgentAction::Bet(x) if (*x - current_bet).abs() < EPSILON))
+                .any(|a| matches!(a, AgentAction::Bet(x) if *x == current_bet))
         );
         // The raise Bet(60.0) should be removed
         assert!(
             !filtered
                 .iter()
-                .any(|a| matches!(a, AgentAction::Bet(x) if (*x - 60.0).abs() < EPSILON))
+                .any(|a| matches!(a, AgentAction::Bet(x) if *x == 60))
         );
     }
 
     #[test]
     fn test_all_in_kept_when_capped() {
-        let mut game_state = create_flop_game_state_with_bet(30.0);
+        let mut game_state = create_flop_game_state_with_bet(30);
         game_state.round_data.total_raise_count = 3;
         game_state.max_raises_per_round = Some(3);
 
@@ -383,15 +391,11 @@ mod tests {
 
     #[test]
     fn test_raises_kept_when_not_capped() {
-        let mut game_state = create_flop_game_state_with_bet(30.0);
+        let mut game_state = create_flop_game_state_with_bet(30);
         game_state.round_data.total_raise_count = 2;
         game_state.max_raises_per_round = Some(3);
 
-        let actions = vec![
-            AgentAction::Fold,
-            AgentAction::Bet(60.0),
-            AgentAction::AllIn,
-        ];
+        let actions = vec![AgentAction::Fold, AgentAction::Bet(60), AgentAction::AllIn];
         let filtered = filter_raises_when_capped(actions, &game_state);
 
         // All should be kept since we haven't hit the cap
@@ -400,15 +404,11 @@ mod tests {
 
     #[test]
     fn test_raises_kept_when_no_limit() {
-        let mut game_state = create_flop_game_state_with_bet(30.0);
+        let mut game_state = create_flop_game_state_with_bet(30);
         game_state.round_data.total_raise_count = 10;
         game_state.max_raises_per_round = None;
 
-        let actions = vec![
-            AgentAction::Fold,
-            AgentAction::Bet(60.0),
-            AgentAction::AllIn,
-        ];
+        let actions = vec![AgentAction::Fold, AgentAction::Bet(60), AgentAction::AllIn];
         let filtered = filter_raises_when_capped(actions, &game_state);
 
         // All should be kept since there's no limit
@@ -419,7 +419,7 @@ mod tests {
 
     #[test]
     fn test_full_validation_pipeline() {
-        let mut game_state = create_flop_game_state_with_bet(30.0);
+        let mut game_state = create_flop_game_state_with_bet(30);
         game_state.round_data.total_raise_count = 2;
         game_state.max_raises_per_round = Some(3);
 
@@ -431,29 +431,29 @@ mod tests {
             AgentAction::Fold,
             AgentAction::Call,
             AgentAction::Bet(current_bet), // Duplicate of Call
-            AgentAction::Bet(50.0),
-            AgentAction::Bet(50.0),   // Duplicate
+            AgentAction::Bet(60),
+            AgentAction::Bet(60),     // Duplicate
             AgentAction::Bet(all_in), // Duplicate of AllIn
             AgentAction::AllIn,
         ];
 
         let filtered = validate_actions(actions, &game_state);
 
-        // Should have: Fold, Call, Bet(50), AllIn
+        // Should have: Fold, Call, Bet(60), AllIn
         assert!(filtered.contains(&AgentAction::Fold));
         assert!(filtered.contains(&AgentAction::Call));
         assert!(filtered.contains(&AgentAction::AllIn));
-        // Only one Bet(50)
-        let bet_50_count = filtered
+        // Only one Bet(60)
+        let bet_60_count = filtered
             .iter()
-            .filter(|a| matches!(a, AgentAction::Bet(x) if (*x - 50.0).abs() < EPSILON))
+            .filter(|a| matches!(a, AgentAction::Bet(x) if *x == 60))
             .count();
-        assert_eq!(bet_50_count, 1);
+        assert_eq!(bet_60_count, 1);
         // No Bet(current_bet) or Bet(all_in)
         assert!(
             !filtered
                 .iter()
-                .any(|a| matches!(a, AgentAction::Bet(x) if (*x - current_bet).abs() < EPSILON))
+                .any(|a| matches!(a, AgentAction::Bet(x) if *x == current_bet))
         );
     }
 
@@ -463,8 +463,8 @@ mod tests {
     fn test_all_in_equals_sizing() {
         // When 66% pot equals stack, AllIn should win
         let mut game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 50.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 50)
+            .blinds(10, 5)
             .build()
             .unwrap();
         game_state.advance_round();
@@ -500,8 +500,8 @@ mod tests {
         // When player has no stack left, only Call/check makes sense
         // Start with valid stacks and simulate going all-in by modifying state
         let mut game_state = GameStateBuilder::new()
-            .stacks(vec![100.0, 10.0])
-            .blinds(10.0, 5.0)
+            .stacks(vec![100, 10])
+            .blinds(10, 5)
             .build()
             .unwrap();
         game_state.advance_round(); // Starting -> Ante
@@ -509,12 +509,12 @@ mod tests {
         game_state.advance_round(); // Deal -> Preflop
 
         // Player 1 (SB) goes all-in by betting their remaining stack
-        game_state.do_bet(5.0, true).unwrap(); // SB posts 5
-        game_state.do_bet(10.0, true).unwrap(); // BB posts 10
+        game_state.do_bet(5, true).unwrap(); // SB posts 5
+        game_state.do_bet(10, true).unwrap(); // BB posts 10
         // Now player 0 acts - they call (10 to match BB)
-        game_state.do_bet(10.0, false).unwrap();
+        game_state.do_bet(10, false).unwrap();
         // Player 1 acts - they're already in for 5, have 5 left, let them go all-in
-        game_state.do_bet(10.0, false).unwrap(); // Go all-in
+        game_state.do_bet(10, false).unwrap(); // Go all-in
 
         let actions = vec![AgentAction::Fold, AgentAction::Call];
 

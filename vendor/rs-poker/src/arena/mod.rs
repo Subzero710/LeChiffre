@@ -22,8 +22,8 @@
 //!     ];
 //!
 //!     let game_state = GameStateBuilder::new()
-//!         .num_players_with_stack(2, 100.0)
-//!         .blinds(10.0, 5.0)
+//!         .num_players_with_stack(2, 100)
+//!         .blinds(10, 5)
 //!         .build()
 //!         .unwrap();
 //!     let mut sim = HoldemSimulationBuilder::default()
@@ -60,7 +60,7 @@
 //!     Box::<RandomAgentGenerator>::default(),
 //! ];
 //!
-//! let game_state_gen = RandomGameStateGenerator::new(3, 100.0, 500.0, 10.0, 5.0, 0.0);
+//! let game_state_gen = RandomGameStateGenerator::new(3, 100, 500, 10, 5, 0);
 //! let sim_gen = StandardSimulationIterator::new(agent_gens, vec![], game_state_gen);
 //!
 //! let mut competition = HoldemCompetition::new(sim_gen);
@@ -96,9 +96,9 @@
 //!
 //! // This is the starting game state.
 //! let game_state = GameStateBuilder::new()
-//!     .num_players_with_stack(4, 100.0)
-//!     .blinds(10.0, 5.0)
-//!     .ante(1.0)
+//!     .num_players_with_stack(4, 100)
+//!     .blinds(10, 5)
+//!     .ante(1)
 //!     .build()
 //!     .unwrap();
 //!
@@ -142,8 +142,10 @@ pub mod errors;
 pub mod game_state;
 pub mod hand_estimator;
 pub mod historian;
-pub mod rng;
+pub mod money;
+pub mod pot;
 pub mod rake;
+pub mod rng;
 pub mod sim_builder;
 pub mod simulation;
 
@@ -160,7 +162,11 @@ pub use game_state::{
 };
 pub use hand_estimator::{GameLog, HandDistributionEstimator, OpponentRanges};
 pub use historian::{CloneHistorianGenerator, Historian, HistorianError, HistorianGenerator};
-pub use rake::{RakeConfig, RakeConfigError};
+pub use money::Chips;
+pub use rake::{RakeConfig, RakeConfigError, RakeRate, RakeRounding};
 pub use rng::seeded_rng;
 pub use sim_builder::HoldemSimulationBuilder;
 pub use simulation::HoldemSimulation;
+
+#[cfg(feature = "serde")]
+mod serde_numbers;

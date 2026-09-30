@@ -1,3 +1,4 @@
+use crate::arena::money::apply_ratio;
 use std::sync::Arc;
 
 use crate::arena::{GameState, action::AgentAction};
@@ -59,7 +60,7 @@ impl ActionGenerator for SimpleActionGenerator {
         let min_raise_amount = current_bet + min_raise;
 
         // Fold - only if there's something to call
-        if to_call > 0.0 {
+        if to_call > 0 {
             actions.push(AgentAction::Fold);
         }
 
@@ -71,9 +72,9 @@ impl ActionGenerator for SimpleActionGenerator {
             actions.push(AgentAction::Bet(min_raise_amount));
         }
 
-        // 33% pot raise = current_bet + pot * 0.33
+        // 33% pot raise = current_bet + apply_ratio(pot, 0.33)
         // Must be at least min raise and greater than the min raise bet
-        let pot_33_amount = current_bet + pot * 0.33;
+        let pot_33_amount = current_bet + apply_ratio(pot, 0.33);
         if pot_33_amount >= min_raise_amount
             && pot_33_amount > min_raise_amount
             && pot_33_amount < all_in_amount
@@ -81,9 +82,9 @@ impl ActionGenerator for SimpleActionGenerator {
             actions.push(AgentAction::Bet(pot_33_amount));
         }
 
-        // 66% pot raise = current_bet + pot * 0.66
+        // 66% pot raise = current_bet + apply_ratio(pot, 0.66)
         // Must be at least min raise and greater than 33% pot
-        let pot_66_amount = current_bet + pot * 0.66;
+        let pot_66_amount = current_bet + apply_ratio(pot, 0.66);
         if pot_66_amount >= min_raise_amount
             && pot_66_amount > pot_33_amount
             && pot_66_amount < all_in_amount
@@ -114,16 +115,16 @@ mod tests {
 
     #[test]
     fn test_simple_gen_actions_with_bet_facing() {
-        let stacks = vec![500.0; 2];
+        let stacks = vec![500; 2];
         let mut game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
         game_state.advance_round();
 
         // Player 0 bets 30
-        game_state.do_bet(30.0, false).unwrap();
+        game_state.do_bet(30, false).unwrap();
 
         let action_gen = create_simple_generator(&game_state);
         let actions = action_gen.gen_possible_actions(&game_state);
@@ -137,10 +138,10 @@ mod tests {
 
     #[test]
     fn test_simple_no_fold_when_checking() {
-        let stacks = vec![100.0; 2];
+        let stacks = vec![100; 2];
         let mut game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
         // Advance to flop where no one has bet yet
@@ -195,10 +196,10 @@ mod tests {
     #[test]
     fn test_simple_all_actions_valid_preflop_sb() {
         // Small blind facing big blind
-        let stacks = vec![100.0; 2];
+        let stacks = vec![100; 2];
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
         verify_all_actions_valid(&game_state);
@@ -207,23 +208,23 @@ mod tests {
     #[test]
     fn test_simple_all_actions_valid_preflop_bb() {
         // Big blind after small blind completes
-        let stacks = vec![100.0; 2];
+        let stacks = vec![100; 2];
         let mut game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
-        game_state.do_bet(10.0, false).unwrap(); // SB completes to BB
+        game_state.do_bet(10, false).unwrap(); // SB completes to BB
         verify_all_actions_valid(&game_state);
     }
 
     #[test]
     fn test_simple_all_actions_valid_flop_first_to_act() {
         // First to act on flop (can check)
-        let stacks = vec![100.0; 2];
+        let stacks = vec![100; 2];
         let mut game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
         game_state.advance_round(); // To flop
@@ -233,59 +234,59 @@ mod tests {
     #[test]
     fn test_simple_all_actions_valid_facing_bet() {
         // Facing a bet on flop
-        let stacks = vec![100.0; 2];
+        let stacks = vec![100; 2];
         let mut game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
         game_state.advance_round();
-        game_state.do_bet(20.0, false).unwrap(); // Opponent bets
+        game_state.do_bet(20, false).unwrap(); // Opponent bets
         verify_all_actions_valid(&game_state);
     }
 
     #[test]
     fn test_simple_all_actions_valid_facing_raise() {
         // Facing a raise
-        let stacks = vec![200.0; 2];
+        let stacks = vec![200; 2];
         let mut game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
         game_state.advance_round();
-        game_state.do_bet(20.0, false).unwrap(); // Bet
-        game_state.do_bet(50.0, false).unwrap(); // Raise
+        game_state.do_bet(20, false).unwrap(); // Bet
+        game_state.do_bet(50, false).unwrap(); // Raise
         verify_all_actions_valid(&game_state);
     }
 
     #[test]
     fn test_simple_all_actions_valid_small_stack() {
         // Player with small stack
-        let stacks = vec![30.0, 100.0];
+        let stacks = vec![30, 100];
         let mut game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
         game_state.advance_round();
-        game_state.do_bet(15.0, false).unwrap();
+        game_state.do_bet(15, false).unwrap();
         verify_all_actions_valid(&game_state);
     }
 
     #[test]
     fn test_simple_all_actions_valid_large_pot() {
         // Large pot scenario where pot bets might exceed stack
-        let stacks = vec![100.0; 2];
+        let stacks = vec![100; 2];
         let mut game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
         // Build up pot through betting rounds
-        game_state.do_bet(10.0, false).unwrap(); // SB completes
-        game_state.do_bet(30.0, false).unwrap(); // BB raises
-        game_state.do_bet(30.0, false).unwrap(); // SB calls
+        game_state.do_bet(10, false).unwrap(); // SB completes
+        game_state.do_bet(30, false).unwrap(); // BB raises
+        game_state.do_bet(30, false).unwrap(); // SB calls
         game_state.advance_round(); // To flop
         verify_all_actions_valid(&game_state);
     }
@@ -293,10 +294,10 @@ mod tests {
     #[test]
     fn test_simple_all_actions_valid_tiny_pot() {
         // Tiny pot where pot-based bets might be smaller than min raise
-        let stacks = vec![1000.0; 2];
+        let stacks = vec![1000; 2];
         let mut game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(2.0, 1.0)
+            .blinds(2, 1)
             .build()
             .unwrap();
         game_state.advance_round();
@@ -306,41 +307,41 @@ mod tests {
     #[test]
     fn test_simple_all_actions_valid_after_multiple_raises() {
         // After multiple raises (min raise increases)
-        let stacks = vec![500.0; 2];
+        let stacks = vec![500; 2];
         let mut game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
         game_state.advance_round();
-        game_state.do_bet(20.0, false).unwrap(); // Bet 20
-        game_state.do_bet(50.0, false).unwrap(); // Raise to 50 (raise of 30)
-        game_state.do_bet(110.0, false).unwrap(); // Re-raise to 110 (raise of 60)
+        game_state.do_bet(20, false).unwrap(); // Bet 20
+        game_state.do_bet(50, false).unwrap(); // Raise to 50 (raise of 30)
+        game_state.do_bet(110, false).unwrap(); // Re-raise to 110 (raise of 60)
         verify_all_actions_valid(&game_state);
     }
 
     #[test]
     fn test_simple_all_actions_valid_three_players() {
         // Three player scenario
-        let stacks = vec![100.0; 3];
+        let stacks = vec![100; 3];
         let mut game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
         game_state.advance_round();
-        game_state.do_bet(15.0, false).unwrap();
-        game_state.do_bet(15.0, false).unwrap();
+        game_state.do_bet(15, false).unwrap();
+        game_state.do_bet(15, false).unwrap();
         verify_all_actions_valid(&game_state);
     }
 
     #[test]
     fn test_simple_all_actions_valid_river() {
         // River scenario
-        let stacks = vec![100.0; 2];
+        let stacks = vec![100; 2];
         let mut game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
         game_state.advance_round(); // Flop

@@ -1,5 +1,9 @@
 # rs-poker
 
+The NLHE cash engine uses exact integer chips. See
+[money, rake, OHH import, and replay](docs/MONEY_AND_HISTORY.md) for the
+currency boundary, supported room formats, and explicit validation limits.
+
 [![Crates.io](https://img.shields.io/crates/v/rs-poker.svg)](https://crates.io/crates/rs-poker)
 [![Docs.rs](https://docs.rs/rs_poker/badge.svg)](https://docs.rs/rs_poker)
 [![License](https://img.shields.io/crates/l/rs-poker)](https://github.com/elliottneilclark/rs-poker/blob/master/LICENSE)
@@ -179,8 +183,8 @@ use rs_poker::arena::{Agent, AgentAction, GameState};
 struct MyAgent;
 
 impl Agent for MyAgent {
-    fn act(&mut self, _id: u128, game_state: &GameState) -> AgentAction {
-        AgentAction::Call(game_state.current_bet())
+    fn act(&mut self, _id: u128, _game_state: &GameState) -> AgentAction {
+        AgentAction::Call
     }
     fn name(&self) -> &str { "my-agent" }
 }

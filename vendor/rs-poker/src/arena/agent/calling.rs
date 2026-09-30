@@ -73,12 +73,13 @@ impl AgentGenerator for CallingAgentGenerator {
 
 #[cfg(test)]
 mod tests {
+    use crate::Chips;
     use crate::arena::HoldemSimulationBuilder;
 
     use super::*;
     use crate::arena::GameStateBuilder;
 
-    fn test_game_state(stacks: Vec<f32>, big_blind: f32, small_blind: f32) -> GameState {
+    fn test_game_state(stacks: Vec<Chips>, big_blind: Chips, small_blind: Chips) -> GameState {
         GameStateBuilder::new()
             .stacks(stacks)
             .blinds(big_blind, small_blind)
@@ -89,7 +90,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn test_calling_generator_creates_named_caller() {
         let generator = CallingAgentGenerator::default();
-        let game_state = test_game_state(vec![100.0; 3], 10.0, 5.0);
+        let game_state = test_game_state(vec![100; 3], 10, 5);
 
         let mut agent = generator.generate(2, &game_state);
         assert_eq!(agent.name(), "CallingAgent-2");
@@ -105,7 +106,7 @@ mod tests {
     #[test]
     fn test_calling_generator_uses_custom_name() {
         let generator = CallingAgentGenerator::with_name("CallerX");
-        let game_state = test_game_state(vec![50.0; 2], 10.0, 5.0);
+        let game_state = test_game_state(vec![50; 2], 10, 5);
 
         let agent = generator.generate(0, &game_state);
         assert_eq!(agent.name(), "CallerX");
@@ -113,8 +114,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_call_agents() {
-        let stacks = vec![100.0; 4];
-        let game_state = test_game_state(stacks, 10.0, 5.0);
+        let stacks = vec![100; 4];
+        let game_state = test_game_state(stacks, 10, 5);
         let mut sim = HoldemSimulationBuilder::default()
             .game_state(game_state)
             .agents(vec![
@@ -130,7 +131,7 @@ mod tests {
 
         assert_eq!(sim.game_state.num_active_players(), 4);
 
-        assert_ne!(0.0, sim.game_state.player_winnings.iter().sum::<f32>());
-        assert_eq!(40.0, sim.game_state.player_winnings.iter().sum::<f32>());
+        assert_ne!(0, sim.game_state.player_winnings.iter().sum::<Chips>());
+        assert_eq!(40, sim.game_state.player_winnings.iter().sum::<Chips>());
     }
 }

@@ -1,122 +1,210 @@
+//! Exact rake arithmetic. Room schedules live in a separate data layer.
+pub mod schedule;
+
+use super::money::Chips;
 use thiserror::Error;
 
-/// Configuration for rake collected from a completed poker hand.
-///
-/// The rake is expressed as a percentage of each awarded pot slice, with a
-/// cap shared by the whole hand. By default rake is disabled.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct RakeConfig {
-    /// Fraction of the pot collected as rake. `0.05` means 5%.
-    pub percentage: f32,
-    /// Maximum total rake collected during a single hand.
-    pub cap: f32,
-    /// If true, no rake is collected unless at least a flop was dealt.
-    pub no_flop_no_drop: bool,
+/// A validated rational rate between zero and one (inclusive).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RakeRate {
+    numerator: u32,
+    denominator: u32,
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Error)]
-pub enum RakeConfigError {
-    #[error("rake percentage must be between 0 and 1, got {0}")]
-    InvalidPercentage(f32),
-    #[error("rake cap must be non-negative, got {0}")]
-    InvalidCap(f32),
-}
-
-impl RakeConfig {
-    /// Create a validated rake configuration.
-    pub fn new(
-        percentage: f32,
-        cap: f32,
-        no_flop_no_drop: bool,
-    ) -> Result<Self, RakeConfigError> {
-        if !percentage.is_finite() || !(0.0..=1.0).contains(&percentage) {
-            return Err(RakeConfigError::InvalidPercentage(percentage));
+impl RakeRate {
+    pub fn new(numerator: u32, denominator: u32) -> Result<Self, RakeConfigError> {
+        if denominator == 0 || numerator > denominator {
+            return Err(RakeConfigError::InvalidRate {
+                numerator,
+                denominator,
+            });
         }
-        if cap.is_nan() || cap < 0.0 {
-            return Err(RakeConfigError::InvalidCap(cap));
-        }
-
         Ok(Self {
-            percentage,
-            cap,
-            no_flop_no_drop,
+            numerator,
+            denominator,
         })
     }
-
-    /// A zero-rake configuration.
-    pub const fn none() -> Self {
-        Self {
-            percentage: 0.0,
-            cap: f32::INFINITY,
-            no_flop_no_drop: false,
-        }
+    pub const fn numerator(self) -> u32 {
+        self.numerator
     }
-
-    /// Return the rake to collect from `pot_amount`.
-    ///
-    /// `already_collected` is the amount already raked earlier in the same
-    /// hand, so the cap is global to the hand rather than reset for side pots.
-    pub fn calculate(
-        &self,
-        pot_amount: f32,
-        flop_dealt: bool,
-        already_collected: f32,
-    ) -> f32 {
-        if pot_amount <= 0.0 || self.percentage == 0.0 {
-            return 0.0;
+    pub const fn denominator(self) -> u32 {
+        self.denominator
+    }
+    pub const fn zero() -> Self {
+        Self {
+            numerator: 0,
+            denominator: 1,
         }
-        if self.no_flop_no_drop && !flop_dealt {
-            return 0.0;
-        }
-
-        let remaining_cap = (self.cap - already_collected).max(0.0);
-        (pot_amount * self.percentage)
-            .min(remaining_cap)
-            .min(pot_amount)
     }
 }
-
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RakeRounding {
+    HalfToEven,
+    Floor,
+    Ceil,
+}
+impl RakeRounding {
+    fn round(self, numerator: i128, denominator: i128) -> i128 {
+        let quotient = numerator / denominator;
+        let remainder = numerator % denominator;
+        let up = match self {
+            Self::Floor => false,
+            Self::Ceil => remainder != 0,
+            Self::HalfToEven => {
+                remainder * 2 > denominator || (remainder * 2 == denominator && quotient % 2 != 0)
+            }
+        };
+        quotient + i128::from(up)
+    }
+}
+/// One configuration consumed by the engine, with a cap shared by the hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RakeConfig {
+    pub rate: RakeRate,
+    /// None means unlimited; negative caps are invalid.
+    pub cap: Option<Chips>,
+    pub no_flop_no_drop: bool,
+    pub rounding: RakeRounding,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum RakeConfigError {
+    #[error("invalid rational rake rate {numerator}/{denominator}")]
+    InvalidRate { numerator: u32, denominator: u32 },
+    #[error("rake cap must be non-negative, got {0}")]
+    InvalidCap(Chips),
+}
+impl RakeConfig {
+    pub fn new(
+        rate: RakeRate,
+        cap: Option<Chips>,
+        no_flop_no_drop: bool,
+        rounding: RakeRounding,
+    ) -> Result<Self, RakeConfigError> {
+        let config = Self {
+            rate,
+            cap,
+            no_flop_no_drop,
+            rounding,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+    pub fn validate(&self) -> Result<(), RakeConfigError> {
+        if let Some(cap) = self.cap
+            && cap < 0
+        {
+            return Err(RakeConfigError::InvalidCap(cap));
+        }
+        Ok(())
+    }
+    pub const fn none() -> Self {
+        Self {
+            rate: RakeRate::zero(),
+            cap: None,
+            no_flop_no_drop: false,
+            rounding: RakeRounding::HalfToEven,
+        }
+    }
+    /// Gross slice -> rational amount -> rounding -> remaining hand cap.
+    /// Multiplication is widened to i128; no money crosses a float boundary.
+    pub fn calculate(
+        &self,
+        pot_amount: Chips,
+        flop_dealt: bool,
+        already_collected: Chips,
+    ) -> Chips {
+        assert!(pot_amount >= 0 && already_collected >= 0);
+        self.validate().expect("invalid rake configuration");
+        if self.no_flop_no_drop && !flop_dealt {
+            return 0;
+        }
+        let amount = self.rounding.round(
+            i128::from(pot_amount) * i128::from(self.rate.numerator),
+            i128::from(self.rate.denominator),
+        ) as Chips;
+        let remaining_cap = self.cap.map_or(Chips::MAX, |cap| {
+            cap.saturating_sub(already_collected).max(0)
+        });
+        amount.min(remaining_cap).min(pot_amount)
+    }
+}
 impl Default for RakeConfig {
     fn default() -> Self {
         Self::none()
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn default_collects_no_rake() {
-        let rake = RakeConfig::default();
-        assert_eq!(rake.calculate(100.0, true, 0.0), 0.0);
+    fn config(n: u32, d: u32, rounding: RakeRounding) -> RakeConfig {
+        RakeConfig::new(RakeRate::new(n, d).unwrap(), None, false, rounding).unwrap()
     }
-
     #[test]
-    fn percentage_is_applied() {
-        let rake = RakeConfig::new(0.05, f32::INFINITY, false).unwrap();
-        assert_eq!(rake.calculate(100.0, true, 0.0), 5.0);
+    fn exact_percentages_and_wide_multiplication() {
+        assert_eq!(RakeConfig::none().calculate(100, true, 0), 0);
+        assert_eq!(
+            config(5, 100, RakeRounding::Floor).calculate(100, true, 0),
+            5
+        );
+        assert_eq!(
+            config(45, 1000, RakeRounding::Floor).calculate(2000, true, 0),
+            90
+        );
+        assert_eq!(
+            config(55, 1000, RakeRounding::Floor).calculate(2000, true, 0),
+            110
+        );
+        assert_eq!(
+            config(u32::MAX, u32::MAX, RakeRounding::Ceil).calculate(Chips::MAX, true, 0),
+            Chips::MAX
+        );
     }
-
     #[test]
-    fn cap_is_shared_across_the_hand() {
-        let rake = RakeConfig::new(0.10, 6.0, false).unwrap();
-        assert_eq!(rake.calculate(40.0, true, 0.0), 4.0);
-        assert_eq!(rake.calculate(40.0, true, 4.0), 2.0);
-        assert_eq!(rake.calculate(40.0, true, 6.0), 0.0);
+    fn quotient_remainder_rounding() {
+        assert_eq!(config(1, 2, RakeRounding::Floor).calculate(3, true, 0), 1);
+        assert_eq!(config(1, 2, RakeRounding::Ceil).calculate(3, true, 0), 2);
+        let even = config(1, 2, RakeRounding::HalfToEven);
+        assert_eq!(even.calculate(1, true, 0), 0);
+        assert_eq!(even.calculate(3, true, 0), 2);
+        assert_eq!(even.calculate(5, true, 0), 2);
+        assert_eq!(even.calculate(7, true, 0), 4);
+        assert_eq!(
+            config(1, 3, RakeRounding::HalfToEven).calculate(4, true, 0),
+            1
+        );
+        assert_eq!(
+            config(1, 3, RakeRounding::HalfToEven).calculate(5, true, 0),
+            2
+        );
     }
-
     #[test]
-    fn no_flop_no_drop_skips_preflop_fold() {
-        let rake = RakeConfig::new(0.05, 10.0, true).unwrap();
-        assert_eq!(rake.calculate(100.0, false, 0.0), 0.0);
-        assert_eq!(rake.calculate(100.0, true, 0.0), 5.0);
+    fn shared_cap_and_no_flop_no_drop() {
+        let c = RakeConfig::new(
+            RakeRate::new(1, 10).unwrap(),
+            Some(6),
+            true,
+            RakeRounding::HalfToEven,
+        )
+        .unwrap();
+        assert_eq!(c.calculate(40, false, 0), 0);
+        assert_eq!(c.calculate(40, true, 0), 4);
+        assert_eq!(c.calculate(40, true, 4), 2);
+        assert_eq!(c.calculate(40, true, 6), 0);
+        assert_eq!(c.calculate(40, true, 10), 0);
+        for pot in 0..500 {
+            for rounding in [
+                RakeRounding::Floor,
+                RakeRounding::Ceil,
+                RakeRounding::HalfToEven,
+            ] {
+                let rake = config(99, 100, rounding).calculate(pot, true, 0);
+                assert!((0..=pot).contains(&rake));
+            }
+        }
     }
-
     #[test]
     fn invalid_configs_are_rejected() {
-        assert!(RakeConfig::new(-0.01, 1.0, false).is_err());
-        assert!(RakeConfig::new(1.01, 1.0, false).is_err());
-        assert!(RakeConfig::new(0.05, -1.0, false).is_err());
+        assert!(RakeRate::new(1, 0).is_err());
+        assert!(RakeRate::new(101, 100).is_err());
+        assert!(RakeConfig::new(RakeRate::zero(), Some(-1), false, RakeRounding::Floor).is_err());
     }
 }

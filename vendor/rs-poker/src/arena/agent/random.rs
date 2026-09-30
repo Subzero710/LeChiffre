@@ -1,3 +1,4 @@
+use crate::arena::{Chips, money::apply_ratio};
 use async_trait::async_trait;
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng, rng};
@@ -97,7 +98,9 @@ impl Agent for RandomAgent {
         // calling a pot sized bet (plus a little more for spicyness)
         //
         // That could be the same as the min
-        let pot_value = (round_data.num_players_need_action() as f32 + 1.0) * game_state.total_pot;
+        let pot_value = game_state
+            .total_pot
+            .saturating_mul(round_data.num_players_need_action() as Chips + 1);
         let max = (player_bet + player_stack).min(pot_value).max(min);
 
         // We shouldn't fold when checking is an option.
@@ -246,9 +249,9 @@ impl RandomPotControlAgent {
         }
     }
 
-    fn expected_pot(&self, game_state: &GameState) -> f32 {
+    fn expected_pot(&self, game_state: &GameState) -> Chips {
         if game_state.round == Round::Preflop {
-            (3.0 * game_state.big_blind).max(game_state.total_pot)
+            (3 * game_state.big_blind).max(game_state.total_pot)
         } else {
             game_state.total_pot
         }
@@ -293,7 +296,7 @@ impl RandomPotControlAgent {
         let to_act_idx = game_state.to_act_idx();
 
         // How much do I actually value the pot right now?
-        let my_value = values.get(to_act_idx).unwrap_or(&0.0_f32) * expected_pot;
+        let my_value = apply_ratio(expected_pot, *values.get(to_act_idx).unwrap_or(&0.0_f32));
 
         // What have we already put into the pot for the round?
         let bet_already = game_state.current_round_player_bet(to_act_idx);
@@ -304,9 +307,9 @@ impl RandomPotControlAgent {
 
         // If we don't value the pot at what's required then just bail out.
         // But only fold if there's actually something to call (otherwise check)
-        if my_value < needed && needed > 0.0 {
+        if my_value < needed && needed > 0 {
             AgentAction::Fold
-        } else if needed <= 0.0 {
+        } else if needed <= 0 {
             // Nothing to call - just check
             AgentAction::Bet(to_call)
         } else {
@@ -314,7 +317,7 @@ impl RandomPotControlAgent {
         }
     }
 
-    fn random_action(&mut self, game_state: &GameState, max_value: f32) -> AgentAction {
+    fn random_action(&mut self, game_state: &GameState, max_value: Chips) -> AgentAction {
         // Use the number of bets to determine the call percentage
         let round_data = &game_state.round_data;
         let raise_count = round_data.total_raise_count;
@@ -352,7 +355,7 @@ impl RandomPotControlAgent {
                     .min(max_total_bet);
                 let bet_value = self
                     .rng
-                    .random_range(min_raise_total..high.max(min_raise_total + 1.0));
+                    .random_range(min_raise_total..high.max(min_raise_total + 1));
 
                 AgentAction::Bet(bet_value)
             }
@@ -375,7 +378,7 @@ impl Agent for RandomPotControlAgent {
             let to_call = game_state.current_round_bet();
             let bet_already = game_state.current_round_current_player_bet();
             let needed = to_call - bet_already;
-            if needed > 0.0 {
+            if needed > 0 {
                 AgentAction::Fold
             } else {
                 // Nothing to call - just check
@@ -406,8 +409,8 @@ mod tests {
     async fn test_random_generator_produces_named_caller() {
         let generator = RandomAgentGenerator::new(vec![0.0], vec![1.0]);
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -427,8 +430,8 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn test_seeded_random_agent_generator_is_deterministic() {
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 500.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 500)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -453,8 +456,8 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn test_seeded_random_agent_generator_differs_across_players() {
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 500.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 500)
+            .blinds(10, 5)
             .build()
             .unwrap();
         let generator = RandomAgentGenerator::seeded(vec![0.1, 0.2], vec![0.4, 0.3], 0xdeadbeef);
@@ -473,8 +476,8 @@ mod tests {
     fn test_random_generator_uses_custom_name() {
         let generator = RandomAgentGenerator::new(vec![0.0], vec![1.0]).with_name("RandomHero");
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 20.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 20)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -486,10 +489,10 @@ mod tests {
     async fn test_random_five_nl() {
         let rng = SmallRng::from_rng(&mut rng());
 
-        let stacks = vec![100.0; 5];
+        let stacks = vec![100; 5];
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
         let agents: Vec<Box<dyn Agent>> = (0..5)
@@ -517,14 +520,14 @@ mod tests {
             .stacks
             .clone()
             .into_iter()
-            .reduce(f32::min)
+            .reduce(Chips::min)
             .unwrap();
         let max_stack = sim
             .game_state
             .stacks
             .clone()
             .into_iter()
-            .reduce(f32::max)
+            .reduce(Chips::max)
             .unwrap();
 
         assert_ne!(min_stack, max_stack, "There should have been some betting.");
@@ -535,10 +538,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_five_pot_control() {
-        let stacks = vec![100.0; 5];
+        let stacks = vec![100; 5];
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
         let agents: Vec<Box<dyn Agent>> = (0..5)
@@ -563,14 +566,14 @@ mod tests {
             .stacks
             .clone()
             .into_iter()
-            .reduce(f32::min)
+            .reduce(Chips::min)
             .unwrap();
         let max_stack = sim
             .game_state
             .stacks
             .clone()
             .into_iter()
-            .reduce(f32::max)
+            .reduce(Chips::max)
             .unwrap();
 
         assert_ne!(min_stack, max_stack, "There should have been some betting.");
@@ -580,10 +583,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_random_agents_no_fold_get_all_rounds() {
-        let stacks = vec![100.0; 5];
+        let stacks = vec![100; 5];
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
         let agents: Vec<Box<dyn Agent>> = (0..5)
@@ -626,13 +629,13 @@ mod tests {
     fn test_random_agent_expected_pot_preflop() {
         let agent = RandomPotControlAgent::new("Test", vec![0.5]);
         let mut game_state = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .blinds(10.0, 5.0)
+            .stacks(vec![100, 100])
+            .blinds(10, 5)
             .build()
             .unwrap();
         // Set to preflop round
         game_state.round = Round::Preflop;
-        game_state.total_pot = 15.0; // SB + BB
+        game_state.total_pot = 15; // SB + BB
 
         // In preflop: max(3.0 * big_blind, total_pot) = max(30.0, 15.0) = 30.0
         let expected = agent.expected_pot(&game_state);
@@ -640,7 +643,7 @@ mod tests {
         // Preflop expected pot should be max(3.0 * big_blind, total_pot)
         // With big_blind=10 and total_pot=15, that's max(30, 15) = 30
         assert!(
-            (expected - 30.0).abs() < 0.01,
+            (expected - 30) == 0,
             "expected_pot should be 30.0 in preflop with small pot, got {}",
             expected
         );
@@ -650,18 +653,18 @@ mod tests {
     fn test_random_agent_expected_pot_postflop() {
         let agent = RandomPotControlAgent::new("Test", vec![0.5]);
         let mut game_state = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .blinds(10.0, 5.0)
+            .stacks(vec![100, 100])
+            .blinds(10, 5)
             .build()
             .unwrap();
         // Move to flop
         game_state.round = Round::Flop;
-        game_state.total_pot = 50.0;
+        game_state.total_pot = 50;
 
         let expected = agent.expected_pot(&game_state);
         // Post-flop: just returns total_pot
         assert!(
-            (expected - 50.0).abs() < 0.01,
+            (expected - 50) == 0,
             "expected_pot post-flop should equal total_pot (50.0), got {}",
             expected
         );
@@ -671,8 +674,8 @@ mod tests {
     fn test_random_agent_clean_hands_preserves_own_hand() {
         let agent = RandomPotControlAgent::new("Test", vec![0.5]);
         let mut game_state = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .blinds(10.0, 5.0)
+            .stacks(vec![100, 100])
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -726,16 +729,16 @@ mod tests {
         // When current bet > player bet, should be able to fold
         let mut agent = RandomAgent::new("FoldTest", vec![1.0], vec![0.0]); // 100% fold
         let mut game_state = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .blinds(10.0, 5.0)
+            .stacks(vec![100, 100])
+            .blinds(10, 5)
             .build()
             .unwrap();
 
         // Set up a situation where the player faces a bet
         // round_data.bet = current bet to call
         // player_bets[to_act] = what this player has already bet this round
-        game_state.round_data.bet = 10.0; // There's a bet of 10 to call
-        game_state.round_data.player_bet[0] = 5.0; // Player has only bet 5 (like SB)
+        game_state.round_data.bet = 10; // There's a bet of 10 to call
+        game_state.round_data.player_bet[0] = 5; // Player has only bet 5 (like SB)
 
         // can_fold = curr_bet (10) > player_bet (5) = true
         // With 100% fold probability, should fold
@@ -752,15 +755,15 @@ mod tests {
         // When current bet == player bet, should not fold (can check)
         let mut agent = RandomAgent::new("CheckTest", vec![1.0], vec![0.0]); // 100% fold
         let mut game_state = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .blinds(10.0, 5.0)
+            .stacks(vec![100, 100])
+            .blinds(10, 5)
             .build()
             .unwrap();
 
         // Simulate BB position where bet is matched (nothing to call)
-        game_state.round_data.bet = 0.0;
-        game_state.round_data.player_bet[0] = 0.0;
-        game_state.stacks[0] = 100.0;
+        game_state.round_data.bet = 0;
+        game_state.round_data.player_bet[0] = 0;
+        game_state.stacks[0] = 100;
 
         // can_fold = curr_bet (0) > player_bet (0) = false
         let action = agent.act(0, &game_state).await;
@@ -778,8 +781,8 @@ mod tests {
         // Test that min bet is calculated correctly using addition
         let agent = RandomAgent::new("MinTest", vec![0.0], vec![0.0]);
         let game_state = GameStateBuilder::new()
-            .stacks(vec![50.0, 50.0])
-            .blinds(10.0, 5.0)
+            .stacks(vec![50, 50])
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -814,8 +817,8 @@ mod tests {
 
         // Set up a game state where we can verify needed = to_call - bet_already
         let game_state = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .blinds(10.0, 5.0)
+            .stacks(vec![100, 100])
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -848,8 +851,8 @@ mod tests {
         let agent = RandomPotControlAgent::new("MaxBetTest", vec![0.0]); // Never call, always try bet
 
         let game_state = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .blinds(10.0, 5.0)
+            .stacks(vec![100, 100])
+            .blinds(10, 5)
             .build()
             .unwrap();
         // player_bet_this_round + player_stack = 5 + 95 = 100
@@ -879,8 +882,8 @@ mod tests {
 
         // Create a game with specific stack sizes to exercise the calculation
         let game_state = GameStateBuilder::new()
-            .stacks(vec![200.0, 200.0])
-            .blinds(10.0, 5.0)
+            .stacks(vec![200, 200])
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -906,8 +909,8 @@ mod tests {
 
         // Small stack that can't make minimum raise
         let game_state = GameStateBuilder::new()
-            .stacks(vec![15.0, 100.0])
-            .blinds(10.0, 5.0)
+            .stacks(vec![15, 100])
+            .blinds(10, 5)
             .build()
             .unwrap();
         // Player 0 has 15 total
@@ -938,10 +941,10 @@ mod tests {
         // With +: (5 + 1.0) + 15 = 21 (wrong)
         // With /: (5 + 1.0) / 15 = 0.4 (wrong)
 
-        let stacks = vec![100.0; 5];
+        let stacks = vec![100; 5];
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -984,8 +987,8 @@ mod tests {
 
         // Test with simulation - should not panic
         let game_state = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .blinds(10.0, 5.0)
+            .stacks(vec![100, 100])
+            .blinds(10, 5)
             .build()
             .unwrap();
         let agents: Vec<Box<dyn Agent>> = vec![
@@ -1014,12 +1017,12 @@ mod tests {
         // With addition: 0.5 + 50 = 50.5 (wrong)
         // With division: 0.5 / 50 = 0.01 (wrong)
 
-        let mut game_state = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .blinds(10.0, 5.0)
+        let game_state = GameStateBuilder::new()
+            .stacks(vec![75, 75])
+            .player_bet([25, 25])
+            .blinds(10, 5)
             .build()
             .unwrap();
-        game_state.total_pot = 50.0;
 
         let rng = SmallRng::from_rng(&mut rng());
         let agents: Vec<Box<dyn Agent>> = vec![

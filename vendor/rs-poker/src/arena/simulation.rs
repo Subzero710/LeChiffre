@@ -1,11 +1,11 @@
+use smallvec::SmallVec;
 use std::fmt;
 
-use smallvec::SmallVec;
 use tracing::{Level, event, instrument};
 
 use crate::arena::action::{FailedActionPayload, PlayedActionPayload};
 use crate::arena::game_state::Round;
-use crate::core::{Card, Deck, Rank, Rankable};
+use crate::core::{Card, Deck, Rankable};
 
 use super::action::{
     Action, AgentAction, AwardPayload, DealStartingHandPayload, ForcedBetPayload, GameStartPayload,
@@ -84,6 +84,16 @@ impl HoldemSimulation {
     )]
     pub async fn run(&mut self) {
         while self.more_rounds() {
+            if (self.game_state.player_active | self.game_state.player_all_in).count() == 1
+                && !matches!(
+                    self.game_state.round,
+                    Round::Starting | Round::Ante | Round::DealPreflop
+                )
+            {
+                self.distribute_pots(false).await;
+                self.end_game().await;
+                break;
+            }
             self.run_round().await;
         }
     }
@@ -154,7 +164,7 @@ impl HoldemSimulation {
 
     async fn ante(&mut self) {
         let ante = self.game_state.ante;
-        if ante > 0.0 {
+        if ante > 0 {
             // Force the ante from each active player.
             while self.game_state.current_round_num_active_players() > 0 {
                 let idx = self.game_state.to_act_idx();
@@ -193,10 +203,26 @@ impl HoldemSimulation {
     }
 
     async fn preflop(&mut self) {
+        // Forced seats are determined by dealt players, including players
+        // already all-in from the ante. Such a player can post a zero blind.
+        let dealt = self.game_state.player_active | self.game_state.player_all_in;
+        let next_dealt = |seat: usize| {
+            (1..=self.game_state.num_players)
+                .map(|offset| (seat + offset) % self.game_state.num_players)
+                .find(|&idx| dealt.get(idx))
+                .expect("a dealt blind seat")
+        };
+        let sb_seat = if dealt.count() == 2 && dealt.get(self.game_state.dealer_idx) {
+            self.game_state.dealer_idx
+        } else {
+            next_dealt(self.game_state.dealer_idx)
+        };
+        let bb_seat = next_dealt(sb_seat);
         // Force the small blind and the big blind.
         if !self.game_state.sb_posted {
             let sb = self.game_state.small_blind;
-            let sb_idx = self.game_state.to_act_idx();
+            let sb_idx = sb_seat;
+            self.game_state.round_data.to_act_idx = sb_idx;
             let actual_sb = self.game_state.do_bet(sb, true).unwrap();
             self.game_state.sb_posted = true;
 
@@ -211,9 +237,12 @@ impl HoldemSimulation {
 
         if !self.game_state.bb_posted {
             let bb = self.game_state.big_blind;
-            let bb_idx = self.game_state.to_act_idx();
+            let bb_idx = bb_seat;
+            self.game_state.round_data.to_act_idx = bb_idx;
             let actual_bb = self.game_state.do_bet(bb, true).unwrap();
             self.game_state.bb_posted = true;
+            // A short big blind does not lower the opening amount owed.
+            self.game_state.round_data.bet = self.game_state.round_data.bet.max(bb);
             self.record_action(Action::ForcedBet(ForcedBetPayload {
                 bet: actual_bb,
                 idx: bb_idx,
@@ -257,128 +286,47 @@ impl HoldemSimulation {
     }
 
     async fn showdown(&mut self) {
-        // Rank each player that still has a chance.
-        let active = self.game_state.player_active | self.game_state.player_all_in;
-
-        let mut bets = self.game_state.player_bet.clone();
-
-        // Collect (rank, player_idx) pairs sorted by rank descending (best first),
-        // then by bet ascending within same rank (smallest bets first for side pots).
-        // This replaces the BTreeMap<Rank, Vec<usize>> to avoid heap allocations.
-        // Inline up to a full table (PlayerBitSet caps at 16) — no heap alloc.
-        let mut ranked_players: SmallVec<[(Rank, usize); 16]> = active
-            .ones()
-            .map(|idx| (self.game_state.hands[idx].rank(), idx))
-            .collect();
-        ranked_players.sort_by(|a, b| {
-            b.0.cmp(&a.0)
-                .then_with(|| bets[a.1].partial_cmp(&bets[b.1]).unwrap())
-        });
-
-        // There can be bets that players made but didn't take to showdown they should
-        // be added to the main pot. Keep them here and then split them up
-        // between the winners of the first rank pot. resetting the ammount to
-        // zero.
-        let mut folded_pot = bets
-            .iter()
-            .enumerate()
-            .filter(|(idx, _)| !active.get(*idx))
-            .map(|(_, bet)| *bet)
-            .sum::<f32>();
-        bets = bets
-            .iter()
-            .enumerate()
-            .map(|(idx, v)| if active.get(idx) { *v } else { 0.0 })
-            .collect();
-
-        // Process groups of players with the same rank (consecutive in sorted order).
-        // Within each group, iterate from smallest bet to largest to handle side pots.
-        let mut group_start = 0;
-        while group_start < ranked_players.len() {
-            let rank = ranked_players[group_start].0;
-            let mut group_end = group_start + 1;
-            while group_end < ranked_players.len() && ranked_players[group_end].0 == rank {
-                group_end += 1;
-            }
-
-            let mut start_idx = group_start;
-
-            // We'll continue until every player has been given the matching money
-            // up to their wager. However since some players might have gone allin
-            // earlier we keep removing from the pot and splitting it equally to all
-            // those players still left in the pot.
-            while start_idx < group_end {
-                // Because our lists are ordered from smallest bets to largest
-                // we can just assume the first one is the smallest
-                //
-                // Here we use that property to find the max bet that this pot
-                // will give for this round of splitting ties.
-                let max_wager = bets[ranked_players[start_idx].1];
-                let mut pot: f64 = f64::from(folded_pot);
-                folded_pot = 0.0;
-
-                // Most common is that ties will
-                // be for wagers that are all the same.
-                // So check if there's no more
-                // bets to award for this player.
-                if max_wager <= 0.0 {
-                    start_idx += 1;
-                    continue;
-                }
-
-                // Take all the wagers remaining into a
-                // side pot. However this side pot might
-                // be the only pot if there were no allins
-                for b in bets.iter_mut() {
-                    let w = (*b).min(max_wager);
-                    *b -= w;
-                    pot += w as f64;
-                }
-
-                // Apply rake before splitting this main/side-pot slice. The cap is
-                // shared across all slices in the hand via `rake_collected`.
-                let gross_pot = pot;
-                let net_pot = f64::from(self.game_state.take_rake(gross_pot as f32));
-
-                // Now all the winning players get an equal share of the net pot.
-                let num_players = (group_end - start_idx) as f64;
-                let split = net_pot / num_players;
-
-                for entry in &ranked_players[start_idx..group_end] {
-                    let idx = entry.1;
-                    // Record that this player won something
-                    event!(
-                        Level::DEBUG,
-                        idx,
-                        split,
-                        gross_pot,
-                        net_pot,
-                        rake_collected = self.game_state.rake_collected,
-                        ?rank,
-                        "pot_awarded"
-                    );
-                    self.game_state.award(idx, split as f32);
-                    self.record_action(Action::Award(AwardPayload {
-                        idx,
-                        total_pot: gross_pot as f32,
-                        award_amount: split as f32,
-                        // Since we had a showdown we can copy the hand
-                        // and the resulting rank.
-                        rank: Some(rank),
-                        hand: Some(self.game_state.hands[idx]),
-                    }))
-                    .await;
-                }
-
-                // Since the first player is bet size
-                // that we used. They have won everything that they're eligible for.
-                start_idx += 1;
-            }
-
-            group_start = group_end;
-        }
-
+        self.distribute_pots(true).await;
         self.end_game().await;
+    }
+
+    async fn distribute_pots(&mut self, showdown: bool) {
+        let awards = crate::arena::pot::planned_awards(&self.game_state);
+        let mut last_pot = None;
+        for award in awards {
+            if award.refund {
+                self.game_state.return_uncalled_bet(award.idx, award.amount);
+                self.record_action(Action::ReturnUncalledBet(
+                    crate::arena::action::UncalledBetPayload {
+                        idx: award.idx,
+                        amount: award.amount,
+                    },
+                ))
+                .await;
+                continue;
+            }
+            if last_pot != Some(award.pot_index) {
+                self.game_state.rake_collected += award.rake;
+                last_pot = Some(award.pot_index);
+            }
+            self.game_state.award(award.idx, award.amount);
+            self.record_action(Action::Award(AwardPayload {
+                idx: award.idx,
+                total_pot: award.gross,
+                award_amount: award.amount,
+                rank: showdown.then(|| self.game_state.hands[award.idx].rank()),
+                hand: showdown.then_some(self.game_state.hands[award.idx]),
+            }))
+            .await;
+        }
+        assert_eq!(
+            self.game_state
+                .player_winnings
+                .iter()
+                .sum::<crate::arena::Chips>()
+                + self.game_state.rake_collected,
+            self.game_state.total_pot
+        );
     }
 
     async fn deal_player_cards(&mut self, num_cards: usize) {
@@ -826,26 +774,8 @@ impl HoldemSimulation {
         // If there's no one left, and one person went all in they win.
         //
         if left.count() <= 1 {
-            if let Some(winning_idx) = left.ones().next() {
-                let gross_pot = self.game_state.total_pot;
-                let net_pot = self.game_state.take_rake(gross_pot);
-                event!(
-                    Level::DEBUG,
-                    winning_idx,
-                    gross_pot,
-                    net_pot,
-                    rake_collected = self.game_state.rake_collected,
-                    "folded_to_winner"
-                );
-                self.game_state.award(winning_idx, net_pot);
-                self.record_action(Action::Award(AwardPayload {
-                    idx: winning_idx,
-                    total_pot: gross_pot,
-                    award_amount: net_pot,
-                    rank: None,
-                    hand: None,
-                }))
-                .await
+            if !left.empty() {
+                self.distribute_pots(false).await;
             }
 
             self.end_game().await;

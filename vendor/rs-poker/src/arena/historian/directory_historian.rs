@@ -98,14 +98,14 @@ mod tests {
         let mut historian = DirectoryHistorian::new(non_existent_path.clone());
 
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .build()
             .unwrap();
         let action = Action::GameStart(GameStartPayload {
-            ante: 0.0,
-            small_blind: 5.0,
-            big_blind: 10.0,
+            ante: 0,
+            small_blind: 5,
+            big_blind: 10,
         });
 
         historian
@@ -136,13 +136,13 @@ mod tests {
         let mut historian = DirectoryHistorian::new(history_path.clone());
 
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .build()
             .unwrap();
         let action = Action::ForcedBet(ForcedBetPayload {
-            bet: 5.0,
-            player_stack: 100.0,
+            bet: 5,
+            player_stack: 100,
             idx: 0,
             forced_bet_type: ForcedBetType::SmallBlind,
         });
@@ -175,20 +175,20 @@ mod tests {
 
         let mut historian = DirectoryHistorian::new(history_path.clone());
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
         let action1 = Action::ForcedBet(ForcedBetPayload {
-            bet: 5.0,
-            player_stack: 100.0,
+            bet: 5,
+            player_stack: 100,
             idx: 0,
             forced_bet_type: ForcedBetType::SmallBlind,
         });
         let action2 = Action::ForcedBet(ForcedBetPayload {
-            bet: 10.0,
-            player_stack: 100.0,
+            bet: 10,
+            player_stack: 100,
             idx: 1,
             forced_bet_type: ForcedBetType::BigBlind,
         });

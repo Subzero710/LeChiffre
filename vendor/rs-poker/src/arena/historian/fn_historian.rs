@@ -56,8 +56,8 @@ mod tests {
             .map(|_| Box::<RandomAgent>::default() as Box<dyn Agent>)
             .collect();
         let game_state = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .blinds(10.0, 5.0)
+            .stacks(vec![100, 100])
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -99,8 +99,8 @@ mod tests {
             .collect();
 
         let game_state = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .blinds(10.0, 5.0)
+            .stacks(vec![100, 100])
+            .blinds(10, 5)
             .build()
             .unwrap();
         let historian = Box::new(FnHistorian::new(|_, _, _| {

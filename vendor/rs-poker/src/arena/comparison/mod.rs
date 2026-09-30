@@ -17,8 +17,8 @@
 //! let comparison = ComparisonBuilder::new()
 //!     .num_games(1000)
 //!     .players_per_table(3)
-//!     .big_blind(10.0)
-//!     .small_blind(5.0)
+//!     .big_blind(10)
+//!     .small_blind(5)
 //!     .load_agents_from_dir("./agents/")?
 //!     .seed(42)
 //!     .build()?;

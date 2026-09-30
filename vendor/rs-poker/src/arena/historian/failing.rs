@@ -34,10 +34,10 @@ mod tests {
     async fn test_panic_fail_historian() {
         let historian = Box::new(FailingHistorian);
 
-        let stacks = vec![100.0; 3];
+        let stacks = vec![100; 3];
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 

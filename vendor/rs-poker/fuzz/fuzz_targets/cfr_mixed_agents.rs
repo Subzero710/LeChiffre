@@ -58,8 +58,8 @@ fuzz_target!(|input: MixedAgentInput| {
     let iters_per_depth = vec![depth_0, depth_1, 1];
 
     let game_state = GameStateBuilder::new()
-        .num_players_with_stack(2, 50.0)
-        .blinds(2.0, 1.0)
+        .num_players_with_stack(2, 50)
+        .blinds(2, 1)
         .build()
         .unwrap();
 

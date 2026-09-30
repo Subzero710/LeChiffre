@@ -57,8 +57,8 @@ fn build_agents(num_agents: usize) -> Vec<Box<dyn Agent>> {
 /// use rs_poker::arena::{GameStateBuilder, HoldemSimulationBuilder};
 ///
 /// let game_state = GameStateBuilder::new()
-///     .num_players_with_stack(5, 100.0)
-///     .blinds(2.0, 1.0)
+///     .num_players_with_stack(5, 100)
+///     .blinds(2, 1)
 ///     .dealer_idx(3)
 ///     .build()
 ///     .unwrap();
@@ -75,8 +75,8 @@ fn build_agents(num_agents: usize) -> Vec<Box<dyn Agent>> {
 /// use rs_poker::arena::{GameStateBuilder, HoldemSimulationBuilder};
 ///
 /// let game_state = GameStateBuilder::new()
-///     .num_players_with_stack(5, 100.0)
-///     .blinds(2.0, 1.0)
+///     .num_players_with_stack(5, 100)
+///     .blinds(2, 1)
 ///     .dealer_idx(3)
 ///     .build()
 ///     .unwrap();
@@ -105,8 +105,8 @@ pub struct HoldemSimulationBuilder {
 /// use rs_poker::arena::{GameStateBuilder, HoldemSimulationBuilder};
 ///
 /// let game_state = GameStateBuilder::new()
-///     .num_players_with_stack(5, 100.0)
-///     .blinds(2.0, 1.0)
+///     .num_players_with_stack(5, 100)
+///     .blinds(2, 1)
 ///     .dealer_idx(3)
 ///     .build()
 ///     .unwrap();
@@ -211,7 +211,7 @@ impl HoldemSimulationBuilder {
         // Keep this simulation-builder setter as a convenient override.
         if let Some(rake) = self.rake {
             game_state.rake = rake;
-            game_state.rake_collected = 0.0;
+            game_state.rake_collected = 0;
         }
 
         let agents = self
@@ -271,6 +271,7 @@ impl Default for HoldemSimulationBuilder {
 
 #[cfg(test)]
 mod tests {
+    use crate::Chips;
     use rand::{SeedableRng, rngs::StdRng};
 
     use crate::{arena::action::AgentAction, arena::game_state::Round, core::Card};
@@ -280,10 +281,10 @@ mod tests {
 
     /// Test helper to create a game state with standard defaults
     fn test_game_state(
-        stacks: Vec<f32>,
-        big_blind: f32,
-        small_blind: f32,
-        ante: f32,
+        stacks: Vec<Chips>,
+        big_blind: Chips,
+        small_blind: Chips,
+        ante: Chips,
         dealer_idx: usize,
     ) -> GameState {
         GameStateBuilder::new()
@@ -298,24 +299,24 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_single_step_agent() {
-        let stacks = vec![100.0; 9];
-        let game_state = test_game_state(stacks, 10.0, 5.0, 1.0, 0);
+        let stacks = vec![100; 9];
+        let game_state = test_game_state(stacks, 10, 5, 1, 0);
         let mut sim = HoldemSimulationBuilder::default()
             .game_state(game_state)
             .build_with_rng(StdRng::seed_from_u64(420))
             .unwrap();
 
-        assert_eq!(100.0, sim.game_state.stacks[1]);
-        assert_eq!(100.0, sim.game_state.stacks[2]);
+        assert_eq!(100, sim.game_state.stacks[1]);
+        assert_eq!(100, sim.game_state.stacks[2]);
         // We are starting out.
         sim.run_round().await;
-        assert_eq!(100.0, sim.game_state.stacks[1]);
-        assert_eq!(100.0, sim.game_state.stacks[2]);
+        assert_eq!(100, sim.game_state.stacks[1]);
+        assert_eq!(100, sim.game_state.stacks[2]);
 
         // Post the ante and check the results.
         sim.run_round().await;
         for i in 0..9 {
-            assert_eq!(99.0, sim.game_state.stacks[i]);
+            assert_eq!(99, sim.game_state.stacks[i]);
         }
 
         // Deal Pre-Flop
@@ -323,25 +324,25 @@ mod tests {
 
         // Post the blinds and check the results.
         sim.run_round().await;
-        assert_eq!(6.0, sim.game_state.player_bet[1]);
-        assert_eq!(11.0, sim.game_state.player_bet[2]);
+        assert_eq!(6, sim.game_state.player_bet[1]);
+        assert_eq!(6, sim.game_state.player_bet[2]); // 5-cent uncalled blind returned
     }
 
     #[tokio::test]
     async fn test_simulation_complex_showdown() {
-        let stacks = vec![102.0, 7.0, 12.0, 102.0, 202.0];
-        let mut game_state = test_game_state(stacks, 10.0, 5.0, 2.0, 0);
+        let stacks = vec![102, 7, 12, 102, 202];
+        let mut game_state = test_game_state(stacks, 10, 5, 2, 0);
         let mut deck = CardBitSet::default();
 
         // Start
         game_state.advance_round();
 
         // Ante
-        game_state.do_bet(2.0, true).unwrap(); // ante@idx 1
-        game_state.do_bet(2.0, true).unwrap(); // ante@idx 2
-        game_state.do_bet(2.0, true).unwrap(); // ante@idx 3
-        game_state.do_bet(2.0, true).unwrap(); // ante@idx 4
-        game_state.do_bet(2.0, true).unwrap(); // ante@idx 0
+        game_state.do_bet(2, true).unwrap(); // ante@idx 1
+        game_state.do_bet(2, true).unwrap(); // ante@idx 2
+        game_state.do_bet(2, true).unwrap(); // ante@idx 3
+        game_state.do_bet(2, true).unwrap(); // ante@idx 4
+        game_state.do_bet(2, true).unwrap(); // ante@idx 0
         game_state.advance_round();
 
         // Deal Preflop
@@ -362,11 +363,11 @@ mod tests {
         game_state.advance_round();
 
         // Preflop
-        game_state.do_bet(5.0, true).unwrap(); // blinds@idx 1
-        game_state.do_bet(10.0, true).unwrap(); // blinds@idx 2
+        game_state.do_bet(5, true).unwrap(); // blinds@idx 1
+        game_state.do_bet(10, true).unwrap(); // blinds@idx 2
         game_state.fold(); // idx 3
-        game_state.do_bet(10.0, false).unwrap(); // idx 4
-        game_state.do_bet(10.0, false).unwrap(); // idx 0
+        game_state.do_bet(10, false).unwrap(); // idx 4
+        game_state.do_bet(10, false).unwrap(); // idx 0
         game_state.advance_round();
 
         // Deal Flop
@@ -377,8 +378,8 @@ mod tests {
 
         // Flop
         assert_eq!(game_state.num_active_players(), 2);
-        game_state.do_bet(90.0, false).unwrap(); // idx 4
-        game_state.do_bet(90.0, false).unwrap(); // idx 0
+        game_state.do_bet(90, false).unwrap(); // idx 4
+        game_state.do_bet(90, false).unwrap(); // idx 0
         game_state.advance_round();
         assert_eq!(game_state.num_active_players(), 1);
 
@@ -387,7 +388,7 @@ mod tests {
         game_state.advance_round();
 
         // Turn
-        game_state.do_bet(0.0, false).unwrap(); // idx 4
+        game_state.do_bet(0, false).unwrap(); // idx 4
         game_state.advance_round();
         assert_eq!(game_state.num_active_players(), 1);
 
@@ -396,7 +397,7 @@ mod tests {
         game_state.advance_round();
 
         // River
-        game_state.do_bet(100.0, false).unwrap(); // idx 4
+        game_state.do_bet(100, false).unwrap(); // idx 4
         game_state.advance_round();
         assert_eq!(game_state.num_active_players(), 0);
 
@@ -408,17 +409,17 @@ mod tests {
 
         assert_eq!(Round::Complete, sim.game_state.round);
 
-        assert_eq!(180.0, sim.game_state.player_winnings[0]);
-        assert_eq!(15.0, sim.game_state.player_winnings[1]);
-        assert_eq!(30.0, sim.game_state.player_winnings[2]);
-        assert_eq!(0.0, sim.game_state.player_winnings[3]);
-        assert_eq!(100.0, sim.game_state.player_winnings[4]);
+        assert_eq!(180, sim.game_state.player_winnings[0]);
+        assert_eq!(15, sim.game_state.player_winnings[1]);
+        assert_eq!(30, sim.game_state.player_winnings[2]);
+        assert_eq!(0, sim.game_state.player_winnings[3]);
+        assert_eq!(0, sim.game_state.player_winnings[4]); // Unmatched river bet is returned
 
-        assert_eq!(180.0, sim.game_state.stacks[0]);
-        assert_eq!(15.0, sim.game_state.stacks[1]);
-        assert_eq!(30.0, sim.game_state.stacks[2]);
-        assert_eq!(100.0, sim.game_state.stacks[3]);
-        assert_eq!(100.0, sim.game_state.stacks[4]);
+        assert_eq!(180, sim.game_state.stacks[0]);
+        assert_eq!(15, sim.game_state.stacks[1]);
+        assert_eq!(30, sim.game_state.stacks[2]);
+        assert_eq!(100, sim.game_state.stacks[3]);
+        assert_eq!(100, sim.game_state.stacks[4]);
     }
 
     fn deal_hand_card(
@@ -448,7 +449,7 @@ mod tests {
     #[derive(Clone)]
     struct InvalidBetAgent {
         name: String,
-        bet_amount: f32,
+        bet_amount: Chips,
     }
 
     #[async_trait::async_trait]
@@ -464,13 +465,13 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_invalid_bet_triggers_fold() {
-        let stacks = vec![100.0; 3];
-        let game_state = test_game_state(stacks, 10.0, 5.0, 0.0, 0);
+        let stacks = vec![100; 3];
+        let game_state = test_game_state(stacks, 10, 5, 0, 0);
 
         // Create an agent that bets 1.0 - less than the big blind, which is invalid
         let invalid_agent = InvalidBetAgent {
             name: "InvalidBetAgent".to_string(),
-            bet_amount: 1.0, // Too small to call the big blind
+            bet_amount: 1, // Too small to call the big blind
         };
 
         let mut sim = HoldemSimulationBuilder::default()
@@ -493,8 +494,8 @@ mod tests {
 
     #[test]
     fn test_num_agents() {
-        let stacks = vec![100.0; 5];
-        let game_state = test_game_state(stacks, 10.0, 5.0, 0.0, 0);
+        let stacks = vec![100; 5];
+        let game_state = test_game_state(stacks, 10, 5, 0, 0);
         let sim = HoldemSimulationBuilder::default()
             .game_state(game_state)
             .build()
@@ -505,8 +506,8 @@ mod tests {
 
     #[test]
     fn test_max_raises_default_is_three() {
-        let stacks = vec![100.0; 2];
-        let game_state = test_game_state(stacks, 10.0, 5.0, 0.0, 0);
+        let stacks = vec![100; 2];
+        let game_state = test_game_state(stacks, 10, 5, 0, 0);
         let sim = HoldemSimulationBuilder::default()
             .game_state(game_state)
             .build()
@@ -518,8 +519,8 @@ mod tests {
     #[test]
     fn test_max_raises_none_allows_unlimited() {
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .max_raises_per_round(None)
             .build()
             .unwrap();
@@ -557,8 +558,8 @@ mod tests {
         use crate::arena::historian::VecHistorian;
 
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 1000.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 1000)
+            .blinds(10, 5)
             .max_raises_per_round(Some(2)) // Only 2 raises allowed
             .build()
             .unwrap();
@@ -606,8 +607,8 @@ mod tests {
         use crate::arena::historian::VecHistorian;
 
         let mut game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .max_raises_per_round(Some(3)) // Max 3 raises
             .build()
             .unwrap();
@@ -617,8 +618,8 @@ mod tests {
         game_state.advance_round(); // Ante
         game_state.advance_round(); // DealPreflop
         game_state.advance_round(); // Preflop
-        game_state.do_bet(5.0, true).unwrap(); // SB posts
-        game_state.do_bet(10.0, true).unwrap(); // BB posts
+        game_state.do_bet(5, true).unwrap(); // SB posts
+        game_state.do_bet(10, true).unwrap(); // BB posts
 
         // Manually set raise count to max to simulate raises already occurred
         game_state.round_data.total_raise_count = 3;
@@ -679,8 +680,8 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn test_max_raises_resets_each_round() {
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 500.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 500)
+            .blinds(10, 5)
             .max_raises_per_round(Some(2))
             .build()
             .unwrap();
@@ -717,8 +718,8 @@ mod tests {
         use crate::arena::historian::VecHistorian;
 
         let mut game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 1000.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 1000)
+            .blinds(10, 5)
             .max_raises_per_round(Some(2))
             .build()
             .unwrap();
@@ -728,8 +729,8 @@ mod tests {
         game_state.advance_round(); // Ante
         game_state.advance_round(); // DealPreflop
         game_state.advance_round(); // Preflop
-        game_state.do_bet(5.0, true).unwrap(); // SB
-        game_state.do_bet(10.0, true).unwrap(); // BB
+        game_state.do_bet(5, true).unwrap(); // SB
+        game_state.do_bet(10, true).unwrap(); // BB
 
         // Set raise count to max
         game_state.round_data.total_raise_count = 2;
@@ -750,7 +751,7 @@ mod tests {
 
         // Directly call run_agent_action with a raise attempt
         // Current bet is 10 (BB), min raise is 10, so a raise to 20 should be capped
-        sim.run_agent_action(AgentAction::Bet(20.0)).await;
+        sim.run_agent_action(AgentAction::Bet(20)).await;
 
         // The raise should be recorded as a FailedAction
         let failed_actions: Vec<_> = records
@@ -791,10 +792,16 @@ mod tests {
 
     #[test]
     fn test_rake_override_is_installed_on_game_state() {
-        let rake = crate::arena::RakeConfig::new(0.05, 3.0, true).unwrap();
+        let rake = crate::arena::RakeConfig::new(
+            crate::arena::RakeRate::new(5, 100).unwrap(),
+            Some(3),
+            true,
+            crate::arena::RakeRounding::HalfToEven,
+        )
+        .unwrap();
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(2.0, 1.0)
+            .num_players_with_stack(2, 100)
+            .blinds(2, 1)
             .build()
             .unwrap();
 
@@ -805,7 +812,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(sim.game_state.rake, rake);
-        assert_eq!(sim.game_state.rake_collected, 0.0);
+        assert_eq!(sim.game_state.rake_collected, 0);
     }
-
 }

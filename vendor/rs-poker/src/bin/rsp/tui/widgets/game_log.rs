@@ -116,16 +116,16 @@ mod tests {
             GameLogEntry::new(
                 1,
                 vec!["Alice".into(), "Bob".into()],
-                vec![15.0, -15.0],
+                vec![15, -15],
                 RoundLabel::River,
-                10.0,
+                10,
             ),
             GameLogEntry::new(
                 2,
                 vec!["Alice".into(), "Bob".into()],
-                vec![-5.0, 5.0],
+                vec![-5, 5],
                 RoundLabel::Flop,
-                10.0,
+                10,
             ),
         ];
         let colors = test_agent_colors(&["Alice", "Bob"]);
@@ -155,7 +155,7 @@ mod tests {
         // Create 10000 entries but render in a 12-row area (10 visible rows).
         // This should NOT build 10000 Rows.
         let entries: Vec<GameLogEntry> = (1..=10_000)
-            .map(|i| GameLogEntry::new(i, vec!["A".into()], vec![1.0], RoundLabel::Preflop, 10.0))
+            .map(|i| GameLogEntry::new(i, vec!["A".into()], vec![1], RoundLabel::Preflop, 10))
             .collect();
 
         let backend = TestBackend::new(80, 12);

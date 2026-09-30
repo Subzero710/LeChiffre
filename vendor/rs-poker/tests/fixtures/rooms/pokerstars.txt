@@ -1,0 +1,39 @@
+PokerStars Hand #171562910425:  Hold'em No Limit ($0.01/$0.02 USD) - 2017/06/09 20:15:41 UTC [2017/06/09 16:15:41 ET]
+Table 'Romilda' 6-max Seat #2 is the button
+Seat 1: zelittle ($1.52 in chips) 
+Seat 2: yakka34 ($1.11 in chips) 
+Seat 3: Zaco7319 ($2.36 in chips) 
+Seat 4: Pat10man ($1.60 in chips) 
+Seat 5: jumpshotftw ($2.26 in chips) 
+Seat 6: Rihan2 ($0.99 in chips) 
+Zaco7319: posts small blind $0.01
+Pat10man: posts big blind $0.02
+*** HOLE CARDS ***
+Dealt to yakka34 [3c 4c]
+jumpshotftw: folds 
+Rihan2: calls $0.02
+zelittle: folds 
+yakka34: folds 
+Zaco7319: calls $0.01
+Pat10man: checks 
+*** FLOP *** [Qh Qd Ac]
+Zaco7319: checks 
+Pat10man: checks 
+Rihan2: checks 
+*** TURN *** [Qh Qd Ac] [8h]
+Zaco7319: checks 
+Pat10man: checks 
+Rihan2: bets $0.06
+Zaco7319: folds 
+Pat10man: folds 
+Uncalled bet ($0.06) returned to Rihan2
+Rihan2 collected $0.06 from pot
+*** SUMMARY ***
+Total pot $0.06 | Rake $0 
+Board [Qh Qd Ac 8h]
+Seat 1: zelittle folded before Flop (didn't bet)
+Seat 2: yakka34 (button) folded before Flop (didn't bet)
+Seat 3: Zaco7319 (small blind) folded on the Turn
+Seat 4: Pat10man (big blind) folded on the Turn
+Seat 5: jumpshotftw folded before Flop (didn't bet)
+Seat 6: Rihan2 collected ($0.06)

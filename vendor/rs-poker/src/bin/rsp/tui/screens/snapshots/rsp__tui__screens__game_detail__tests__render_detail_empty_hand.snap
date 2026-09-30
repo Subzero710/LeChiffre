@@ -1,6 +1,5 @@
 ---
 source: src/bin/rsp/tui/screens/game_detail.rs
-assertion_line: 929
 expression: terminal.backend()
 snapshot_kind: text
 ---
@@ -9,7 +8,7 @@ snapshot_kind: text
 "│ Table    test (2-max ││                                                      │"
 "│ Game     Hold'em     ││                                                      │"
 "│ Limit    —           ││                                                      │"
-"│ Blinds   5 / 10      ││                                                      │"
+"│ Blinds   0.05 / 0.10 ││                                                      │"
 "│ Date     —           ││                                                      │"
 "│ Game #   1           ││                                                      │"
 "│ Dealer   Seat 0      ││                                                      │"

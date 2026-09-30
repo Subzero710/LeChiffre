@@ -153,7 +153,7 @@ impl<T: Iterator<Item = HoldemSimulation>> HoldemCompetition<T> {
             .map(|(idx, (starting, ending))| {
                 (
                     idx,
-                    (*ending - *starting) / running_sim.game_state.big_blind,
+                    (*ending - *starting) as f32 / running_sim.game_state.big_blind as f32,
                 )
             });
 
@@ -217,8 +217,8 @@ mod tests {
         ];
 
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .build()
             .unwrap();
         let sim_gen = StandardSimulationIterator::new(
@@ -243,8 +243,8 @@ mod tests {
             .collect();
 
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(NUM_PLAYERS, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(NUM_PLAYERS, 100)
+            .blinds(10, 5)
             .build()
             .unwrap();
         let sim_gen = StandardSimulationIterator::new(
@@ -290,8 +290,8 @@ mod tests {
         let agent_gens: Vec<Box<dyn AgentGenerator>> =
             vec![Box::new(PanicAgentGenerator), Box::new(PanicAgentGenerator)];
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .build()
             .unwrap();
         let sim_gen = StandardSimulationIterator::new(
