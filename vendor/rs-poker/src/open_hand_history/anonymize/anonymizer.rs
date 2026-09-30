@@ -27,8 +27,8 @@
 //! #     table_name: "t".into(), table_handle: None, table_skin: None,
 //! #     game_type: rs_poker::open_hand_history::GameType::Holdem,
 //! #     bet_limit: None, table_size: 2, currency: "USD".into(),
-//! #     dealer_seat: 1, small_blind_amount: 1.0, big_blind_amount: 2.0,
-//! #     ante_amount: 0.0, hero_player_id: None,
+//! #     dealer_seat: 1, small_blind_amount: 1, big_blind_amount: 2,
+//! #     ante_amount: 0, hero_player_id: None,
 //! #     players: vec![], rounds: vec![], pots: vec![],
 //! #     tournament_bounties: None,
 //! # };

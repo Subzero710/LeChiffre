@@ -183,8 +183,8 @@ use rs_poker::arena::{Agent, AgentAction, GameState};
 struct MyAgent;
 
 impl Agent for MyAgent {
-    fn act(&mut self, _id: u128, game_state: &GameState) -> AgentAction {
-        AgentAction::Call(game_state.current_bet())
+    fn act(&mut self, _id: u128, _game_state: &GameState) -> AgentAction {
+        AgentAction::Call
     }
     fn name(&self) -> &str { "my-agent" }
 }

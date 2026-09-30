@@ -105,6 +105,36 @@ const EARLY_EXIT_MIN_ITERS: usize = 4;
 const EARLY_EXIT_STABLE_ITERS: u32 = 3;
 const EARLY_EXIT_EPSILON: f32 = 0.001;
 
+/// Update the node-local strategy-stability counter used by the early-exit gate.
+///
+/// Kept as a pure helper so the convergence condition can be tested without
+/// depending on stochastic poker runouts or tracing capture.
+pub(super) fn update_early_exit_stability(
+    current: &[f32],
+    previous: &[f32],
+    has_previous: bool,
+    iter_idx: u64,
+    stable_count: &mut u32,
+) -> bool {
+    if !has_previous || (iter_idx as usize) < EARLY_EXIT_MIN_ITERS {
+        return false;
+    }
+
+    let l1 = current
+        .iter()
+        .zip(previous.iter())
+        .map(|(a, b)| (a - b).abs())
+        .sum::<f32>();
+
+    if l1 < EARLY_EXIT_EPSILON {
+        *stable_count += 1;
+        *stable_count >= EARLY_EXIT_STABLE_ITERS
+    } else {
+        *stable_count = 0;
+        false
+    }
+}
+
 use super::builder::CFRAgentBuilder;
 use super::fast_forward::{
     fast_forward_advance_betting, fast_forward_apply_action, fast_forward_distribute_pot,
@@ -1027,25 +1057,17 @@ where
                 .cfr_state
                 .node_current_strategy_into(target_node_idx, &mut early_exit_curr_strategy)
             {
-                if early_exit_has_prev && (iter_idx as usize) >= EARLY_EXIT_MIN_ITERS {
-                    let mut l1 = 0.0f32;
-                    for (a, b) in early_exit_curr_strategy
-                        .iter()
-                        .zip(early_exit_prev_strategy.iter())
-                    {
-                        l1 += (a - b).abs();
+                if update_early_exit_stability(
+                    &early_exit_curr_strategy,
+                    &early_exit_prev_strategy,
+                    early_exit_has_prev,
+                    iter_idx,
+                    &mut early_exit_stable_count,
+                ) {
+                    if diag_on {
+                        diag_stop_cause = StopCause::StableStrategy;
                     }
-                    if l1 < EARLY_EXIT_EPSILON {
-                        early_exit_stable_count += 1;
-                        if early_exit_stable_count >= EARLY_EXIT_STABLE_ITERS {
-                            if diag_on {
-                                diag_stop_cause = StopCause::StableStrategy;
-                            }
-                            break;
-                        }
-                    } else {
-                        early_exit_stable_count = 0;
-                    }
+                    break;
                 }
                 early_exit_prev_strategy.copy_from_slice(&early_exit_curr_strategy);
                 early_exit_has_prev = true;

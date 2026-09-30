@@ -120,6 +120,7 @@ pub struct TournamentInfoObj {
     #[serde(rename = "type")]
     pub tournament_type: TournamentType,
     #[serde(
+        default,
         deserialize_with = "empty_string_is_none",
         skip_serializing_if = "Option::is_none"
     )]
