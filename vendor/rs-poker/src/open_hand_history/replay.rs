@@ -205,12 +205,19 @@ pub fn replay_hand(h: &HandHistory, rake: RakeConfig) -> Result<ReplayedHand, Re
             gs.round_data.advance_action();
             street = next;
         }
+        let action_number_base = round.actions.first().map_or(1, |a| a.action_number);
+        if !matches!(action_number_base, 0 | 1) {
+            return Err(fail(
+                h,
+                Some(&round.street),
+                Some(action_number_base),
+                "action numbers must start at one (OHH) or zero (legacy rs-poker)",
+            ));
+        }
         for (position, a) in round.actions.iter().enumerate() {
             let err = |message: &str| fail(h, Some(&round.street), Some(a.action_number), message);
-            if a.action_number != position as u64 {
-                return Err(err(
-                    "action numbers must be sequential from zero within each round",
-                ));
+            if a.action_number != action_number_base + position as u64 {
+                return Err(err("action numbers must be sequential within each round"));
             }
             let idx = *by_id
                 .get(&a.player_id)
@@ -606,12 +613,27 @@ mod tests {
         let e = replay_hand(&h, RakeConfig::none()).unwrap_err();
         assert_eq!(e.action_number, Some(number));
         assert!(e.message.contains("exact"));
+
         action_number_test(&h);
     }
     fn action_number_test(h: &HandHistory) {
         let mut h = h.clone();
         h.players[1].seat = h.players[0].seat;
         assert!(replay_hand(&h, RakeConfig::none()).is_err());
+    }
+
+    #[test]
+    fn replay_accepts_legacy_zero_based_action_numbers() {
+        let mut hand = PokerStarsParser::default()
+            .parse(include_str!("../../tests/fixtures/rooms/pokerstars.txt"))
+            .unwrap()
+            .remove(0);
+        for round in &mut hand.rounds {
+            for (i, action) in round.actions.iter_mut().enumerate() {
+                action.action_number = i as u64;
+            }
+        }
+        assert!(replay_hand(&hand, RakeConfig::none()).is_ok());
     }
     #[tokio::test]
     async fn arena_ohh_roundtrip_preserves_side_pots_refunds_and_rake() {
@@ -729,7 +751,7 @@ mod tests {
             r.actions
                 .retain(|a| !(a.player_id == 2 && a.action == Action::ShowsCards));
             for (i, a) in r.actions.iter_mut().enumerate() {
-                a.action_number = i as u64;
+                a.action_number = i as u64 + 1;
             }
         }
         let partial = replay_hand(&unknown, rake).unwrap();

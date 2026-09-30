@@ -265,10 +265,15 @@ fn parse_hand(
     if !(2..=3).contains(&stakes.len()) {
         return Err(fail(*first, header, "unsupported stake/ante syntax"));
     }
-    let currency = if stakes[0].starts_with('$') {
-        "USD"
-    } else if room == Room::CoinPoker && stakes[0].starts_with('₮') {
+    let currency = if room == Room::CoinPoker
+        && (stakes[0].starts_with('$') || stakes[0].starts_with('₮'))
+    {
+        // CoinPoker's published tables display dollar-denominated stakes while
+        // the poker platform uses USDT as its primary game currency. Normalize
+        // either export symbol to USDT without performing an exchange-rate conversion.
         "USDT"
+    } else if stakes[0].starts_with('$') {
+        "USD"
     } else {
         return Err(fail(*first, header, "unverified currency"));
     };
@@ -753,7 +758,7 @@ fn parse_hand(
     }
     for round in &mut hh.rounds {
         for (number, action) in round.actions.iter_mut().enumerate() {
-            action.action_number = number as u64;
+            action.action_number = number as u64 + 1;
         }
     }
     Ok(hh)
@@ -809,12 +814,23 @@ mod tests {
             .unwrap();
         assert_eq!(ps[0].game_number, "171562910425");
         assert_eq!(ps[0].pots[0].amount, 6);
+        assert!(ps[0].rounds.iter().all(|round| {
+            round
+                .actions
+                .iter()
+                .enumerate()
+                .all(|(i, action)| action.action_number == i as u64 + 1)
+        }));
         let cp = CoinPokerParser::default()
             .parse(include_str!("../../tests/fixtures/rooms/coinpoker.txt"))
             .unwrap();
         assert_eq!(cp[0].currency, "USDT");
         assert_eq!(cp[0].pots[0].amount, 24);
         assert_eq!(cp[0].pots[0].rake, Some(1));
+
+        let dollar_coin = include_str!("../../tests/fixtures/rooms/coinpoker.txt").replace('₮', "$");
+        let dollar_coin = CoinPokerParser::default().parse(&dollar_coin).unwrap();
+        assert_eq!(dollar_coin[0].currency, "USDT");
         let gg = GGPokerParser {
             options: ParserOptions {
                 utc_offset: FixedOffset::east_opt(0),

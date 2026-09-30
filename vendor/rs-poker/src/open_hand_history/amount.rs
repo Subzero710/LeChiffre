@@ -1,4 +1,6 @@
-//! OHH currency numbers are decimal currency units; Rust values are cents.
+//! OHH real-money numbers are decimal currency units; this serializer stores them
+//! as cents. Full tournament `HandHistory` serde applies an outer table-chip
+//! normalization because tournament blinds/stacks/pots are chip counts, not currency.
 //! serde_json arbitrary_precision preserves the original numeric token, so no
 //! IEEE-754 conversion can lose a cent. Fractional cents fail explicitly.
 use crate::Chips;

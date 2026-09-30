@@ -148,7 +148,7 @@ impl HandHistoryBuilder {
             current_round_cards: Vec::new(),
             total_board_cards: 0,
 
-            action_number: 0,
+            action_number: 1,
 
             round_bet_state: RoundBetState::default(),
 
@@ -205,7 +205,7 @@ impl HandHistoryBuilder {
         self.current_street = Some(street);
         self.current_round_actions.clear();
         self.current_round_cards.clear();
-        self.action_number = 0; // Reset action number for new round
+        self.action_number = 1; // OHH action numbers are 1-based within each round
         self.round_bet_state.reset();
     }
 
@@ -819,7 +819,7 @@ mod tests {
         assert_eq!(builder.network_name, "rs_poker_arena");
         assert_eq!(builder.currency, "USD");
         assert!(builder.game_id.is_none());
-        assert_eq!(builder.action_number, 0);
+        assert_eq!(builder.action_number, 1);
     }
 
     #[test]
@@ -878,13 +878,13 @@ mod tests {
         builder.start_round("Preflop".to_string());
         assert_eq!(builder.current_round_id, 1);
         assert_eq!(builder.current_street, Some("Preflop".to_string()));
-        assert_eq!(builder.action_number, 0);
+        assert_eq!(builder.action_number, 1);
 
         // Start second round
         builder.start_round("Flop".to_string());
         assert_eq!(builder.current_round_id, 2);
         assert_eq!(builder.current_street, Some("Flop".to_string()));
-        assert_eq!(builder.action_number, 0); // Should reset
+        assert_eq!(builder.action_number, 1); // Should reset
         assert_eq!(builder.rounds.len(), 1); // Previous round should be finished
         assert_eq!(builder.rounds[0].street, "Preflop");
     }
@@ -893,15 +893,15 @@ mod tests {
     fn test_action_numbering() {
         let mut builder = HandHistoryBuilder::new(ConverterConfig::default());
 
-        assert_eq!(builder.next_action_number(), 0);
         assert_eq!(builder.next_action_number(), 1);
         assert_eq!(builder.next_action_number(), 2);
+        assert_eq!(builder.next_action_number(), 3);
 
         // Starting new round resets numbering
         builder.start_round("Preflop".to_string());
-        assert_eq!(builder.action_number, 0);
-        assert_eq!(builder.next_action_number(), 0);
+        assert_eq!(builder.action_number, 1);
         assert_eq!(builder.next_action_number(), 1);
+        assert_eq!(builder.next_action_number(), 2);
     }
 
     #[test]

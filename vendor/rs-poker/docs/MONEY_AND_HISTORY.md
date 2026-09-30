@@ -89,20 +89,30 @@ fee update service or a currency converter.
 
 | Platform | Implemented stakes/product | Rate and caps | Explicit policy limits |
 | --- | --- | --- | --- |
-| PokerStars | Listed regular USD NLHE cash rows from $0.01/$0.02 to $50/$100 | Published row-specific 4.5% or 5% rate; caps for 2, 3–4, and 5+ dealt players | Published half-to-even and no-flop-no-drop; Zoom and unlisted rows rejected |
-| CoinPoker | Listed dollar-denominated regular and heads-up rows from $0.01/$0.02 to $2/$5 | 5%; regular caps use 2, 3–4, and 5+ players; heads-up tables use separate caps | Exact base-rake rounding and no-flop-no-drop are unverified and require caller input |
-| GGPoker | Listed USD six-max and nine-max rows from $0.01/$0.02 to $5/$10 | 5%; separate caps for 2, 3, 4, and 5+ players, with different nine-max microstakes | Exact rounding and no-flop-no-drop require caller input; antes supplied separately |
+| PokerStars | Published USD/EUR/GBP NLHE cash rows; regular and Zoom, including the special USD Zoom micro-stakes table | Published row-specific rates/caps; USD $100/$200+ uses the published high-stakes row | Published half-to-even and no-rake-before-flop behavior; non-USD caps remain a dated snapshot because PokerStars reviews them quarterly |
+| CoinPoker | USDT NLHE regular and heads-up schedules through the published high/VIP rows | 5%; regular and HU caps are kept separate; BB-denominated high-stakes caps are resolved exactly | Exact base-rake rounding and no-flop-no-drop remain unverified; localized official pages currently disagree on the $2/$5 3–4 player cap, so that exact context returns an error |
+| GGPoker | Published USD six-max rows through $10/$20 and nine-max rows through $5/$10 | 5%; separate caps for 2, 3, 4, and 5+ players, including the published BB-derived high-stakes caps | Exact rounding and no-flop-no-drop require caller input; Rush & Cash/promotional charges are excluded; nine-max antes are supplied separately |
 
 Official sources:
 
 - [PokerStars rake](https://www.pokerstars.com/poker/room/rake/)
-- [CoinPoker fees](https://coinpoker.com/rake/)
+- [CoinPoker fees (English)](https://coinpoker.com/rake/)
+- [CoinPoker fees (French locale)](https://coinpoker.com/fr/rake/)
+- [CoinPoker USDT poker](https://coinpoker.com/online-poker/tether/)
 - [GGPoker six-max/nine-max NLHE information](https://legal.ggpoker.com/poker-games/texas-holdem/)
+
+`RakeContext` includes an explicit currency/denomination. The schedule never
+selects a USD row for EUR/GBP/USDT merely because the numerical blinds match.
+CoinPoker cash play is keyed as USDT; its public fee tables display dollar-style
+stake labels, while CoinPoker's current USDT material describes poker balances
+and play in USDT. No exchange-rate conversion is performed.
 
 CoinPoker splash charges and external cash drops are excluded from the base
 rake model. GG jackpot, promotional, and Rush & Cash charges are also outside
-these schedules. The schedule does not infer exchange rates between USD and
-USDT. Unsupported stakes/products return `ScheduleError::Unsupported`.
+these schedules. Unsupported stakes/products/currencies return
+`ScheduleError::Unsupported`; a documented conflict between current official
+CoinPoker locale pages returns `ScheduleError::ConflictingPublishedData` rather
+than silently choosing one value.
 
 `rake_config_for` returns an error if the schedule lacks a verified policy.
 Callers can inspect `rake_schedule_for` and supply explicit missing policies
@@ -126,8 +136,17 @@ Missing/null amounts are accepted only for actions that do not move chips.
 Monetary actions require an amount. Optional monetary fields preserve their
 absence. Existing empty-string card conventions remain supported.
 
+Tournament OHH remains parseable even though replay is cash-only. At the full
+`HandHistory` boundary, table-chip fields (blinds, stacks, actions, pots and
+wins) are normalized as integer tournament chips rather than cents; currency
+fields in `tournament_info` (buy-in/fees/bounty fees) remain currency cents.
+Older OHH examples that contain `tournament_info` but omit `tournament: true`
+are normalized to tournament mode. Fractional tournament table chips are
+rejected instead of being silently rounded.
+
 The arena converter records integer actions, refunds, awards, and rake, checks
-state consistency, and emits zero-based action numbers within each round.
+state consistency, and emits OHH-compatible one-based action numbers within each round.
+Replay also accepts the branch's legacy zero-based numbering for backward compatibility.
 Simulation → OHH JSON → OHH decode → replay tests cover both heads-up and
 multiway settlement.
 
@@ -149,7 +168,7 @@ that allocation against an independently supplied policy.
 | Room | Header/currency forms | Time handling |
 | --- | --- | --- |
 | PokerStars | `PokerStars Hand #...`, `Hold'em No Limit`, dollar amounts with USD | Explicit UTC/GMT or a supported fixed-offset abbreviation |
-| CoinPoker | `CoinPoker Hand #...`, `NLH`, dollar or `₮` amounts; `RETURN` refunds | Explicit supported zone; `₮` amounts retain USDT currency |
+| CoinPoker | `CoinPoker Hand #...`, `NLH`, dollar or `₮` amounts; `RETURN` refunds | Explicit supported zone; both stake symbols normalize to the room's USDT game currency |
 | GGPoker | `Poker Hand #...`, `Hold'em No Limit`, dollar amounts; known zero extra-fee summary fields | A caller-supplied fixed offset is required when the export omits its zone |
 
 Supported fixed-offset labels are UTC/GMT, PDT/PST, and EDT/EST. A generic

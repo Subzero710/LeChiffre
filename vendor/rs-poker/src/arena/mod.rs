@@ -60,7 +60,7 @@
 //!     Box::<RandomAgentGenerator>::default(),
 //! ];
 //!
-//! let game_state_gen = RandomGameStateGenerator::new(3, 100.0, 500.0, 10.0, 5.0, 0.0);
+//! let game_state_gen = RandomGameStateGenerator::new(3, 100, 500, 10, 5, 0);
 //! let sim_gen = StandardSimulationIterator::new(agent_gens, vec![], game_state_gen);
 //!
 //! let mut competition = HoldemCompetition::new(sim_gen);

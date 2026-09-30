@@ -354,48 +354,209 @@ pub enum HandFlag {
     Cap,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct HandHistory {
     // Current version is 1.4.7
     pub spec_version: String,
     pub site_name: String,
     pub network_name: String,
     pub internal_version: String,
-    #[serde(default)]
     pub tournament: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tournament_info: Option<TournamentInfoObj>,
     pub game_number: String,
-    #[serde(with = "iso8601")]
     pub start_date_utc: Option<DateTime<Utc>>,
     pub table_name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub table_handle: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub table_skin: Option<String>,
     pub game_type: GameType,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub bet_limit: Option<BetLimitObj>,
     pub table_size: u64,
     pub currency: String,
     pub dealer_seat: u64,
-    #[serde(with = "crate::open_hand_history::amount")]
     pub small_blind_amount: Chips,
-    #[serde(with = "crate::open_hand_history::amount")]
     pub big_blind_amount: Chips,
-    #[serde(with = "crate::open_hand_history::amount")]
     pub ante_amount: Chips,
 
     // Which player is the hero and being followed
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub hero_player_id: Option<u64>,
-    // #[serde(deserialize_with = "empty_string_is_none")]
-    // pub flags: Option<Vec<HandFlag>>,
     pub players: Vec<PlayerObj>,
     pub rounds: Vec<RoundObj>,
     pub pots: Vec<PotObj>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tournament_bounties: Option<Vec<TournamentBountyObj>>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct HandHistoryWire {
+    spec_version: String,
+    site_name: String,
+    network_name: String,
+    internal_version: String,
+    #[serde(default)]
+    tournament: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tournament_info: Option<TournamentInfoObj>,
+    game_number: String,
+    #[serde(with = "iso8601")]
+    start_date_utc: Option<DateTime<Utc>>,
+    table_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    table_handle: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    table_skin: Option<String>,
+    game_type: GameType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bet_limit: Option<BetLimitObj>,
+    table_size: u64,
+    currency: String,
+    dealer_seat: u64,
+    #[serde(with = "crate::open_hand_history::amount")]
+    small_blind_amount: Chips,
+    #[serde(with = "crate::open_hand_history::amount")]
+    big_blind_amount: Chips,
+    #[serde(with = "crate::open_hand_history::amount")]
+    ante_amount: Chips,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hero_player_id: Option<u64>,
+    players: Vec<PlayerObj>,
+    rounds: Vec<RoundObj>,
+    pots: Vec<PotObj>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tournament_bounties: Option<Vec<TournamentBountyObj>>,
+}
+
+impl From<HandHistoryWire> for HandHistory {
+    fn from(wire: HandHistoryWire) -> Self {
+        Self {
+            spec_version: wire.spec_version,
+            site_name: wire.site_name,
+            network_name: wire.network_name,
+            internal_version: wire.internal_version,
+            tournament: wire.tournament,
+            tournament_info: wire.tournament_info,
+            game_number: wire.game_number,
+            start_date_utc: wire.start_date_utc,
+            table_name: wire.table_name,
+            table_handle: wire.table_handle,
+            table_skin: wire.table_skin,
+            game_type: wire.game_type,
+            bet_limit: wire.bet_limit,
+            table_size: wire.table_size,
+            currency: wire.currency,
+            dealer_seat: wire.dealer_seat,
+            small_blind_amount: wire.small_blind_amount,
+            big_blind_amount: wire.big_blind_amount,
+            ante_amount: wire.ante_amount,
+            hero_player_id: wire.hero_player_id,
+            players: wire.players,
+            rounds: wire.rounds,
+            pots: wire.pots,
+            tournament_bounties: wire.tournament_bounties,
+        }
+    }
+}
+
+impl From<HandHistory> for HandHistoryWire {
+    fn from(hand: HandHistory) -> Self {
+        Self {
+            spec_version: hand.spec_version,
+            site_name: hand.site_name,
+            network_name: hand.network_name,
+            internal_version: hand.internal_version,
+            tournament: hand.tournament,
+            tournament_info: hand.tournament_info,
+            game_number: hand.game_number,
+            start_date_utc: hand.start_date_utc,
+            table_name: hand.table_name,
+            table_handle: hand.table_handle,
+            table_skin: hand.table_skin,
+            game_type: hand.game_type,
+            bet_limit: hand.bet_limit,
+            table_size: hand.table_size,
+            currency: hand.currency,
+            dealer_seat: hand.dealer_seat,
+            small_blind_amount: hand.small_blind_amount,
+            big_blind_amount: hand.big_blind_amount,
+            ante_amount: hand.ante_amount,
+            hero_player_id: hand.hero_player_id,
+            players: hand.players,
+            rounds: hand.rounds,
+            pots: hand.pots,
+            tournament_bounties: hand.tournament_bounties,
+        }
+    }
+}
+
+fn map_tournament_table_amounts(
+    hand: &mut HandHistory,
+    mut map: impl FnMut(Chips) -> Result<Chips, String>,
+) -> Result<(), String> {
+    if !(hand.tournament || hand.tournament_info.is_some()) {
+        return Ok(());
+    }
+
+    hand.small_blind_amount = map(hand.small_blind_amount)?;
+    hand.big_blind_amount = map(hand.big_blind_amount)?;
+    hand.ante_amount = map(hand.ante_amount)?;
+    if let Some(limit) = &mut hand.bet_limit {
+        limit.bet_cap = map(limit.bet_cap)?;
+    }
+    for player in &mut hand.players {
+        player.starting_stack = map(player.starting_stack)?;
+    }
+    for round in &mut hand.rounds {
+        for action in &mut round.actions {
+            action.amount = map(action.amount)?;
+        }
+    }
+    for pot in &mut hand.pots {
+        pot.amount = map(pot.amount)?;
+        if let Some(rake) = &mut pot.rake {
+            *rake = map(*rake)?;
+        }
+        if let Some(jackpot) = &mut pot.jackpot {
+            *jackpot = map(*jackpot)?;
+        }
+        for win in &mut pot.player_wins {
+            win.win_amount = map(win.win_amount)?;
+            if let Some(contributed_rake) = &mut win.contributed_rake {
+                *contributed_rake = map(*contributed_rake)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+impl Serialize for HandHistory {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut hand = self.clone();
+        map_tournament_table_amounts(&mut hand, |value| {
+            value
+                .checked_mul(100)
+                .ok_or_else(|| "tournament chip amount overflows OHH wire scaling".to_string())
+        })
+        .map_err(serde::ser::Error::custom)?;
+        HandHistoryWire::from(hand).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for HandHistory {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = HandHistoryWire::deserialize(deserializer)?;
+        let mut hand = HandHistory::from(wire);
+        if hand.tournament_info.is_some() {
+            // Older OHH examples can imply tournament mode solely through
+            // tournament_info, without an explicit tournament=true field.
+            hand.tournament = true;
+        }
+        map_tournament_table_amounts(&mut hand, |value| {
+            if value % 100 != 0 {
+                return Err("tournament table amount contains a fractional chip".to_string());
+            }
+            Ok(value / 100)
+        })
+        .map_err(serde::de::Error::custom)?;
+        Ok(hand)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -792,11 +953,27 @@ mod tests {
 
         let parsed: OpenHandHistoryWrapper = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.ohh.site_name, "PokerStars");
+        assert!(parsed.ohh.tournament);
+        assert_eq!(parsed.ohh.small_blind_amount, 10);
+        assert_eq!(parsed.ohh.big_blind_amount, 20);
+        assert_eq!(parsed.ohh.players[0].starting_stack, 500);
+        assert_eq!(parsed.ohh.rounds[0].actions[0].amount, 10);
+        assert_eq!(parsed.ohh.pots[0].amount, 40);
 
         assert_eq!(
             parsed.ohh.tournament_info.as_ref().unwrap().tournament_type,
             TournamentType::SingleTableTournament
         );
+        assert_eq!(
+            parsed.ohh.tournament_info.as_ref().unwrap().buyin_amount,
+            23
+        );
+
+        let encoded = serde_json::to_string(&parsed).unwrap();
+        assert!(encoded.contains("\"big_blind_amount\":20.00"));
+        assert!(encoded.contains("\"starting_stack\":500.00"));
+        let reparsed: OpenHandHistoryWrapper = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(reparsed, parsed);
     }
 
     #[test]
