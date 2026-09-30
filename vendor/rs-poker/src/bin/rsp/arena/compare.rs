@@ -1,3 +1,4 @@
+use rs_poker::Chips;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,13 +39,13 @@ pub struct CompareArgs {
     #[arg(short = 'p', long = "players", default_value_t = 3)]
     players_per_table: usize,
 
-    /// Big blind amount
-    #[arg(long = "big-blind", default_value_t = 10.0)]
-    big_blind: f32,
+    /// Big blind amount in cents
+    #[arg(long = "big-blind", default_value_t = 10)]
+    big_blind: Chips,
 
-    /// Small blind amount
-    #[arg(long = "small-blind", default_value_t = 5.0)]
-    small_blind: f32,
+    /// Small blind amount in cents
+    #[arg(long = "small-blind", default_value_t = 5)]
+    small_blind: Chips,
 
     /// Minimum starting stack in big blinds
     #[arg(long = "min-stack-bb", default_value_t = 100.0)]
@@ -92,10 +93,10 @@ fn build_comparison(
 }
 
 /// Convert a PermutationResult into a GameResult for the TUI.
-fn perm_to_game_result(perm: PermutationResult, big_blind: f32) -> GameResult {
+fn perm_to_game_result(perm: PermutationResult, big_blind: Chips) -> GameResult {
     let num_players = perm.agent_names.len();
     let ending_round = ending_round_from_stats(&perm.stats, num_players);
-    let profits: Vec<f32> = (0..num_players)
+    let profits: Vec<Chips> = (0..num_players)
         .map(|i| perm.stats.total_profit[i])
         .collect();
     let seat_stats: Vec<SeatStats> = (0..num_players)
@@ -126,7 +127,7 @@ async fn run_comparison_background(
     tx: std::sync::mpsc::SyncSender<SimMessage<GameResult>>,
     hand_store: HandStore,
     ohh_path: Option<PathBuf>,
-    big_blind: f32,
+    big_blind: Chips,
     cancel: Arc<AtomicBool>,
 ) {
     let run_tx = tx.clone();
@@ -182,7 +183,7 @@ async fn run_comparison_background(
 /// dedicated blocking thread via `spawn_blocking`.
 async fn run_comparison_with_tui(
     comparison: ArenaComparison,
-    big_blind: f32,
+    big_blind: Chips,
 ) -> Result<(), CompareError> {
     let total_games = comparison.total_games();
 

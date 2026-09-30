@@ -1,0 +1,24 @@
+CoinPoker Hand #93840400001: NLH (₮0.02/₮0.05) 2026/07/21 00:19:28 PDT
+Table '200601' 2-max Seat #2 is the button
+Seat 1: Hero (₮5 in chips)
+Seat 2: 88e1f1df (₮5 in chips)
+88e1f1df: posts small blind ₮0.02
+Hero: posts big blind ₮0.05
+*** HOLE CARDS ***
+Dealt to Hero [Ac Ts]
+Dealt to 88e1f1df
+88e1f1df: raises ₮0.07 to ₮0.12
+Hero: calls ₮0.07
+*** FLOP *** [As 5d 2d]
+Hero: bets ₮0.12
+88e1f1df: folds
+Hero: RETURN ₮0.12
+*** SHOWDOWN ***
+Hero collected ₮0.23 from pot
+*** SUMMARY ***
+Total pot ₮0.24 | Rake ₮0.01
+Hand was run once
+Board [ As 5d 2d ]
+Game ended: 2026/07/21 00:20:01 PDT
+Seat 1: Hero showed [Ac Ts] and won (₮0.23)
+Seat 2: 88e1f1df folded on the Flop

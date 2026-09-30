@@ -1,4 +1,4 @@
-use approx::assert_abs_diff_eq;
+use crate::Chips;
 
 use crate::arena::game_state::Round;
 
@@ -13,7 +13,7 @@ pub fn assert_valid_round_data(round_data: &RoundData) {
     // for any round with bets they should have called.
     //
     // EG no one should call for less than the max and still be in.
-    let active_bets: Vec<f32> = round_data
+    let active_bets: Vec<Chips> = round_data
         .player_bet
         .iter()
         .enumerate()
@@ -21,16 +21,11 @@ pub fn assert_valid_round_data(round_data: &RoundData) {
         .map(|(_, bet)| *bet)
         .collect();
 
-    let max_active = active_bets.clone().into_iter().reduce(f32::max);
+    let max_active = active_bets.clone().into_iter().reduce(Chips::max);
 
     if let Some(max) = max_active {
-        let epsilon = if max == 0.0 {
-            f32::EPSILON
-        } else {
-            max / 100_000.0
-        };
         for bet in active_bets.into_iter() {
-            assert_abs_diff_eq!(bet, max, epsilon = epsilon);
+            assert_eq!(bet, max);
         }
     }
 }
@@ -38,12 +33,12 @@ pub fn assert_valid_round_data(round_data: &RoundData) {
 pub fn assert_valid_game_state(game_state: &GameState) {
     assert_eq!(Round::Complete, game_state.round);
 
-    let should_have_bets = game_state.ante + game_state.small_blind + game_state.big_blind > 0.0;
+    let should_have_bets = game_state.ante + game_state.small_blind + game_state.big_blind > 0;
 
-    let total_bet = game_state.player_bet.iter().copied().sum();
+    let total_bet: Chips = game_state.player_bet.iter().copied().sum();
 
-    if should_have_bets {
-        let any_above_zero = game_state.player_bet.iter().any(|bet| *bet > 0.0);
+    if should_have_bets && game_state.total_pot > 0 {
+        let any_above_zero = game_state.player_bet.iter().any(|bet| *bet > 0);
 
         assert!(
             any_above_zero,
@@ -51,16 +46,23 @@ pub fn assert_valid_game_state(game_state: &GameState) {
             game_state.player_bet
         );
 
-        assert_ne!(0.0, total_bet);
+        assert_ne!(0, total_bet);
     }
 
-    let epsilon = total_bet / 100_000.0;
-    assert_abs_diff_eq!(total_bet, game_state.total_pot, epsilon = epsilon);
+    assert_eq!(total_bet, game_state.total_pot);
 
-    let total_winning: f32 = game_state.player_winnings.iter().copied().sum();
+    let total_winning: Chips = game_state.player_winnings.iter().copied().sum();
 
-    assert_abs_diff_eq!(total_winning, total_bet, epsilon = epsilon);
-    assert_abs_diff_eq!(total_winning, game_state.total_pot, epsilon = epsilon);
+    assert_eq!(total_winning + game_state.rake_collected, total_bet);
+    assert_eq!(
+        total_winning + game_state.rake_collected,
+        game_state.total_pot
+    );
+
+    assert_eq!(
+        game_state.starting_stacks.iter().sum::<Chips>(),
+        game_state.stacks.iter().sum::<Chips>() + game_state.rake_collected
+    );
 
     // The dealer has to be well specified.
     assert!(game_state.dealer_idx < game_state.num_players);
@@ -85,7 +87,7 @@ pub fn assert_valid_game_state(game_state: &GameState) {
         // If they aren't active (folded)
         // and aren't all in then they shouldn't win anything
         if !game_state.player_active.get(idx) && !game_state.player_all_in.get(idx) {
-            assert_abs_diff_eq!(game_state.player_winnings[idx], 0.0, epsilon = f32::EPSILON);
+            assert_eq!(game_state.player_winnings[idx], 0);
         }
     }
 }
@@ -216,15 +218,15 @@ fn validate_player_states(game_state: &GameState) {
 
         // Folded players shouldn't win anything (handled in main function)
         if !is_active && !is_all_in {
-            assert_abs_diff_eq!(winnings, 0.0, epsilon = f32::EPSILON);
+            assert_eq!(winnings, 0);
         }
 
         // Bets should be non-negative
-        assert!(bet >= 0.0, "Player {} has negative bet: {}", idx, bet);
+        assert!(bet >= 0, "Player {} has negative bet: {}", idx, bet);
 
         // Winnings should be non-negative
         assert!(
-            winnings >= 0.0,
+            winnings >= 0,
             "Player {} has negative winnings: {}",
             idx,
             winnings
@@ -235,7 +237,7 @@ fn validate_player_states(game_state: &GameState) {
 /// Validate betting structure follows Texas Hold'em rules
 fn validate_betting_structure(game_state: &GameState) {
     // Small blind should be less than or equal to big blind
-    if game_state.small_blind > 0.0 || game_state.big_blind > 0.0 {
+    if game_state.small_blind > 0 || game_state.big_blind > 0 {
         assert!(
             game_state.small_blind <= game_state.big_blind,
             "Small blind {} cannot be larger than big blind {}",
@@ -247,21 +249,21 @@ fn validate_betting_structure(game_state: &GameState) {
 
 /// Validate winnings distribution makes sense
 fn validate_winnings_distribution(game_state: &GameState) {
-    let total_winnings: f32 = game_state.player_winnings.iter().sum();
-    let total_bets: f32 = game_state.player_bet.iter().sum();
+    let total_winnings: Chips = game_state.player_winnings.iter().sum();
+    let total_bets: Chips = game_state.player_bet.iter().sum();
 
     // Total winnings should equal total bets (conservation of money)
-    assert_abs_diff_eq!(total_winnings, total_bets, epsilon = total_bets / 100_000.0);
+    assert_eq!(total_winnings + game_state.rake_collected, total_bets);
 
     // At least one player should win something if there was action
-    if total_bets > 0.0 {
-        let someone_won = game_state.player_winnings.iter().any(|&w| w > 0.0);
+    if total_bets > 0 {
+        let someone_won = game_state.player_winnings.iter().any(|&w| w > 0);
         assert!(someone_won, "Someone must win if there was betting action");
     }
 
     // Winners should have either been active or all-in
     for (idx, &winnings) in game_state.player_winnings.iter().enumerate() {
-        if winnings > 0.0 {
+        if winnings > 0 {
             let is_active = game_state.player_active.get(idx);
             let is_all_in = game_state.player_all_in.get(idx);
             assert!(
@@ -360,16 +362,16 @@ fn validate_dealer_positioning(game_state: &GameState) {
 
 /// Validate ante structure if antes are used
 fn validate_ante_structure(game_state: &GameState) {
-    if game_state.ante > 0.0 {
+    if game_state.ante > 0 {
         // If antes are used, they should be non-negative
         assert!(
-            game_state.ante >= 0.0,
+            game_state.ante >= 0,
             "Ante cannot be negative: {}",
             game_state.ante
         );
 
         // Ante should typically be smaller than the big blind
-        if game_state.big_blind > 0.0 {
+        if game_state.big_blind > 0 {
             assert!(
                 game_state.ante <= game_state.big_blind,
                 "Ante {} should not exceed big blind {}",
@@ -383,13 +385,13 @@ fn validate_ante_structure(game_state: &GameState) {
 /// Validate that stacks are non-negative for all players
 fn validate_stack_integrity(game_state: &GameState) {
     for (idx, &stack) in game_state.stacks.iter().enumerate() {
-        assert!(stack >= 0.0, "Player {} has negative stack: {}", idx, stack);
+        assert!(stack >= 0, "Player {} has negative stack: {}", idx, stack);
     }
 
     // Validate starting stacks were also non-negative
     for (idx, &stack) in game_state.starting_stacks.iter().enumerate() {
         assert!(
-            stack >= 0.0,
+            stack >= 0,
             "Player {} had negative starting stack: {}",
             idx,
             stack
@@ -402,7 +404,7 @@ fn validate_stack_integrity(game_state: &GameState) {
 fn validate_side_pot_distribution(game_state: &GameState) {
     // Validate that each winner had a non-zero contribution to the pot
     for (winner_idx, &winnings) in game_state.player_winnings.iter().enumerate() {
-        if winnings <= 0.0 {
+        if winnings <= 0 {
             continue;
         }
 
@@ -410,7 +412,7 @@ fn validate_side_pot_distribution(game_state: &GameState) {
 
         // A player must have contributed something to win something
         // (except in rare edge cases with antes where they might win their ante back)
-        if game_state.ante == 0.0 && winner_bet <= 0.0 {
+        if game_state.ante == 0 && winner_bet <= 0 {
             panic!(
                 "Player {} won {} but had no contribution to the pot",
                 winner_idx, winnings

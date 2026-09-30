@@ -39,7 +39,7 @@ fn full_action_bitset() -> ActionBitSet {
 /// use rs_poker::arena::GameStateBuilder;
 /// use rs_poker::arena::cfr::CFRState;
 ///
-/// let game_state = GameStateBuilder::new().num_players_with_stack(2, 100.0).blinds(10.0, 5.0).build().unwrap();
+/// let game_state = GameStateBuilder::new().num_players_with_stack(2, 100).blinds(10, 5).build().unwrap();
 /// let cfr_state = CFRState::new(game_state);
 /// ```
 #[derive(Debug, Clone)]
@@ -407,8 +407,8 @@ mod tests {
     fn test_add_get_node() {
         let state = CFRState::new(
             GameStateBuilder::new()
-                .num_players_with_stack(3, 100.0)
-                .blinds(10.0, 5.0)
+                .num_players_with_stack(3, 100)
+                .blinds(10, 5)
                 .build()
                 .unwrap(),
         );
@@ -433,8 +433,8 @@ mod tests {
     fn test_node_get_not_exist() {
         let state = CFRState::new(
             GameStateBuilder::new()
-                .num_players_with_stack(3, 100.0)
-                .blinds(10.0, 5.0)
+                .num_players_with_stack(3, 100)
+                .blinds(10, 5)
                 .build()
                 .unwrap(),
         );
@@ -451,8 +451,8 @@ mod tests {
     fn test_with_node_data_panics_out_of_bounds() {
         let state = CFRState::new(
             GameStateBuilder::new()
-                .num_players_with_stack(2, 100.0)
-                .blinds(10.0, 5.0)
+                .num_players_with_stack(2, 100)
+                .blinds(10, 5)
                 .build()
                 .unwrap(),
         );
@@ -464,8 +464,8 @@ mod tests {
     fn test_with_node_data_reads_correctly() {
         let state = CFRState::new(
             GameStateBuilder::new()
-                .num_players_with_stack(2, 100.0)
-                .blinds(10.0, 5.0)
+                .num_players_with_stack(2, 100)
+                .blinds(10, 5)
                 .build()
                 .unwrap(),
         );
@@ -490,8 +490,8 @@ mod tests {
     fn test_update_node() {
         let state = CFRState::new(
             GameStateBuilder::new()
-                .num_players_with_stack(2, 100.0)
-                .blinds(10.0, 5.0)
+                .num_players_with_stack(2, 100)
+                .blinds(10, 5)
                 .build()
                 .unwrap(),
         );
@@ -523,8 +523,8 @@ mod tests {
     fn test_update_node_not_found() {
         let state = CFRState::new(
             GameStateBuilder::new()
-                .num_players_with_stack(2, 100.0)
-                .blinds(10.0, 5.0)
+                .num_players_with_stack(2, 100)
+                .blinds(10, 5)
                 .build()
                 .unwrap(),
         );
@@ -536,8 +536,8 @@ mod tests {
     fn test_ensure_child_creates_new() {
         let state = CFRState::new(
             GameStateBuilder::new()
-                .num_players_with_stack(2, 100.0)
-                .blinds(10.0, 5.0)
+                .num_players_with_stack(2, 100)
+                .blinds(10, 5)
                 .build()
                 .unwrap(),
         );
@@ -561,8 +561,8 @@ mod tests {
 
         let state = Arc::new(CFRState::new(
             GameStateBuilder::new()
-                .num_players_with_stack(2, 100.0)
-                .blinds(10.0, 5.0)
+                .num_players_with_stack(2, 100)
+                .blinds(10, 5)
                 .build()
                 .unwrap(),
         ));
@@ -591,8 +591,8 @@ mod tests {
     fn test_ensure_child_type_mismatch_with_mutation() {
         let state = CFRState::new(
             GameStateBuilder::new()
-                .num_players_with_stack(2, 100.0)
-                .blinds(10.0, 5.0)
+                .num_players_with_stack(2, 100)
+                .blinds(10, 5)
                 .build()
                 .unwrap(),
         );
@@ -624,8 +624,8 @@ mod tests {
     fn test_ensure_child_type_mismatch_without_mutation_panics() {
         let state = CFRState::new(
             GameStateBuilder::new()
-                .num_players_with_stack(2, 100.0)
-                .blinds(10.0, 5.0)
+                .num_players_with_stack(2, 100)
+                .blinds(10, 5)
                 .build()
                 .unwrap(),
         );

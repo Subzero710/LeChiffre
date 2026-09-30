@@ -1,3 +1,6 @@
+use crate::tui::state::uncalled_street_bet;
+use rs_poker::Chips;
+use rs_poker::open_hand_history::amount::format_currency;
 use std::collections::HashMap;
 
 use ratatui::{
@@ -13,7 +16,7 @@ use rs_poker::{
     open_hand_history::{Action, BetType, GameType, HandHistory},
 };
 
-use crate::tui::state::{PROFIT_EPSILON, compute_hand_profits};
+use crate::tui::state::{ZERO_PROFIT, compute_hand_profits};
 use crate::tui::theme::{
     self, ICON_AWARD, ICON_GAMES, ICON_STREET, LAVENDER, MAUVE, OVERLAY0, PEACH, SKY, SUBTEXT0,
     SURFACE2, TEXT, YELLOW, header_style, keybinding_key_style, panel_block, profit_style,
@@ -53,15 +56,18 @@ fn render_game_info(frame: &mut Frame, area: Rect, hand: &HandHistory) {
         .map(|bl| format_bet_type(&bl.bet_type))
         .unwrap_or("—");
 
-    let blinds = if hand.ante_amount > 0.0 {
+    let blinds = if hand.ante_amount > 0 {
         format!(
-            "{:.0} / {:.0} (ante {:.0})",
-            hand.small_blind_amount, hand.big_blind_amount, hand.ante_amount
+            "{} / {} (ante {})",
+            format_currency(hand.small_blind_amount),
+            format_currency(hand.big_blind_amount),
+            format_currency(hand.ante_amount)
         )
     } else {
         format!(
-            "{:.0} / {:.0}",
-            hand.small_blind_amount, hand.big_blind_amount
+            "{} / {}",
+            format_currency(hand.small_blind_amount),
+            format_currency(hand.big_blind_amount)
         )
     };
 
@@ -122,11 +128,11 @@ fn render_players_table(frame: &mut Frame, area: Rect, hand: &HandHistory) {
 
             let name_style = Style::default().fg(theme::agent_color(idx));
 
-            let profit = profits.get(idx).copied().unwrap_or(0.0);
-            let profit_str = if profit > PROFIT_EPSILON {
-                format!("+{:.1}", profit)
+            let profit = profits.get(idx).copied().unwrap_or(0);
+            let profit_str = if profit > ZERO_PROFIT {
+                format!("+{}", format_currency(profit))
             } else {
-                format!("{:.1}", profit)
+                format_currency(profit)
             };
 
             // Ending stack = starting stack net of this hand's change
@@ -154,9 +160,9 @@ fn render_players_table(frame: &mut Frame, area: Rect, hand: &HandHistory) {
             Row::new(vec![
                 Cell::from(seat_str).style(Style::default().fg(OVERLAY0)),
                 Cell::from(name_str).style(name_style),
-                Cell::from(format!("{:.0}", p.starting_stack)).style(Style::default().fg(TEXT)),
-                Cell::from(format!("{:.0}", ending_stack)).style(Style::default().fg(TEXT)),
-                Cell::from(profit_str).style(profit_style(profit)),
+                Cell::from(format_currency(p.starting_stack)).style(Style::default().fg(TEXT)),
+                Cell::from(format_currency(ending_stack)).style(Style::default().fg(TEXT)),
+                Cell::from(profit_str).style(profit_style(profit.signum() as f32)),
                 Cell::from(cards_str).style(Style::default().fg(YELLOW)),
             ])
         })
@@ -180,7 +186,7 @@ fn render_round_log(frame: &mut Frame, area: Rect, hand: &HandHistory, scroll: u
     let block = panel_block(&format!("{} Round Log", ICON_STREET), false);
 
     let mut lines: Vec<Line> = Vec::new();
-    let mut running_pot: f32 = 0.0;
+    let mut running_pot: Chips = 0;
     let mut board: Vec<Card> = Vec::new();
 
     // Build player lookups: index for coloring, name for display
@@ -205,7 +211,7 @@ fn render_round_log(frame: &mut Frame, area: Rect, hand: &HandHistory, scroll: u
         // Per-street cumulative contribution per player. Used to report the
         // total bet a caller is matching (their running total this street),
         // not just the incremental chips they added.
-        let mut street_contrib: HashMap<u64, f32> = HashMap::new();
+        let mut street_contrib: HashMap<u64, Chips> = HashMap::new();
 
         let board_str = round
             .cards
@@ -261,7 +267,12 @@ fn render_round_log(frame: &mut Frame, area: Rect, hand: &HandHistory, scroll: u
                     | Action::AddedToPot
             ) {
                 running_pot += action.amount;
-                *street_contrib.entry(action.player_id).or_insert(0.0) += action.amount;
+                if !matches!(
+                    action.action,
+                    Action::PostAnte | Action::PostDead | Action::AddedToPot
+                ) {
+                    *street_contrib.entry(action.player_id).or_insert(0) += action.amount;
+                }
             }
 
             let allin_marker = if action.is_allin { " [ALL-IN]" } else { "" };
@@ -308,7 +319,7 @@ fn render_round_log(frame: &mut Frame, area: Rect, hand: &HandHistory, scroll: u
 
             let action_name = format_action(&action.action);
 
-            if action.amount > 0.0 {
+            if action.amount > 0 {
                 // For a (non all-in) call, also report the total bet being
                 // matched — the caller's cumulative wager this street — so it
                 // reads "calls 4 to 6", not just the 4 chips added. All-in
@@ -321,10 +332,25 @@ fn render_round_log(frame: &mut Frame, area: Rect, hand: &HandHistory, scroll: u
                 };
                 let action_text = match call_total {
                     Some(total) => format!(
-                        " {} {:.0} to {:.0}{}  ",
-                        action_name, action.amount, total, allin_marker
+                        " {} {} to {}{}  ",
+                        action_name,
+                        format_currency(action.amount),
+                        format_currency(total),
+                        allin_marker
                     ),
-                    None => format!(" {} {:.0}{}  ", action_name, action.amount, allin_marker),
+                    None => {
+                        let displayed = if action.action == Action::Raise {
+                            street_contrib[&action.player_id]
+                        } else {
+                            action.amount
+                        };
+                        format!(
+                            " {} {}{}  ",
+                            action_name,
+                            format_currency(displayed),
+                            allin_marker
+                        )
+                    }
                 };
                 lines.push(Line::from(vec![
                     Span::styled(
@@ -333,7 +359,7 @@ fn render_round_log(frame: &mut Frame, area: Rect, hand: &HandHistory, scroll: u
                     ),
                     Span::styled(action_text, action_style),
                     Span::styled(
-                        format!("(pot: {:.0})", running_pot),
+                        format!("(pot: {})", format_currency(running_pot)),
                         Style::default().fg(SURFACE2),
                     ),
                 ]));
@@ -346,6 +372,18 @@ fn render_round_log(frame: &mut Frame, area: Rect, hand: &HandHistory, scroll: u
                     Span::styled(format!(" {}{}", action_name, allin_marker), action_style),
                 ]));
             }
+        }
+        if let Some((id, refund)) = uncalled_street_bet(round) {
+            running_pot -= refund;
+            let name = player_names[&id];
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  {name} receives uncalled {} (pot: {})",
+                    format_currency(refund),
+                    format_currency(running_pot)
+                ),
+                Style::default().fg(SUBTEXT0),
+            )));
         }
         lines.push(Line::default());
     }
@@ -371,7 +409,7 @@ fn render_round_log(frame: &mut Frame, area: Rect, hand: &HandHistory, scroll: u
             lines.push(Line::from(vec![
                 Span::styled(format!("  {}", pot_label), Style::default().fg(YELLOW)),
                 Span::styled(
-                    format!(" ({:.0})", pot.amount),
+                    format!(" ({})", format_currency(pot.amount)),
                     Style::default().fg(SURFACE2),
                 ),
             ]));
@@ -384,8 +422,8 @@ fn render_round_log(frame: &mut Frame, area: Rect, hand: &HandHistory, scroll: u
                         Style::default().fg(theme::agent_color(player_idx)),
                     ),
                     Span::styled(
-                        format!(" wins {:.0}", win.win_amount),
-                        profit_style(win.win_amount),
+                        format!(" wins {}", format_currency(win.win_amount)),
+                        profit_style(win.win_amount.signum() as f32),
                     ),
                 ]));
             }
@@ -468,6 +506,9 @@ pub fn round_log_line_count(hand: &HandHistory) -> u16 {
                 count += 1;
             }
         }
+        if uncalled_street_bet(round).is_some() {
+            count += 1;
+        }
         count += 1; // blank line
     }
     // Awards section: header + one line per awarded pot + one line per win.
@@ -514,14 +555,14 @@ mod tests {
             game_type: GameType::Holdem,
             bet_limit: Some(BetLimitObj {
                 bet_type: BetType::NoLimit,
-                bet_cap: 0.0,
+                bet_cap: 0,
             }),
             table_size: 6,
             currency: "USD".into(),
-            dealer_seat: 1,
-            small_blind_amount: 1.0,
-            big_blind_amount: 2.0,
-            ante_amount: 0.0,
+            dealer_seat: 3,
+            small_blind_amount: 1,
+            big_blind_amount: 2,
+            ante_amount: 0,
             hero_player_id: None,
             players: vec![
                 PlayerObj {
@@ -529,7 +570,7 @@ mod tests {
                     seat: 1,
                     name: "Alice".into(),
                     display: None,
-                    starting_stack: 100.0,
+                    starting_stack: 100,
                     player_bounty: None,
                     is_sitting_out: None,
                 },
@@ -538,7 +579,7 @@ mod tests {
                     seat: 2,
                     name: "Bob".into(),
                     display: None,
-                    starting_stack: 100.0,
+                    starting_stack: 100,
                     player_bounty: None,
                     is_sitting_out: None,
                 },
@@ -547,7 +588,7 @@ mod tests {
                     seat: 3,
                     name: "Charlie".into(),
                     display: None,
-                    starting_stack: 100.0,
+                    starting_stack: 100,
                     player_bounty: None,
                     is_sitting_out: None,
                 },
@@ -562,7 +603,7 @@ mod tests {
                             action_number: 0,
                             player_id: 1,
                             action: Action::DealtCards,
-                            amount: 0.0,
+                            amount: 0,
                             is_allin: false,
                             cards: Some(vec![
                                 card(Value::Ace, Suit::Spade),
@@ -573,7 +614,7 @@ mod tests {
                             action_number: 1,
                             player_id: 2,
                             action: Action::DealtCards,
-                            amount: 0.0,
+                            amount: 0,
                             is_allin: false,
                             cards: None,
                         },
@@ -581,7 +622,7 @@ mod tests {
                             action_number: 2,
                             player_id: 1,
                             action: Action::PostSmallBlind,
-                            amount: 1.0,
+                            amount: 1,
                             is_allin: false,
                             cards: None,
                         },
@@ -589,7 +630,7 @@ mod tests {
                             action_number: 3,
                             player_id: 2,
                             action: Action::PostBigBlind,
-                            amount: 2.0,
+                            amount: 2,
                             is_allin: false,
                             cards: None,
                         },
@@ -597,7 +638,7 @@ mod tests {
                             action_number: 4,
                             player_id: 3,
                             action: Action::Fold,
-                            amount: 0.0,
+                            amount: 0,
                             is_allin: false,
                             cards: None,
                         },
@@ -605,7 +646,7 @@ mod tests {
                             action_number: 5,
                             player_id: 1,
                             action: Action::Raise,
-                            amount: 6.0,
+                            amount: 5,
                             is_allin: false,
                             cards: None,
                         },
@@ -613,7 +654,7 @@ mod tests {
                             action_number: 6,
                             player_id: 2,
                             action: Action::Call,
-                            amount: 4.0,
+                            amount: 4,
                             is_allin: false,
                             cards: None,
                         },
@@ -629,18 +670,18 @@ mod tests {
                     ]),
                     actions: vec![
                         ActionObj {
-                            action_number: 7,
+                            action_number: 0,
                             player_id: 1,
                             action: Action::Bet,
-                            amount: 8.0,
+                            amount: 8,
                             is_allin: false,
                             cards: None,
                         },
                         ActionObj {
-                            action_number: 8,
+                            action_number: 1,
                             player_id: 2,
                             action: Action::Fold,
-                            amount: 0.0,
+                            amount: 0,
                             is_allin: false,
                             cards: None,
                         },
@@ -649,14 +690,14 @@ mod tests {
             ],
             pots: vec![PotObj {
                 number: 0,
-                amount: 20.0,
-                rake: None,
+                amount: 12,
+                rake: Some(1),
                 jackpot: None,
                 player_wins: vec![PlayerWinsObj {
                     player_id: 1,
-                    win_amount: 20.0,
+                    win_amount: 11,
                     cashout_amount: None,
-                    contributed_rake: None,
+                    contributed_rake: Some(1),
                     cashout_fee: None,
                     bonus_amount: None,
                 }],
@@ -677,7 +718,7 @@ mod tests {
             action_number: 0,
             player_id,
             action: Action::DealtCards,
-            amount: 0.0,
+            amount: 0,
             is_allin: false,
             cards: Some(vec![c0, c1]),
         };
@@ -685,11 +726,11 @@ mod tests {
             action_number: 0,
             player_id,
             action: Action::ShowsCards,
-            amount: 0.0,
+            amount: 0,
             is_allin: false,
             cards: Some(vec![c0, c1]),
         };
-        let bet = |player_id: u64, action: Action, amount: f32, is_allin: bool| ActionObj {
+        let bet = |player_id: u64, action: Action, amount: Chips, is_allin: bool| ActionObj {
             action_number: 0,
             player_id,
             action,
@@ -713,14 +754,14 @@ mod tests {
             game_type: GameType::Holdem,
             bet_limit: Some(BetLimitObj {
                 bet_type: BetType::NoLimit,
-                bet_cap: 0.0,
+                bet_cap: 0,
             }),
             table_size: 6,
             currency: "USD".into(),
             dealer_seat: 3,
-            small_blind_amount: 1.0,
-            big_blind_amount: 2.0,
-            ante_amount: 0.0,
+            small_blind_amount: 1,
+            big_blind_amount: 2,
+            ante_amount: 0,
             hero_player_id: None,
             players: vec![
                 PlayerObj {
@@ -728,7 +769,7 @@ mod tests {
                     seat: 1,
                     name: "Alice".into(),
                     display: None,
-                    starting_stack: 50.0,
+                    starting_stack: 50,
                     player_bounty: None,
                     is_sitting_out: None,
                 },
@@ -737,7 +778,7 @@ mod tests {
                     seat: 2,
                     name: "Bob".into(),
                     display: None,
-                    starting_stack: 200.0,
+                    starting_stack: 200,
                     player_bounty: None,
                     is_sitting_out: None,
                 },
@@ -746,7 +787,7 @@ mod tests {
                     seat: 3,
                     name: "Charlie".into(),
                     display: None,
-                    starting_stack: 200.0,
+                    starting_stack: 200,
                     player_bounty: None,
                     is_sitting_out: None,
                 },
@@ -772,11 +813,11 @@ mod tests {
                             card(Value::Two, Suit::Spade),
                             card(Value::Two, Suit::Diamond),
                         ),
-                        bet(1, Action::PostSmallBlind, 1.0, false),
-                        bet(2, Action::PostBigBlind, 2.0, false),
-                        bet(3, Action::Raise, 6.0, false),
-                        bet(1, Action::Call, 5.0, false), // calls 5 to 6
-                        bet(2, Action::Call, 4.0, false), // calls 4 to 6
+                        bet(1, Action::PostSmallBlind, 1, false),
+                        bet(2, Action::PostBigBlind, 2, false),
+                        bet(3, Action::Raise, 6, false),
+                        bet(1, Action::Call, 5, false), // calls 5 to 6
+                        bet(2, Action::Call, 4, false), // calls 4 to 6
                     ],
                 },
                 RoundObj {
@@ -788,9 +829,9 @@ mod tests {
                         card(Value::Queen, Suit::Heart),
                     ]),
                     actions: vec![
-                        bet(1, Action::Bet, 44.0, true), // all-in, short stack
-                        bet(2, Action::Raise, 100.0, false),
-                        bet(3, Action::Call, 100.0, false), // calls 100 to 100
+                        bet(1, Action::Bet, 44, true), // all-in, short stack
+                        bet(2, Action::Raise, 100, false),
+                        bet(3, Action::Call, 100, false), // calls 100 to 100
                     ],
                 },
                 RoundObj {
@@ -825,12 +866,12 @@ mod tests {
             pots: vec![
                 PotObj {
                     number: 1,
-                    amount: 150.0,
+                    amount: 150,
                     rake: None,
                     jackpot: None,
                     player_wins: vec![PlayerWinsObj {
                         player_id: 1,
-                        win_amount: 150.0,
+                        win_amount: 150,
                         cashout_amount: None,
                         contributed_rake: None,
                         cashout_fee: None,
@@ -839,12 +880,12 @@ mod tests {
                 },
                 PotObj {
                     number: 2,
-                    amount: 112.0,
+                    amount: 112,
                     rake: None,
                     jackpot: None,
                     player_wins: vec![PlayerWinsObj {
                         player_id: 2,
-                        win_amount: 112.0,
+                        win_amount: 112,
                         cashout_amount: None,
                         contributed_rake: None,
                         cashout_fee: None,
@@ -874,11 +915,11 @@ mod tests {
         let hand = make_side_pot_hand();
         let (id_to_idx, profits) = compute_hand_profits(&hand);
         // Alice: invested 1+5+44 = 50, won 150 → +100
-        assert!((profits[id_to_idx[&1]] - 100.0).abs() < 0.01);
+        assert!((profits[id_to_idx[&1]] - 100) == 0);
         // Bob: invested 2+4+100 = 106, won 112 → +6
-        assert!((profits[id_to_idx[&2]] - 6.0).abs() < 0.01);
+        assert!((profits[id_to_idx[&2]] - 6) == 0);
         // Charlie: invested 6+100 = 106, won 0 → -106
-        assert!((profits[id_to_idx[&3]] - (-106.0)).abs() < 0.01);
+        assert!((profits[id_to_idx[&3]] - (-106)) == 0);
 
         // Preflop: 1 header + 5 visible + 1 blank = 7
         // Flop:    1 header + 3 actions + 1 blank = 5
@@ -936,9 +977,9 @@ mod tests {
             table_size: 2,
             currency: "USD".into(),
             dealer_seat: 0,
-            small_blind_amount: 5.0,
-            big_blind_amount: 10.0,
-            ante_amount: 0.0,
+            small_blind_amount: 5,
+            big_blind_amount: 10,
+            ante_amount: 0,
             hero_player_id: None,
             players: vec![],
             rounds: vec![],
@@ -957,12 +998,12 @@ mod tests {
     fn test_compute_hand_profits_basic() {
         let hand = make_test_hand();
         let (id_to_idx, profits) = compute_hand_profits(&hand);
-        // Alice (seat 0): posted SB 1 + raised 6 + bet 8 = 15 spent, won 20 → profit 5
-        assert!((profits[id_to_idx[&1]] - 5.0).abs() < 0.01);
+        // Alice (seat 0): committed 6 after uncalled refunds, won 11 after 1 rake → profit 5
+        assert!((profits[id_to_idx[&1]] - 5) == 0);
         // Bob (seat 1): posted BB 2 + called 4 = 6 spent, won 0 → profit -6
-        assert!((profits[id_to_idx[&2]] - (-6.0)).abs() < 0.01);
+        assert!((profits[id_to_idx[&2]] - (-6)) == 0);
         // Charlie (seat 2): no action with amount → 0 spent, 0 won → profit 0
-        assert!((profits[id_to_idx[&3]] - 0.0).abs() < 0.01);
+        assert!((profits[id_to_idx[&3]] - 0) == 0);
     }
 
     #[test]
@@ -970,10 +1011,10 @@ mod tests {
         let hand = make_test_hand();
         let count = round_log_line_count(&hand);
         // Preflop: 1 header + 5 visible actions (2 DealtCards skipped) + 1 blank = 7
-        // Flop: 1 header + 2 actions + 1 blank = 4
+        // Flop: 1 header + 2 actions + 1 returned-bet line + 1 blank = 5
         // Awards: 1 header + 1 pot label + 1 win = 3
-        // Total = 14
-        assert_eq!(count, 14);
+        // Total = 15
+        assert_eq!(count, 15);
     }
 
     #[test]
@@ -981,8 +1022,8 @@ mod tests {
         let mut hand = make_test_hand();
         hand.pots.clear();
         let count = round_log_line_count(&hand);
-        // Same as above minus awards section (2 lines)
-        assert_eq!(count, 11);
+        // Same as above minus awards section (3 lines)
+        assert_eq!(count, 12);
     }
 
     #[test]

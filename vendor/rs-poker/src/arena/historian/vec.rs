@@ -110,8 +110,8 @@ mod tests {
             Box::<RandomAgent>::default(),
         ];
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(5, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(5, 100)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -139,8 +139,8 @@ mod tests {
         ];
 
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .build()
             .unwrap();
 

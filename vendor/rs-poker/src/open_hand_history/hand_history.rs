@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use crate::core::Card;
 use crate::open_hand_history::serde_utils::{empty_string_is_none, iso8601};
+use crate::{Chips, core::Card};
 use chrono::{DateTime, Utc};
 
 #[allow(clippy::enum_variant_names)]
@@ -41,7 +41,8 @@ pub struct SpeedObj {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TournamentBountyObj {
     pub player_id: u64,
-    pub bounty_won: f32,
+    #[serde(with = "crate::open_hand_history::amount")]
+    pub bounty_won: Chips,
     pub defeated_player_id: u64,
 }
 
@@ -109,9 +110,12 @@ pub struct TournamentInfoObj {
     #[serde(with = "iso8601")]
     pub start_date_utc: Option<DateTime<Utc>>,
     pub currency: String,
-    pub buyin_amount: f32,
-    pub fee_amount: f32,
-    pub bounty_fee_amount: f32,
+    #[serde(with = "crate::open_hand_history::amount")]
+    pub buyin_amount: Chips,
+    #[serde(with = "crate::open_hand_history::amount")]
+    pub fee_amount: Chips,
+    #[serde(with = "crate::open_hand_history::amount")]
+    pub bounty_fee_amount: Chips,
     pub initial_stack: u64,
     #[serde(rename = "type")]
     pub tournament_type: TournamentType,
@@ -126,25 +130,33 @@ pub struct TournamentInfoObj {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlayerWinsObj {
     pub player_id: u64,
-    pub win_amount: f32,
+    #[serde(with = "crate::open_hand_history::amount")]
+    pub win_amount: Chips,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cashout_amount: Option<f32>,
+    #[serde(default, with = "crate::open_hand_history::amount::optional")]
+    pub cashout_amount: Option<Chips>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cashout_fee: Option<f32>,
+    #[serde(default, with = "crate::open_hand_history::amount::optional")]
+    pub cashout_fee: Option<Chips>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bonus_amount: Option<f32>,
+    #[serde(default, with = "crate::open_hand_history::amount::optional")]
+    pub bonus_amount: Option<Chips>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub contributed_rake: Option<f32>,
+    #[serde(default, with = "crate::open_hand_history::amount::optional")]
+    pub contributed_rake: Option<Chips>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PotObj {
     pub number: u64,
-    pub amount: f32,
+    #[serde(with = "crate::open_hand_history::amount")]
+    pub amount: Chips,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub rake: Option<f32>,
+    #[serde(default, with = "crate::open_hand_history::amount::optional")]
+    pub rake: Option<Chips>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub jackpot: Option<f32>,
+    #[serde(default, with = "crate::open_hand_history::amount::optional")]
+    pub jackpot: Option<Chips>,
     pub player_wins: Vec<PlayerWinsObj>,
 }
 
@@ -206,12 +218,13 @@ pub enum Action {
     AddedToPot,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ActionObj {
     pub action_number: u64,
     pub player_id: u64,
     pub action: Action,
-    pub amount: f32,
+    #[serde(with = "crate::open_hand_history::amount")]
+    pub amount: Chips,
     pub is_allin: bool,
     #[serde(
         default,
@@ -219,6 +232,54 @@ pub struct ActionObj {
         skip_serializing_if = "Option::is_none"
     )]
     pub cards: Option<Vec<Card>>,
+}
+
+impl<'de> Deserialize<'de> for ActionObj {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Wire {
+            action_number: u64,
+            player_id: u64,
+            action: Action,
+            #[serde(default, with = "crate::open_hand_history::amount::optional")]
+            amount: Option<Chips>,
+            is_allin: bool,
+            #[serde(default, deserialize_with = "empty_string_is_none")]
+            cards: Option<Vec<Card>>,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        // The OHH specification permits omitted/null amounts only for actions
+        // that do not transfer chips. Required currency never defaults to zero.
+        let amount = match wire.amount {
+            Some(amount) => amount,
+            None if matches!(
+                wire.action,
+                Action::Fold
+                    | Action::Check
+                    | Action::DealtCards
+                    | Action::ShowsCards
+                    | Action::MucksCards
+                    | Action::SitsDown
+                    | Action::StandsUp
+            ) =>
+            {
+                0
+            }
+            None => {
+                return Err(serde::de::Error::custom(
+                    "monetary OHH action requires an amount",
+                ));
+            }
+        };
+        Ok(Self {
+            action_number: wire.action_number,
+            player_id: wire.player_id,
+            action: wire.action,
+            amount,
+            is_allin: wire.is_allin,
+            cards: wire.cards,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -241,9 +302,11 @@ pub struct PlayerObj {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display: Option<String>,
-    pub starting_stack: f32,
+    #[serde(with = "crate::open_hand_history::amount")]
+    pub starting_stack: Chips,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub player_bounty: Option<f32>,
+    #[serde(default, with = "crate::open_hand_history::amount::optional")]
+    pub player_bounty: Option<Chips>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_sitting_out: Option<bool>,
 }
@@ -262,7 +325,8 @@ pub enum BetType {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BetLimitObj {
     pub bet_type: BetType,
-    pub bet_cap: f32,
+    #[serde(with = "crate::open_hand_history::amount")]
+    pub bet_cap: Chips,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -315,9 +379,12 @@ pub struct HandHistory {
     pub table_size: u64,
     pub currency: String,
     pub dealer_seat: u64,
-    pub small_blind_amount: f32,
-    pub big_blind_amount: f32,
-    pub ante_amount: f32,
+    #[serde(with = "crate::open_hand_history::amount")]
+    pub small_blind_amount: Chips,
+    #[serde(with = "crate::open_hand_history::amount")]
+    pub big_blind_amount: Chips,
+    #[serde(with = "crate::open_hand_history::amount")]
+    pub ante_amount: Chips,
 
     // Which player is the hero and being followed
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -542,8 +609,8 @@ mod tests {
 
         let parsed: OpenHandHistoryWrapper = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.ohh.spec_version, "1.2.2");
-        assert_eq!(parsed.ohh.small_blind_amount, 0.01);
-        assert_eq!(parsed.ohh.big_blind_amount, 0.02);
+        assert_eq!(parsed.ohh.small_blind_amount, 1);
+        assert_eq!(parsed.ohh.big_blind_amount, 2);
     }
 
     #[test]
@@ -1072,5 +1139,30 @@ mod tests {
 
         assert_eq!(parsed.ohh.site_name, "Pacific Poker");
         assert_eq!(parsed.ohh.network_name, "888 Poker");
+    }
+}
+
+#[cfg(test)]
+mod action_amount_tests {
+    use super::*;
+    #[test]
+    fn optional_nonmonetary_amounts_follow_ohh_specification() {
+        for token in [
+            r#"{"action_number":0,"player_id":1,"action":"Check","is_allin":false}"#,
+            r#"{"action_number":0,"player_id":1,"action":"Fold","amount":null,"is_allin":false}"#,
+        ] {
+            assert_eq!(serde_json::from_str::<ActionObj>(token).unwrap().amount, 0);
+        }
+        for amount in ["null", "0.001"] {
+            let json = format!(
+                r#"{{"action_number":0,"player_id":1,"action":"Call","amount":{amount},"is_allin":false}}"#
+            );
+            assert!(serde_json::from_str::<ActionObj>(&json).is_err());
+        }
+        let action: ActionObj = serde_json::from_str(
+            r#"{"action_number":0,"player_id":1,"action":"Call","amount":0.01,"is_allin":false}"#,
+        )
+        .unwrap();
+        assert_eq!(action.amount, 1);
     }
 }

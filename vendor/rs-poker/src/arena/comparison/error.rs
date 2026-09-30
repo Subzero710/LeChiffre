@@ -1,3 +1,4 @@
+use crate::arena::Chips;
 use thiserror::Error;
 
 use crate::arena::agent::AgentConfigError;
@@ -19,13 +20,13 @@ pub enum ComparisonConfigError {
     NumGamesZero,
 
     #[error("big_blind must be positive, got {0}")]
-    NonPositiveBigBlind(f32),
+    NonPositiveBigBlind(Chips),
 
     #[error("small_blind must be positive, got {0}")]
-    NonPositiveSmallBlind(f32),
+    NonPositiveSmallBlind(Chips),
 
     #[error("small_blind ({small}) must be less than big_blind ({big})")]
-    SmallBlindNotLessThanBigBlind { small: f32, big: f32 },
+    SmallBlindNotLessThanBigBlind { small: Chips, big: Chips },
 
     #[error("min_stack_bb must be positive, got {0}")]
     NonPositiveMinStack(f32),
@@ -37,7 +38,7 @@ pub enum ComparisonConfigError {
     MinStackExceedsMax { min: f32, max: f32 },
 
     #[error("ante must be non-negative, got {0}")]
-    NegativeAnte(f32),
+    NegativeAnte(Chips),
 }
 
 /// Errors that can occur during agent comparison

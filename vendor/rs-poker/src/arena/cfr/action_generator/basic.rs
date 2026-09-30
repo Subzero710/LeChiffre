@@ -49,7 +49,7 @@ impl ActionGenerator for BasicCFRActionGenerator {
         let mut res = ActionVec::with_capacity(3);
         let to_call =
             game_state.current_round_bet() - game_state.current_round_current_player_bet();
-        if to_call > 0.0 {
+        if to_call > 0 {
             res.push(AgentAction::Fold);
         }
         // Call, Match the current bet (if the bet is 0 this is a check)
@@ -74,10 +74,10 @@ mod tests {
 
     #[test]
     fn test_should_gen_2_actions() {
-        let stacks = vec![50.0; 2];
+        let stacks = vec![50; 2];
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(2.0, 1.0)
+            .blinds(2, 1)
             .build()
             .unwrap();
         let action_generator = BasicCFRActionGenerator::new(
@@ -94,16 +94,16 @@ mod tests {
 
     #[test]
     fn test_should_gen_3_actions() {
-        let stacks = vec![50.0; 2];
+        let stacks = vec![50; 2];
         let mut game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(2.0, 1.0)
+            .blinds(2, 1)
             .build()
             .unwrap();
         game_state.advance_round();
         game_state.advance_round();
 
-        game_state.do_bet(10.0, false).unwrap();
+        game_state.do_bet(10, false).unwrap();
         let action_generator = BasicCFRActionGenerator::new(
             CFRState::new(game_state.clone()),
             TraversalState::new_root(0),

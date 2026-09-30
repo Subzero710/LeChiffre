@@ -41,7 +41,11 @@ pub enum BudgetItem {
     NodeCount { max: u64 },
     /// Stop once node-local avg regret ≤ `epsilon` AND iterations ≥
     /// `min_iterations`.
-    RegretBelow { epsilon: f32, min_iterations: u64 },
+    RegretBelow {
+        #[serde(deserialize_with = "crate::arena::serde_numbers::deserialize")]
+        epsilon: f32,
+        min_iterations: u64,
+    },
     /// Per-depth wave widths; depths past the vec fast-forward.
     MaxWidth { recursive_widths: Vec<usize> },
     /// Dispatch to a depth-indexed inner item; depths past the vec use

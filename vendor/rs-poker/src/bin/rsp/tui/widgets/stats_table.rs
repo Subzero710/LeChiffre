@@ -4,6 +4,8 @@ use ratatui::{
     style::Style,
     widgets::{Cell, Row, Table},
 };
+#[cfg(test)]
+use rs_poker::Chips;
 
 use crate::tui::{
     state::AgentDisplayData,
@@ -174,11 +176,11 @@ mod tests {
     use insta::assert_snapshot;
     use ratatui::{Terminal, backend::TestBackend};
 
-    fn make_agent(name: &str, profit: f32, games: usize, wins: usize) -> AgentDisplayData {
+    fn make_agent(name: &str, profit: Chips, games: usize, wins: usize) -> AgentDisplayData {
         AgentDisplayData {
             name: name.to_string(),
             total_profit: profit,
-            profit_bb: profit / 10.0,
+            profit_bb: profit as f32 / 10.0,
             games_played: games,
             wins,
             vpip_percent: 25.0,
@@ -197,8 +199,8 @@ mod tests {
         let backend = TestBackend::new(120, 10);
         let mut terminal = Terminal::new(backend).unwrap();
         let agents = vec![
-            make_agent("Alice", 150.0, 100, 55),
-            make_agent("Bob", -50.0, 100, 45),
+            make_agent("Alice", 150, 100, 55),
+            make_agent("Bob", -50, 100, 45),
         ];
         terminal
             .draw(|frame| {
@@ -213,8 +215,8 @@ mod tests {
         let backend = TestBackend::new(120, 10);
         let mut terminal = Terminal::new(backend).unwrap();
         let agents = vec![
-            make_agent("Alice", 150.0, 100, 55),
-            make_agent("Bob", -50.0, 100, 45),
+            make_agent("Alice", 150, 100, 55),
+            make_agent("Bob", -50, 100, 45),
         ];
         terminal
             .draw(|frame| {

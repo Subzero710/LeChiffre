@@ -20,16 +20,15 @@ use rs_poker::open_hand_history::{
 };
 
 use libfuzzer_sys::fuzz_target;
-
-const MIN_BLIND: f32 = 1e-15;
+use rs_poker::Chips;
 
 #[derive(Debug, Clone, arbitrary::Arbitrary)]
 struct ConfigAgentInput {
     pub player_configs: Vec<AgentConfig>,
-    pub stacks: Vec<f32>,
-    pub sb: f32,
-    pub bb: f32,
-    pub ante: f32,
+    pub stacks: Vec<Chips>,
+    pub sb: Chips,
+    pub bb: Chips,
+    pub ante: Chips,
     pub dealer_idx: usize,
     pub seed: u64,
 }
@@ -87,53 +86,31 @@ fn input_good(input: &ConfigAgentInput) -> bool {
         return false;
     }
 
-    // Validate stacks - no NaN/infinite/negative
-    for stack in &input.stacks {
-        if stack.is_nan() || stack.is_infinite() || stack.is_sign_negative() {
-            return false;
-        }
-    }
-
-    // Validate blinds and ante
-    if input.ante.is_sign_negative()
-        || input.ante.is_nan()
-        || input.ante.is_infinite()
-        || input.ante < 0.0
-    {
-        return false;
-    }
-    if input.sb.is_sign_negative()
-        || input.sb.is_nan()
-        || input.sb.is_infinite()
-        || input.sb < input.ante
-        || input.sb < 0.0
-        || (input.sb > 0.0 && input.sb < MIN_BLIND)
-    {
-        return false;
-    }
-    if input.bb.is_sign_negative()
-        || input.bb.is_nan()
-        || input.bb.is_infinite()
-        || input.bb < input.sb
-        || input.bb < 1.0
-        || (input.bb > 0.0 && input.bb < MIN_BLIND)
-    {
-        return false;
-    }
-
-    // Check that min stack covers bb + ante
-    let min_stack = input
+    if input
         .stacks
         .iter()
-        .map(|s| s.clamp(0.0, 100_000_000.0))
-        .reduce(f32::min)
-        .unwrap_or(0.0);
-
-    if input.bb + input.ante > min_stack {
+        .any(|&stack| !(0..=100_000_000).contains(&stack))
+    {
         return false;
     }
-
-    if input.bb > 100_000_000.0 {
+    if input.ante < 0
+        || input.sb < input.ante
+        || input.sb < 0
+        || input.bb < input.sb
+        || !(1..=100_000_000).contains(&input.bb)
+    {
+        return false;
+    }
+    let min_stack = *input
+        .stacks
+        .iter()
+        .min()
+        .expect("nonempty validated player list");
+    if input
+        .bb
+        .checked_add(input.ante)
+        .is_none_or(|required| required > min_stack)
+    {
         return false;
     }
 
@@ -172,11 +149,7 @@ fuzz_target!(|input: ConfigAgentInput| {
         return;
     }
 
-    let stacks: Vec<f32> = input
-        .stacks
-        .iter()
-        .map(|s| s.clamp(0.0, 100_000_000.0))
-        .collect();
+    let stacks: Vec<Chips> = input.stacks.iter().copied().collect();
 
     let dealer_idx = input.dealer_idx % input.player_configs.len();
 

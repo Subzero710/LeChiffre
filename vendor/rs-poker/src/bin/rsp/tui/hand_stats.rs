@@ -13,12 +13,15 @@
 //! splits, per-street wins) are intentionally left at their defaults — the
 //! viewer never reads them, so reconstructing them would be dead code.
 
+use rs_poker::Chips;
 use std::collections::HashMap;
 
 use rs_poker::arena::historian::StatsStorage;
 use rs_poker::open_hand_history::{Action, HandHistory};
 
-use crate::tui::state::{GameResult, PROFIT_EPSILON, RoundLabel, SeatStats, compute_hand_profits};
+use crate::tui::state::{
+    GameResult, RoundLabel, SeatStats, ZERO_PROFIT, compute_hand_profits, net_hand_investments,
+};
 
 /// Reconstruct a [`GameResult`] (profits, ending round, per-seat displayed
 /// stats) from an OHH `HandHistory`.
@@ -28,25 +31,17 @@ pub fn game_result_from_hand(hand: &HandHistory) -> GameResult {
 
     let mut storage = StatsStorage::new_with_num_players(num_players.max(1));
 
+    let investments = net_hand_investments(hand);
     // --- Financials, hands played, win/loss/breakeven ---
     for (i, &profit) in profits.iter().enumerate() {
         storage.hands_played[i] = 1;
         storage.total_profit[i] = profit;
 
-        // invested = sum of every chip this player put in the pot, incl. blinds.
-        let mut invested = 0.0_f32;
-        for r in &hand.rounds {
-            for a in &r.actions {
-                if id_to_idx.get(&a.player_id) == Some(&i) && is_invested_action(&a.action) {
-                    invested += a.amount;
-                }
-            }
-        }
-        storage.total_invested[i] = invested;
+        storage.total_invested[i] = investments[i];
 
-        if profit > PROFIT_EPSILON {
+        if profit > ZERO_PROFIT {
             storage.games_won[i] = 1;
-        } else if profit < -PROFIT_EPSILON {
+        } else if profit < -ZERO_PROFIT {
             storage.games_lost[i] = 1;
         } else {
             storage.games_breakeven[i] = 1;
@@ -75,29 +70,12 @@ pub fn game_result_from_hand(hand: &HandHistory) -> GameResult {
     }
 }
 
-/// Actions that move chips into the pot (used for `total_invested`).
-fn is_invested_action(action: &Action) -> bool {
-    matches!(
-        action,
-        Action::Bet
-            | Action::Raise
-            | Action::Call
-            | Action::PostSmallBlind
-            | Action::PostBigBlind
-            | Action::PostAnte
-            | Action::Straddle
-            | Action::PostDead
-            | Action::PostExtraBlind
-            | Action::AddedToPot
-    )
-}
-
 /// Reconstruct the action-derived displayed stats: VPIP/PFR, aggression counts,
 /// 3-bet (preflop), then c-bet and WTSD/WSD via dedicated helpers.
 fn reconstruct_action_stats(
     hand: &HandHistory,
     id_to_idx: &HashMap<u64, usize>,
-    profits: &[f32],
+    profits: &[Chips],
     storage: &mut StatsStorage,
 ) {
     for r in &hand.rounds {
@@ -215,7 +193,7 @@ fn reconstruct_cbet(
 fn reconstruct_showdown(
     hand: &HandHistory,
     id_to_idx: &HashMap<u64, usize>,
-    profits: &[f32],
+    profits: &[Chips],
     storage: &mut StatsStorage,
 ) {
     let num_players = hand.players.len();
@@ -255,7 +233,7 @@ fn reconstruct_showdown(
         }
         if went_to_showdown && !folded[i] {
             storage.showdown_count[i] += 1;
-            if profits[i] > PROFIT_EPSILON {
+            if profits[i] > ZERO_PROFIT {
                 storage.showdown_wins[i] += 1;
             }
         }
@@ -285,9 +263,9 @@ pub mod test_util {
             table_size: 2,
             currency: "USD".into(),
             dealer_seat: 0,
-            small_blind_amount: 5.0,
-            big_blind_amount: 10.0,
-            ante_amount: 0.0,
+            small_blind_amount: 5,
+            big_blind_amount: 10,
+            ante_amount: 0,
             hero_player_id: None,
             players: vec![
                 PlayerObj {
@@ -295,7 +273,7 @@ pub mod test_util {
                     seat: 0,
                     name: "A".into(),
                     display: None,
-                    starting_stack: 1000.0,
+                    starting_stack: 1000,
                     player_bounty: None,
                     is_sitting_out: None,
                 },
@@ -304,7 +282,7 @@ pub mod test_util {
                     seat: 1,
                     name: "B".into(),
                     display: None,
-                    starting_stack: 1000.0,
+                    starting_stack: 1000,
                     player_bounty: None,
                     is_sitting_out: None,
                 },
@@ -318,7 +296,7 @@ pub mod test_util {
                         action_number: 1,
                         player_id: 1,
                         action: Action::PostSmallBlind,
-                        amount: 5.0,
+                        amount: 5,
                         is_allin: false,
                         cards: None,
                     },
@@ -326,7 +304,7 @@ pub mod test_util {
                         action_number: 2,
                         player_id: 2,
                         action: Action::PostBigBlind,
-                        amount: 10.0,
+                        amount: 10,
                         is_allin: false,
                         cards: None,
                     },
@@ -334,7 +312,7 @@ pub mod test_util {
                         action_number: 3,
                         player_id: 1,
                         action: Action::Fold,
-                        amount: 0.0,
+                        amount: 0,
                         is_allin: false,
                         cards: None,
                     },
@@ -342,12 +320,12 @@ pub mod test_util {
             }],
             pots: vec![PotObj {
                 number: 0,
-                amount: 15.0,
+                amount: 15,
                 rake: None,
                 jackpot: None,
                 player_wins: vec![PlayerWinsObj {
                     player_id: 2,
-                    win_amount: 15.0,
+                    win_amount: 15,
                     cashout_amount: None,
                     cashout_fee: None,
                     bonus_amount: None,
@@ -370,13 +348,13 @@ mod tests {
             seat,
             name: name.to_string(),
             display: None,
-            starting_stack: 1000.0,
+            starting_stack: 1000,
             player_bounty: None,
             is_sitting_out: None,
         }
     }
 
-    pub(super) fn act(player_id: u64, action: Action, amount: f32) -> ActionObj {
+    pub(super) fn act(player_id: u64, action: Action, amount: Chips) -> ActionObj {
         ActionObj {
             action_number: 0,
             player_id,
@@ -396,7 +374,7 @@ mod tests {
         }
     }
 
-    pub(super) fn win(player_id: u64, amount: f32) -> PlayerWinsObj {
+    pub(super) fn win(player_id: u64, amount: Chips) -> PlayerWinsObj {
         PlayerWinsObj {
             player_id,
             win_amount: amount,
@@ -430,9 +408,9 @@ mod tests {
             table_size: players.len() as u64,
             currency: "USD".into(),
             dealer_seat,
-            small_blind_amount: 5.0,
-            big_blind_amount: 10.0,
-            ante_amount: 0.0,
+            small_blind_amount: 5,
+            big_blind_amount: 10,
+            ante_amount: 0,
             hero_player_id: None,
             players,
             rounds,
@@ -441,7 +419,7 @@ mod tests {
         }
     }
 
-    fn pot(amount: f32, wins: Vec<PlayerWinsObj>) -> PotObj {
+    fn pot(amount: Chips, wins: Vec<PlayerWinsObj>) -> PotObj {
         PotObj {
             number: 0,
             amount,
@@ -453,35 +431,35 @@ mod tests {
 
     #[test]
     fn test_financials_and_ending_round() {
-        // Alice (SB) folds preflop, Bob (BB) wins the 15 pot.
+        // Alice (SB) folds preflop, Bob (BB) wins the 10 pot after an uncalled refund.
         let h = hand(
             vec![player(1, 0, "Alice"), player(2, 1, "Bob")],
             vec![round(
                 "Preflop",
                 vec![
-                    act(1, Action::PostSmallBlind, 5.0),
-                    act(2, Action::PostBigBlind, 10.0),
-                    act(1, Action::Fold, 0.0),
+                    act(1, Action::PostSmallBlind, 5),
+                    act(2, Action::PostBigBlind, 10),
+                    act(1, Action::Fold, 0),
                 ],
             )],
-            vec![pot(15.0, vec![win(2, 15.0)])],
+            vec![pot(10, vec![win(2, 10)])],
             0,
         );
 
         let result = game_result_from_hand(&h);
         assert_eq!(result.agent_names, vec!["Alice", "Bob"]);
         assert_eq!(result.ending_round, RoundLabel::Preflop);
-        // Alice invested 5, won 0 => -5. Bob invested 10, won 15 => +5.
-        assert!((result.profits[0] - (-5.0)).abs() < 0.01);
-        assert!((result.profits[1] - 5.0).abs() < 0.01);
+        // Alice invested 5, won 0 => -5. Bob invested 5 after a refund, won 10 => +5.
+        assert!((result.profits[0] - (-5)) == 0);
+        assert!((result.profits[1] - 5) == 0);
 
         let s = &result.seat_stats;
         assert_eq!(s[0].hands_played, 1);
         assert_eq!(s[0].games_lost, 1);
         assert_eq!(s[1].games_won, 1);
-        // total_invested: Alice 5, Bob 10.
-        assert!((s[0].total_invested - 5.0).abs() < 0.01);
-        assert!((s[1].total_invested - 10.0).abs() < 0.01);
+        // total_invested: Alice 5, Bob 5.
+        assert!((s[0].total_invested - 5) == 0);
+        assert!((s[1].total_invested - 5) == 0);
     }
 
     #[test]
@@ -496,11 +474,11 @@ mod tests {
             vec![round(
                 "Preflop",
                 vec![
-                    act(1, Action::PostSmallBlind, 5.0),
-                    act(2, Action::PostBigBlind, 10.0),
-                    act(3, Action::Raise, 30.0),
-                    act(1, Action::Call, 25.0),
-                    act(2, Action::Fold, 0.0),
+                    act(1, Action::PostSmallBlind, 5),
+                    act(2, Action::PostBigBlind, 10),
+                    act(3, Action::Raise, 30),
+                    act(1, Action::Call, 25),
+                    act(2, Action::Fold, 0),
                 ],
             )],
             vec![],
@@ -531,12 +509,12 @@ mod tests {
             vec![round(
                 "Preflop",
                 vec![
-                    act(1, Action::PostSmallBlind, 5.0),
-                    act(2, Action::PostBigBlind, 10.0),
-                    act(3, Action::Raise, 30.0), // open raise (raise #1)
-                    act(1, Action::Raise, 90.0), // 3-bet (faced raise #1)
-                    act(2, Action::Fold, 0.0),
-                    act(3, Action::Call, 60.0),
+                    act(1, Action::PostSmallBlind, 5),
+                    act(2, Action::PostBigBlind, 10),
+                    act(3, Action::Raise, 30), // open raise (raise #1)
+                    act(1, Action::Raise, 90), // 3-bet (faced raise #1)
+                    act(2, Action::Fold, 0),
+                    act(3, Action::Call, 60),
                 ],
             )],
             vec![],
@@ -563,15 +541,15 @@ mod tests {
                 round(
                     "Preflop",
                     vec![
-                        act(1, Action::PostSmallBlind, 5.0),
-                        act(2, Action::PostBigBlind, 10.0),
-                        act(1, Action::Raise, 30.0),
-                        act(2, Action::Call, 20.0),
+                        act(1, Action::PostSmallBlind, 5),
+                        act(2, Action::PostBigBlind, 10),
+                        act(1, Action::Raise, 30),
+                        act(2, Action::Call, 20),
                     ],
                 ),
                 round(
                     "Flop",
-                    vec![act(1, Action::Bet, 40.0), act(2, Action::Fold, 0.0)],
+                    vec![act(1, Action::Bet, 40), act(2, Action::Fold, 0)],
                 ),
             ],
             vec![],
@@ -594,15 +572,15 @@ mod tests {
                 round(
                     "Preflop",
                     vec![
-                        act(1, Action::PostSmallBlind, 5.0),
-                        act(2, Action::PostBigBlind, 10.0),
-                        act(1, Action::Raise, 30.0),
-                        act(2, Action::Call, 20.0),
+                        act(1, Action::PostSmallBlind, 5),
+                        act(2, Action::PostBigBlind, 10),
+                        act(1, Action::Raise, 30),
+                        act(2, Action::Call, 20),
                     ],
                 ),
                 round(
                     "Flop",
-                    vec![act(1, Action::Check, 0.0), act(2, Action::Check, 0.0)],
+                    vec![act(1, Action::Check, 0), act(2, Action::Check, 0)],
                 ),
             ],
             vec![],
@@ -622,26 +600,26 @@ mod tests {
                 round(
                     "Preflop",
                     vec![
-                        act(1, Action::PostSmallBlind, 5.0),
-                        act(2, Action::PostBigBlind, 10.0),
-                        act(1, Action::Call, 5.0),
-                        act(2, Action::Check, 0.0),
+                        act(1, Action::PostSmallBlind, 5),
+                        act(2, Action::PostBigBlind, 10),
+                        act(1, Action::Call, 5),
+                        act(2, Action::Check, 0),
                     ],
                 ),
                 round(
                     "Flop",
-                    vec![act(2, Action::Check, 0.0), act(1, Action::Check, 0.0)],
+                    vec![act(2, Action::Check, 0), act(1, Action::Check, 0)],
                 ),
                 round(
                     "Turn",
-                    vec![act(2, Action::Check, 0.0), act(1, Action::Check, 0.0)],
+                    vec![act(2, Action::Check, 0), act(1, Action::Check, 0)],
                 ),
                 round(
                     "River",
-                    vec![act(2, Action::Check, 0.0), act(1, Action::Check, 0.0)],
+                    vec![act(2, Action::Check, 0), act(1, Action::Check, 0)],
                 ),
             ],
-            vec![pot(20.0, vec![win(1, 20.0)])],
+            vec![pot(20, vec![win(1, 20)])],
             0,
         );
         let r = game_result_from_hand(&h);
@@ -666,13 +644,13 @@ mod tests {
             vec![round(
                 "Preflop",
                 vec![
-                    act(1, Action::PostSmallBlind, 5.0),
-                    act(2, Action::PostBigBlind, 10.0),
-                    act(1, Action::Raise, 30.0),
-                    act(2, Action::Fold, 0.0),
+                    act(1, Action::PostSmallBlind, 5),
+                    act(2, Action::PostBigBlind, 10),
+                    act(1, Action::Raise, 30),
+                    act(2, Action::Fold, 0),
                 ],
             )],
-            vec![pot(20.0, vec![win(1, 20.0)])],
+            vec![pot(20, vec![win(1, 20)])],
             0,
         );
         let r = game_result_from_hand(&h);

@@ -212,8 +212,8 @@ mod tests {
         let mut hist = HandLogHistorian::new(log.clone());
 
         let game_state = crate::arena::GameStateBuilder::default()
-            .num_players_with_stack(2, 100.0)
-            .big_blind(2.0)
+            .num_players_with_stack(2, 100)
+            .big_blind(2)
             .build()
             .unwrap();
 

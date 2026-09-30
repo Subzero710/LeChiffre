@@ -1,3 +1,4 @@
+use rs_poker::Chips;
 use std::fs;
 use std::path::Path;
 
@@ -70,13 +71,13 @@ pub struct GenerateArgs {
     #[arg(long = "max-players", default_value_t = 3)]
     max_players: usize,
 
-    /// Big blind amount
-    #[arg(long = "big-blind", default_value_t = 10.0)]
-    big_blind: f32,
+    /// Big blind amount in cents
+    #[arg(long = "big-blind", default_value_t = 10)]
+    big_blind: Chips,
 
-    /// Small blind amount
-    #[arg(long = "small-blind", default_value_t = 5.0)]
-    small_blind: f32,
+    /// Small blind amount in cents
+    #[arg(long = "small-blind", default_value_t = 5)]
+    small_blind: Chips,
 
     /// Minimum starting stack in big blinds
     #[arg(long = "min-stack-bb", default_value_t = 100.0)]
@@ -109,7 +110,7 @@ impl GenerateArgs {
         if self.min_stack_bb > self.max_stack_bb {
             return Err(GenerateError::MinStackExceedsMax);
         }
-        if self.small_blind <= 0.0 || self.big_blind <= 0.0 {
+        if self.small_blind <= 0 || self.big_blind <= 0 {
             return Err(GenerateError::InvalidBlinds);
         }
         if self.small_blind >= self.big_blind {
@@ -186,11 +187,13 @@ impl<'a> GenerationContext<'a> {
         let num_players = self
             .rng
             .random_range(self.args.min_players..=self.args.max_players);
-        let stacks: Vec<f32> = (0..num_players)
+        let stacks: Vec<Chips> = (0..num_players)
             .map(|_| {
-                self.rng
-                    .random_range(self.args.min_stack_bb..=self.args.max_stack_bb)
-                    * self.args.big_blind
+                rs_poker::arena::money::apply_ratio(
+                    self.args.big_blind,
+                    self.rng
+                        .random_range(self.args.min_stack_bb..=self.args.max_stack_bb),
+                )
             })
             .collect();
         let dealer_idx = self.rng.random_range(0..num_players);
@@ -441,7 +444,7 @@ async fn run_generation_inner(
 
                 let stats_snap = stats_storage.snapshot();
                 let ending_round = ending_round_from_stats(&stats_snap, num_players);
-                let profits: Vec<f32> = (0..num_players)
+                let profits: Vec<Chips> = (0..num_players)
                     .map(|i| stats_snap.total_profit[i])
                     .collect();
                 let seat_stats: Vec<SeatStats> = (0..num_players)

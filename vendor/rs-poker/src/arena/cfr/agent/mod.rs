@@ -73,65 +73,34 @@ where
                 "Playing forced action"
             );
 
-            // Validate that the forced_action is still valid for this game state.
-            // If not, we need to find a similar valid action.
-            let valid_actions = self.action_generator.gen_possible_actions(game_state);
-
-            // Check if the forced_action is in the valid actions (or close to it for Bet)
-            match &force_action {
-                AgentAction::Fold => {
-                    if valid_actions.contains(&AgentAction::Fold) {
-                        force_action
-                    } else {
-                        // Can't fold when there's nothing to call - this shouldn't happen
-                        // but if it does, just call/check instead
-                        event!(
-                            tracing::Level::WARN,
-                            "Forced Fold action invalid, using first valid action"
-                        );
-                        valid_actions.first().cloned().unwrap_or(AgentAction::Fold)
-                    }
+            // Recursive exploration must play the exact candidate amount.
+            // Replacing it with a representative from the same index bucket
+            // would evaluate a different monetary outcome.
+            match force_action {
+                AgentAction::Fold => assert!(
+                    game_state.current_round_bet() > game_state.current_round_current_player_bet(),
+                    "invalid forced CFR fold"
+                ),
+                AgentAction::Call => {
+                    game_state
+                        .validate_bet_amount(game_state.current_round_bet())
+                        .expect("invalid forced CFR call");
                 }
                 AgentAction::AllIn => {
-                    // All-in should always be valid if we have chips
-                    force_action
-                }
-                AgentAction::Call => {
-                    // Call should always be valid
-                    force_action
+                    game_state
+                        .validate_bet_amount(
+                            game_state.current_round_current_player_bet()
+                                + game_state.current_player_stack(),
+                        )
+                        .expect("invalid forced CFR all-in");
                 }
                 AgentAction::Bet(amount) => {
-                    // For Bet, we need to verify the amount is still valid.
-                    // The forced_action was generated for a specific game state, and while
-                    // we expect the game state to be the same, let's validate to be safe.
-                    // Use the ActionIndexMapper for consistent action-to-index mapping.
-                    let forced_idx = self
-                        .action_index_mapper
-                        .action_to_idx(&force_action, game_state);
-
-                    // Find a valid action with the same index
-                    if let Some(valid_action) = valid_actions.iter().find(|a| {
-                        self.action_index_mapper.action_to_idx(a, game_state) == forced_idx
-                    }) {
-                        // Found a valid action with the same index - use it
-                        // (it might have a slightly different amount due to game state changes)
-                        valid_action.clone()
-                    } else {
-                        // The forced action's index doesn't correspond to a valid action.
-                        // This indicates a game state mismatch. Log and use a fallback.
-                        event!(
-                            tracing::Level::WARN,
-                            ?force_action,
-                            forced_idx = forced_idx,
-                            amount = amount,
-                            current_bet = game_state.current_round_bet(),
-                            min_raise = game_state.current_round_min_raise(),
-                            "Forced Bet action index not valid, using first valid action"
-                        );
-                        valid_actions.first().cloned().unwrap_or(AgentAction::Fold)
-                    }
+                    game_state
+                        .validate_bet_amount(amount)
+                        .expect("invalid forced CFR bet");
                 }
             }
+            force_action
         } else {
             self.ensure_regret_matcher();
 
@@ -267,10 +236,10 @@ mod tests {
     /// The CFR agent uses shared CFR states for ALL players.
     #[tokio::test(flavor = "current_thread")]
     async fn test_cfr_vs_non_cfr_agent() {
-        let stacks: Vec<f32> = vec![50.0, 50.0];
+        let stacks: Vec<crate::Chips> = vec![50, 50];
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(5.0, 2.5)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -323,8 +292,8 @@ mod tests {
         use crate::core::{Card, Hand, Suit, Value};
 
         let mut game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .max_raises_per_round(Some(2))
             .build()
             .unwrap();
@@ -333,8 +302,10 @@ mod tests {
         game_state.advance_round(); // Starting -> Ante
         game_state.advance_round(); // Ante -> DealPreflop
         game_state.advance_round(); // DealPreflop -> Preflop
-        game_state.do_bet(5.0, true).unwrap();
-        game_state.do_bet(10.0, true).unwrap();
+        game_state.do_bet(5, true).unwrap();
+        game_state.do_bet(10, true).unwrap();
+        game_state.sb_posted = true;
+        game_state.bb_posted = true;
 
         let mut hand0 = Hand::default();
         hand0.insert(Card::new(Value::Ace, Suit::Spade));
@@ -384,8 +355,8 @@ mod tests {
     #[test]
     fn test_create_agent() {
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(3, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(3, 100)
+            .blinds(10, 5)
             .build()
             .unwrap();
         let cfr_state = make_cfr_state(&game_state);
@@ -402,10 +373,10 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn test_run_heads_up() {
         let num_agents = 2;
-        let stacks: Vec<f32> = vec![50.0, 50.0];
+        let stacks: Vec<crate::Chips> = vec![50, 50];
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(5.0, 2.5)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -443,8 +414,8 @@ mod tests {
     #[test]
     fn test_shared_cfr_states_between_agents() {
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -487,10 +458,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_run_heads_up_parallel() {
         let num_agents = 2;
-        let stacks: Vec<f32> = vec![50.0, 50.0];
+        let stacks: Vec<crate::Chips> = vec![50, 50];
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(5.0, 2.5)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -527,10 +498,10 @@ mod tests {
     /// After running, the tree should have nodes beyond just the root.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_parallel_builds_cfr_tree() {
-        let stacks: Vec<f32> = vec![50.0, 50.0];
+        let stacks: Vec<crate::Chips> = vec![50, 50];
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(5.0, 2.5)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -573,8 +544,8 @@ mod tests {
     #[test]
     fn test_sub_simulation_traversal_isolation() {
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .build()
             .unwrap();
         let traversal_set = TraversalSet::new(game_state.num_players);
@@ -660,18 +631,18 @@ mod tests {
         // - Player 0 has gone all-in for 500 this round
         // - Player 1 has 300 left in stack, hasn't bet on river yet
         // - Previous rounds: both put in 200 each
-        let stacks = vec![0.0, 300.0]; // P0 is all-in, P1 has 300 left
-        let starting_stacks = vec![700.0, 700.0]; // Both started with 700
-        let player_bet = vec![700.0, 400.0]; // Total bets over all rounds
+        let stacks = vec![0, 300]; // P0 is all-in, P1 has 300 left
+        let starting_stacks = vec![700, 700]; // Both started with 700
+        let player_bet = vec![700, 400]; // Total bets over all rounds
 
         // Round data: P0 bet 500 this round, P1 hasn't bet yet
-        let round_player_bet = vec![500.0, 0.0];
+        let round_player_bet = vec![500, 0];
         let mut active = PlayerBitSet::new(2);
         // Only P1 is active (P0 is all-in)
         active.disable(0);
 
         let round_data = crate::arena::game_state::RoundData::new_with_bets(
-            10.0, // min_raise
+            10, // min_raise
             active,
             1, // P1 to act
             round_player_bet,
@@ -682,8 +653,8 @@ mod tests {
             .round_data(round_data)
             .stacks(stacks)
             .player_bet(player_bet)
-            .big_blind(10.0)
-            .small_blind(5.0)
+            .big_blind(10)
+            .small_blind(5)
             .hands(vec![p0_hand, p1_hand])
             .board(board_cards)
             .build()
@@ -694,8 +665,8 @@ mod tests {
         // Verify game state is correct
         assert_eq!(game_state.round, Round::River);
         assert_eq!(game_state.to_act_idx(), 1); // Player 1's turn
-        assert_eq!(game_state.current_round_bet(), 500.0); // P0's all-in
-        assert_eq!(game_state.current_player_stack(), 300.0); // P1's stack
+        assert_eq!(game_state.current_round_bet(), 500); // P0's all-in
+        assert_eq!(game_state.current_player_stack(), 300); // P1's stack
 
         // Create CFR agent for Player 1
         let cfr_state = make_cfr_state(&game_state);
@@ -792,28 +763,28 @@ mod tests {
         let mut p1_hand = Hand::new_with_cards(p1_hole);
         p1_hand.extend(board_cards.iter().copied());
 
-        let stacks = vec![0.0, 300.0];
-        let starting_stacks = vec![700.0, 700.0];
-        let player_bet = vec![700.0, 400.0];
-        let round_player_bet = vec![500.0, 0.0];
+        let stacks = vec![0, 300];
+        let starting_stacks = vec![700, 700];
+        let player_bet = vec![700, 400];
+        let round_player_bet = vec![500, 0];
         let mut active = PlayerBitSet::new(2);
         active.disable(0);
         let round_data =
-            crate::arena::game_state::RoundData::new_with_bets(10.0, active, 1, round_player_bet);
+            crate::arena::game_state::RoundData::new_with_bets(10, active, 1, round_player_bet);
 
         let mut game_state = GameStateBuilder::new()
             .round(Round::River)
             .round_data(round_data)
             .stacks(stacks)
             .player_bet(player_bet)
-            .big_blind(10.0)
-            .small_blind(5.0)
+            .big_blind(10)
+            .small_blind(5)
             .hands(vec![p0_hand, p1_hand])
             .board(board_cards)
             .build()
             .unwrap();
         game_state.starting_stacks = starting_stacks.into();
-        game_state.total_pot = 1100.0;
+        game_state.total_pot = 1100;
 
         let cfr_state = make_cfr_state(&game_state);
         let traversal_set = TraversalSet::new(game_state.num_players);
@@ -917,29 +888,29 @@ mod tests {
         let mut p1_hand = Hand::new_with_cards(p1_hole);
         p1_hand.extend(board_cards.iter().copied());
 
-        let stacks = vec![0.0, 300.0];
-        let starting_stacks = vec![700.0, 700.0];
-        let player_bet = vec![700.0, 400.0];
-        let round_player_bet = vec![500.0, 0.0];
+        let stacks = vec![0, 300];
+        let starting_stacks = vec![700, 700];
+        let player_bet = vec![700, 400];
+        let round_player_bet = vec![500, 0];
         let mut active = PlayerBitSet::new(2);
         active.disable(0);
 
-        let round_data = RoundData::new_with_bets(10.0, active, 1, round_player_bet);
+        let round_data = RoundData::new_with_bets(10, active, 1, round_player_bet);
 
         let mut game_state = GameStateBuilder::new()
             .round(Round::River)
             .round_data(round_data)
             .stacks(stacks)
             .player_bet(player_bet)
-            .big_blind(10.0)
-            .small_blind(5.0)
+            .big_blind(10)
+            .small_blind(5)
             .hands(vec![p0_hand, p1_hand])
             .board(board_cards)
             .build()
             .unwrap();
         game_state.starting_stacks = starting_stacks.into();
         // Total pot reflects what's already in: 700 + 400 = 1100.
-        game_state.total_pot = 1100.0;
+        game_state.total_pot = 1100;
         game_state.player_all_in = {
             let mut pbs = PlayerBitSet::new(2);
             pbs.disable(1);
@@ -955,7 +926,7 @@ mod tests {
         fast_forward_distribute_pot(&mut call_state);
         let call_reward = call_state.player_reward(1);
         assert!(
-            call_reward < -699.0,
+            call_reward < -699,
             "Calling with the losing hand should cost ~700 stack, got {}",
             call_reward
         );
@@ -967,7 +938,7 @@ mod tests {
         fast_forward_distribute_pot(&mut fold_state);
         let fold_reward = fold_state.player_reward(1);
         assert!(
-            (fold_reward - (-400.0)).abs() < 0.01,
+            (fold_reward - (-400)) == 0,
             "Folding should cost exactly the 400 already committed, got {}",
             fold_reward
         );
@@ -1003,21 +974,21 @@ mod tests {
         let mut p1 = Hand::new_with_cards(p1_hole);
         p1.extend(board_cards.iter().copied());
 
-        let round_data = RoundData::new_with_bets(10.0, PlayerBitSet::new(2), 0, vec![0.0, 0.0]);
+        let round_data = RoundData::new_with_bets(10, PlayerBitSet::new(2), 0, vec![0, 0]);
 
         let mut gs = GameStateBuilder::new()
             .round(Round::River)
             .round_data(round_data)
-            .stacks(vec![500.0, 500.0])
-            .player_bet(vec![500.0, 500.0])
-            .big_blind(10.0)
-            .small_blind(5.0)
+            .stacks(vec![500, 500])
+            .player_bet(vec![500, 500])
+            .big_blind(10)
+            .small_blind(5)
             .hands(vec![p0, p1])
             .board(board_cards)
             .build()
             .unwrap();
-        gs.starting_stacks = vec![1000.0, 1000.0].into();
-        gs.total_pot = 1000.0;
+        gs.starting_stacks = vec![1000, 1000].into();
+        gs.total_pot = 1000;
 
         let mut rng = StdRng::seed_from_u64(11);
         fast_forward_apply_action(&mut gs, &AgentAction::Call);
@@ -1025,11 +996,7 @@ mod tests {
         fast_forward_distribute_pot(&mut gs);
         let reward = gs.player_reward(0);
         // 1000 pot split between both players → ~0 net.
-        assert!(
-            reward.abs() < 0.01,
-            "split should yield ~0 reward, got {}",
-            reward
-        );
+        assert!(reward == 0, "split should yield ~0 reward, got {}", reward);
     }
 
     /// Fast-forward from the flop: the helper must deal the turn and river
@@ -1057,20 +1024,20 @@ mod tests {
         let mut p1 = Hand::new_with_cards(p1_hole);
         p1.extend(board_cards.iter().copied());
 
-        let round_data = RoundData::new_with_bets(10.0, PlayerBitSet::new(2), 0, vec![0.0, 0.0]);
+        let round_data = RoundData::new_with_bets(10, PlayerBitSet::new(2), 0, vec![0, 0]);
         let mut gs = GameStateBuilder::new()
             .round(Round::Flop)
             .round_data(round_data)
-            .stacks(vec![100.0, 100.0])
-            .player_bet(vec![10.0, 10.0])
-            .big_blind(10.0)
-            .small_blind(5.0)
+            .stacks(vec![100, 100])
+            .player_bet(vec![10, 10])
+            .big_blind(10)
+            .small_blind(5)
             .hands(vec![p0, p1])
             .board(board_cards)
             .build()
             .unwrap();
-        gs.starting_stacks = vec![110.0, 110.0].into();
-        gs.total_pot = 20.0;
+        gs.starting_stacks = vec![110, 110].into();
+        gs.total_pot = 20;
 
         let mut rng = StdRng::seed_from_u64(3);
         fast_forward_apply_action(&mut gs, &AgentAction::Call);
@@ -1113,22 +1080,22 @@ mod tests {
         let mut p1_hand = Hand::new_with_cards(p1_hole);
         p1_hand.extend(board_cards.iter().copied());
 
-        let stacks = vec![0.0, 300.0];
-        let starting_stacks = vec![700.0, 700.0];
-        let player_bet = vec![700.0, 400.0];
-        let round_player_bet = vec![500.0, 0.0];
+        let stacks = vec![0, 300];
+        let starting_stacks = vec![700, 700];
+        let player_bet = vec![700, 400];
+        let round_player_bet = vec![500, 0];
         let mut active = PlayerBitSet::new(2);
         active.disable(0);
         let round_data =
-            crate::arena::game_state::RoundData::new_with_bets(10.0, active, 1, round_player_bet);
+            crate::arena::game_state::RoundData::new_with_bets(10, active, 1, round_player_bet);
 
         let mut game_state = GameStateBuilder::new()
             .round(Round::River)
             .round_data(round_data)
             .stacks(stacks)
             .player_bet(player_bet)
-            .big_blind(10.0)
-            .small_blind(5.0)
+            .big_blind(10)
+            .small_blind(5)
             .hands(vec![p0_hand, p1_hand])
             .board(board_cards)
             .build()
@@ -1188,22 +1155,22 @@ mod tests {
         let mut p1_hand = Hand::new_with_cards(p1_hole);
         p1_hand.extend(board_cards.iter().copied());
 
-        let stacks = vec![0.0, 300.0];
-        let starting_stacks = vec![700.0, 700.0];
-        let player_bet = vec![700.0, 400.0];
-        let round_player_bet = vec![500.0, 0.0];
+        let stacks = vec![0, 300];
+        let starting_stacks = vec![700, 700];
+        let player_bet = vec![700, 400];
+        let round_player_bet = vec![500, 0];
         let mut active = PlayerBitSet::new(2);
         active.disable(0);
         let round_data =
-            crate::arena::game_state::RoundData::new_with_bets(10.0, active, 1, round_player_bet);
+            crate::arena::game_state::RoundData::new_with_bets(10, active, 1, round_player_bet);
 
         let mut game_state = GameStateBuilder::new()
             .round(Round::River)
             .round_data(round_data)
             .stacks(stacks)
             .player_bet(player_bet)
-            .big_blind(10.0)
-            .small_blind(5.0)
+            .big_blind(10)
+            .small_blind(5)
             .hands(vec![p0_hand, p1_hand])
             .board(board_cards)
             .build()
@@ -1287,14 +1254,14 @@ mod tests {
         // stacks=0 + bets>0 in a non-Starting round → both players all-in
         let mut game_state = GameStateBuilder::new()
             .round(Round::DealFlop)
-            .stacks(vec![0.0, 0.0])
-            .player_bet(vec![500.0, 500.0])
-            .big_blind(10.0)
-            .small_blind(5.0)
+            .stacks(vec![0, 0])
+            .player_bet(vec![500, 500])
+            .big_blind(10)
+            .small_blind(5)
             .hands(vec![p0_hand, p1_hand])
             .build()
             .unwrap();
-        game_state.starting_stacks = vec![500.0, 500.0].into();
+        game_state.starting_stacks = vec![500, 500].into();
 
         let num_trials = 50;
 
@@ -1313,7 +1280,7 @@ mod tests {
                 let mut rng = StdRng::seed_from_u64(seed);
                 fast_forward_run_to_showdown(&mut gs, &mut rng);
                 fast_forward_distribute_pot(&mut gs);
-                gs.player_reward(0)
+                gs.player_reward(0) as f32
             })
             .collect();
 
@@ -1392,14 +1359,14 @@ mod tests {
         // stacks=0 + bets>0 in a non-Starting round → both players all-in
         let mut game_state = GameStateBuilder::new()
             .round(Round::DealFlop)
-            .stacks(vec![0.0, 0.0])
-            .player_bet(vec![500.0, 500.0])
-            .big_blind(10.0)
-            .small_blind(5.0)
+            .stacks(vec![0, 0])
+            .player_bet(vec![500, 500])
+            .big_blind(10)
+            .small_blind(5)
             .hands(vec![p0_hand, p1_hand])
             .build()
             .unwrap();
-        game_state.starting_stacks = vec![500.0, 500.0].into();
+        game_state.starting_stacks = vec![500, 500].into();
 
         // Average over multiple seeds — AKs should consistently beat 72o.
         let num_trials = 20;
@@ -1445,14 +1412,14 @@ mod tests {
 
         let mut game_state = GameStateBuilder::new()
             .round(Round::DealFlop)
-            .stacks(vec![0.0, 0.0])
-            .player_bet(vec![500.0, 500.0])
-            .big_blind(10.0)
-            .small_blind(5.0)
+            .stacks(vec![0, 0])
+            .player_bet(vec![500, 500])
+            .big_blind(10)
+            .small_blind(5)
             .hands(vec![p0_hand, p1_hand])
             .build()
             .unwrap();
-        game_state.starting_stacks = vec![500.0, 500.0].into();
+        game_state.starting_stacks = vec![500, 500].into();
 
         let num_trials = 100;
 
@@ -1477,7 +1444,7 @@ mod tests {
                 let mut rng = StdRng::seed_from_u64(seed);
                 fast_forward_run_to_showdown(&mut gs, &mut rng);
                 fast_forward_distribute_pot(&mut gs);
-                gs.player_reward(0)
+                gs.player_reward(0) as f32
             })
             .collect();
         let single_time = start.elapsed();
@@ -1564,6 +1531,18 @@ mod tests {
     // fully parallel.
     static CFR_DIAG_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+    fn register_inactive_diag_dispatch() {
+        // tracing-core's single-dispatch optimization registers a new callsite
+        // against the registering thread's default. Another parallel test can
+        // first visit that callsite without our thread-local subscriber and
+        // cache Interest::never. Keep a second, inactive dispatch alive so new
+        // callsites consult all registered subscribers. This does not install
+        // a global subscriber or capture events from other tests.
+        static INACTIVE: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+        INACTIVE
+            .get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
+    }
+
     impl CapturingDiagLayer {
         fn new() -> Self {
             Self::default()
@@ -1624,6 +1603,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn diag_event_records_iteration_bound_stop() {
         let _diag_test_guard = CFR_DIAG_TEST_LOCK.lock().await;
+        register_inactive_diag_dispatch();
 
         use tracing_subscriber::layer::SubscriberExt;
 
@@ -1636,6 +1616,7 @@ mod tests {
             )
             .with(layer);
         let _guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
 
         let (game_state, cfr_state, traversal_set) = setup_tiny_heads_up();
         // budget_for_schedule(&[5]): 5 iterations at depth 0, fast-forward at
@@ -1683,6 +1664,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn diag_event_records_deadline_stop() {
         let _diag_test_guard = CFR_DIAG_TEST_LOCK.lock().await;
+        register_inactive_diag_dispatch();
 
         use crate::arena::cfr::{Deadline, MostRestrictive};
         use tracing_subscriber::layer::SubscriberExt;
@@ -1696,6 +1678,7 @@ mod tests {
             )
             .with(layer);
         let _guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
 
         let (game_state, cfr_state, traversal_set) = setup_tiny_heads_up();
         // Deadline(1ms) arms the timer; MaxWidth([1,1,1]) provides Wave so the
@@ -1739,6 +1722,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn diag_event_emitted_at_every_depth() {
         let _diag_test_guard = CFR_DIAG_TEST_LOCK.lock().await;
+        register_inactive_diag_dispatch();
 
         use tracing_subscriber::layer::SubscriberExt;
 
@@ -1751,6 +1735,7 @@ mod tests {
             )
             .with(layer);
         let _guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
 
         let (game_state, cfr_state, traversal_set) = setup_tiny_heads_up();
         // budget_for_schedule(&[2, 1]): 2 waves at depth 0, 1 wave at depth 1,
@@ -1789,6 +1774,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn diag_event_records_stable_strategy_stop() {
         let _diag_test_guard = CFR_DIAG_TEST_LOCK.lock().await;
+        register_inactive_diag_dispatch();
 
         use tracing_subscriber::layer::SubscriberExt;
 
@@ -1801,6 +1787,7 @@ mod tests {
             )
             .with(layer);
         let _guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
 
         let (game_state, cfr_state, traversal_set) = setup_tiny_heads_up();
         // Cap of 4096 is enough for PCFR+ to stabilize at EPSILON=0.001
@@ -1835,8 +1822,8 @@ mod tests {
         use crate::core::{Card, Hand, Suit, Value};
 
         let mut game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -1844,8 +1831,10 @@ mod tests {
         game_state.advance_round(); // Starting -> Ante
         game_state.advance_round(); // Ante -> DealPreflop
         game_state.advance_round(); // DealPreflop -> Preflop
-        game_state.do_bet(5.0, true).unwrap();
-        game_state.do_bet(10.0, true).unwrap();
+        game_state.do_bet(5, true).unwrap();
+        game_state.do_bet(10, true).unwrap();
+        game_state.sb_posted = true;
+        game_state.bb_posted = true;
 
         // Deterministic hole cards (independent of the dealer's RNG).
         let mut hand0 = Hand::default();
@@ -1910,8 +1899,12 @@ mod tests {
                 // Bound the wave loop ourselves: 8 waves at the root, then stop.
                 // Deeper agents (sub-sims) stop after their first wave so the
                 // test stays fast.
-                let cap = if stats.depth == 0 { 8 } else { 1 };
-                if stats.iterations < cap {
+                // This test observes the root metric. Bound deeper work at
+                // fast-forward instead of expanding an exponential subtree.
+                if stats.depth > 0 {
+                    return NextStep::FastForward;
+                }
+                if stats.iterations < 8 {
                     NextStep::Wave { width: 1 }
                 } else {
                     NextStep::Stop
@@ -1960,16 +1953,18 @@ mod tests {
 
         for run in 0u64..10 {
             let mut game_state = GameStateBuilder::new()
-                .num_players_with_stack(2, 100.0)
-                .blinds(10.0, 5.0)
+                .num_players_with_stack(2, 100)
+                .blinds(10, 5)
                 .build()
                 .unwrap();
 
             game_state.advance_round();
             game_state.advance_round();
             game_state.advance_round();
-            game_state.do_bet(5.0, true).unwrap();
-            game_state.do_bet(10.0, true).unwrap();
+            game_state.do_bet(5, true).unwrap();
+            game_state.do_bet(10, true).unwrap();
+            game_state.sb_posted = true;
+            game_state.bb_posted = true;
 
             let mut hand0 = Hand::default();
             hand0.insert(Card::new(Value::Ace, Suit::Spade));
@@ -2168,20 +2163,20 @@ mod tests {
         p1.extend(board_cards.iter().copied());
 
         // Both players active (need action), P1 to act, equal bets so far.
-        let round_data = RoundData::new_with_bets(10.0, PlayerBitSet::new(2), 1, vec![0.0, 0.0]);
+        let round_data = RoundData::new_with_bets(10, PlayerBitSet::new(2), 1, vec![0, 0]);
         let mut game_state = GameStateBuilder::new()
             .round(Round::Turn)
             .round_data(round_data)
-            .stacks(vec![100.0, 100.0])
-            .player_bet(vec![50.0, 50.0])
-            .big_blind(10.0)
-            .small_blind(5.0)
+            .stacks(vec![100, 100])
+            .player_bet(vec![50, 50])
+            .big_blind(10)
+            .small_blind(5)
             .hands(vec![p0, p1])
             .board(board_cards)
             .build()
             .unwrap();
-        game_state.starting_stacks = vec![150.0, 150.0].into();
-        game_state.total_pot = 100.0;
+        game_state.starting_stacks = vec![150, 150].into();
+        game_state.total_pot = 100;
 
         // Empty MaxWidth (depth 0 ≥ len 0) returns FastForward at depth 0.
         // One wave (IterationCount(1)) → fast-forward computation per action.
@@ -2314,8 +2309,8 @@ mod tests {
         use std::sync::Arc;
 
         let game_state = crate::arena::GameStateBuilder::default()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .build()
             .unwrap();
         let cfr_state = make_cfr_state(&game_state);
@@ -2366,8 +2361,8 @@ mod tests {
         use std::sync::Arc;
 
         let game_state = crate::arena::GameStateBuilder::default()
-            .num_players_with_stack(2, 100.0)
-            .big_blind(2.0)
+            .num_players_with_stack(2, 100)
+            .big_blind(2)
             .build()
             .unwrap();
         let cfr_state = make_cfr_state(&game_state);
@@ -2429,9 +2424,9 @@ mod tests {
                 .as_ref()
                 .expect("needs_history agent has a hand_log");
             log.record(Action::GameStart(GameStartPayload {
-                ante: 0.0,
-                small_blind: 5.0,
-                big_blind: 10.0,
+                ante: 0,
+                small_blind: 5,
+                big_blind: 10,
             }));
             log.record(Action::RoundAdvance(Round::Preflop));
             log.record(Action::DealCommunity(crate::core::Card::from(10u8)));
@@ -2546,8 +2541,8 @@ mod tests {
         use crate::arena::Agent;
 
         let game_state = crate::arena::GameStateBuilder::default()
-            .num_players_with_stack(2, 100.0)
-            .big_blind(2.0)
+            .num_players_with_stack(2, 100)
+            .big_blind(2)
             .build()
             .unwrap();
         let cfr_state = make_cfr_state(&game_state);
@@ -2569,5 +2564,35 @@ mod tests {
             agent.historian().is_none(),
             "no historian on the default fast path"
         );
+    }
+    #[tokio::test]
+    async fn forced_candidate_keeps_its_exact_amount_even_when_not_a_generated_representative() {
+        let (mut gs, cfr_state, traversal_set) = setup_tiny_heads_up();
+        let mut agent = CFRAgentBuilder::<ConfigurableActionGenerator>::new()
+            .name("exact-forced")
+            .player_idx(gs.to_act_idx())
+            .cfr_state(cfr_state)
+            .traversal_set(traversal_set)
+            .action_gen_config(ConfigurableActionConfig::default())
+            .forced_action(AgentAction::Bet(27))
+            .build();
+        assert_eq!(agent.act(0, &gs).await, AgentAction::Bet(27));
+        assert_eq!(gs.do_bet(27, false).unwrap(), 22);
+        assert_eq!(gs.total_pot, 37);
+        assert_eq!(gs.stacks[0], 73);
+    }
+    #[tokio::test]
+    #[should_panic(expected = "invalid forced CFR bet")]
+    async fn invalid_forced_candidate_fails_instead_of_changing_the_bet() {
+        let (gs, cfr_state, traversal_set) = setup_tiny_heads_up();
+        let mut agent = CFRAgentBuilder::<ConfigurableActionGenerator>::new()
+            .name("invalid-forced")
+            .player_idx(gs.to_act_idx())
+            .cfr_state(cfr_state)
+            .traversal_set(traversal_set)
+            .action_gen_config(ConfigurableActionConfig::default())
+            .forced_action(AgentAction::Bet(11))
+            .build();
+        agent.act(0, &gs).await;
     }
 }

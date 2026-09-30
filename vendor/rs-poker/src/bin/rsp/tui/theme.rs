@@ -3,8 +3,6 @@ use ratatui::{
     widgets::{Block, BorderType, Padding},
 };
 
-use crate::tui::state::PROFIT_EPSILON;
-
 // ── Catppuccin Mocha Palette ──────────────────────────────────────────
 // A soothing pastel theme. See https://github.com/catppuccin/catppuccin
 
@@ -64,9 +62,9 @@ pub fn agent_color(idx: usize) -> Color {
 
 /// Return a Style appropriate for the given profit value.
 pub fn profit_style(profit: f32) -> Style {
-    if profit > PROFIT_EPSILON {
+    if profit > 0.0 {
         Style::default().fg(PROFIT_COLOR)
-    } else if profit < -PROFIT_EPSILON {
+    } else if profit < -0.0 {
         Style::default().fg(LOSS_COLOR)
     } else {
         Style::default().fg(BREAKEVEN_COLOR)

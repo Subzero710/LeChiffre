@@ -1,3 +1,4 @@
+use crate::arena::Chips;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use tracing::{event, instrument};
 
@@ -26,7 +27,7 @@ pub struct SingleTableTournamentBuilder {
 #[derive(Debug, Clone)]
 pub struct TournamentResults {
     places: Vec<usize>,
-    max_stacks: Vec<f32>,
+    max_stacks: Vec<Chips>,
     rounds: usize,
 }
 pub struct SingleTableTournament<R: Rng> {
@@ -37,7 +38,7 @@ pub struct SingleTableTournament<R: Rng> {
     rng: R,
 }
 impl TournamentResults {
-    pub fn new(starting_stacks: &[f32]) -> Self {
+    pub fn new(starting_stacks: &[Chips]) -> Self {
         TournamentResults {
             places: vec![0; starting_stacks.len()],
             max_stacks: starting_stacks.to_vec(),
@@ -46,7 +47,7 @@ impl TournamentResults {
     }
 
     /// Update the max stacks for each player
-    pub fn update_max(&mut self, stacks: &[f32]) {
+    pub fn update_max(&mut self, stacks: &[Chips]) {
         self.rounds += 1;
         for (idx, stack) in stacks.iter().enumerate() {
             if *stack > self.max_stacks[idx] {
@@ -70,7 +71,7 @@ impl TournamentResults {
         self.rounds
     }
 
-    pub fn max_stacks(&self) -> &[f32] {
+    pub fn max_stacks(&self) -> &[Chips] {
         &self.max_stacks
     }
 }
@@ -179,8 +180,8 @@ impl<R: Rng> SingleTableTournament<R> {
                 .stacks
                 .iter()
                 .enumerate()
-                .filter(|(_, stack)| **stack == 0.0)
-                .filter(|(idx, _)| sim.game_state.starting_stacks[*idx] != 0.0)
+                .filter(|(_, stack)| **stack == 0)
+                .filter(|(idx, _)| sim.game_state.starting_stacks[*idx] != 0)
                 .map(|(idx, _)| idx)
                 .collect::<Vec<_>>();
 
@@ -213,7 +214,7 @@ impl<R: Rng> SingleTableTournament<R> {
             // Move the dealer button
             // Find the next player with a stack
             let mut dealer_idx = (sim.game_state.dealer_idx + 1) % sim.game_state.stacks.len();
-            while sim.game_state.stacks[dealer_idx] == 0.0 {
+            while sim.game_state.stacks[dealer_idx] == 0 {
                 dealer_idx = (dealer_idx + 1) % sim.game_state.stacks.len();
             }
 
@@ -232,7 +233,7 @@ impl<R: Rng> SingleTableTournament<R> {
                 .stacks
                 .iter()
                 .enumerate()
-                .filter(|(_, stack)| **stack > 0.0)
+                .filter(|(_, stack)| **stack > 0)
                 .map(|(idx, _)| idx)
                 .collect();
 
@@ -264,9 +265,9 @@ mod tests {
             Box::<AllInAgentGenerator>::default(),
         ];
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(4, 50.0)
-            .blinds(10.0, 5.0)
-            .ante(1.0)
+            .num_players_with_stack(4, 50)
+            .blinds(10, 5)
+            .ante(1)
             .build()
             .unwrap();
         let tournament = SingleTableTournamentBuilder::default()
@@ -300,9 +301,9 @@ mod tests {
         ];
 
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(4, 50.0)
-            .blinds(10.0, 5.0)
-            .ante(1.0)
+            .num_players_with_stack(4, 50)
+            .blinds(10, 5)
+            .ante(1)
             .build()
             .unwrap();
 

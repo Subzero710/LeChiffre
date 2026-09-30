@@ -1,3 +1,4 @@
+use crate::arena::Chips;
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock, RwLockReadGuard},
@@ -38,7 +39,7 @@ pub struct StatsStorage {
     pub vpip_count: Vec<usize>,
     // The total amount of money each player has voluntarily put in the pot
     // DEPRECATED: Legacy field for backwards compatibility
-    pub vpip_total: Vec<f32>,
+    pub vpip_total: Vec<Chips>,
     // How many times they raised
     pub raise_count: Vec<usize>,
 
@@ -57,15 +58,15 @@ pub struct StatsStorage {
     pub bet_count: Vec<usize>,               // Bet occurrences (for aggression factor)
 
     // Financial tracking
-    pub total_profit: Vec<f32>,      // Cumulative profit/loss
-    pub total_invested: Vec<f32>,    // Total money put into pots (for ROI calculation)
+    pub total_profit: Vec<Chips>,    // Cumulative profit/loss
+    pub total_invested: Vec<Chips>,  // Total money put into pots (for ROI calculation)
     pub games_won: Vec<usize>,       // Win count
     pub games_lost: Vec<usize>,      // Loss count
     pub games_breakeven: Vec<usize>, // Breakeven count
 
     // Position tracking
     pub position_games: Vec<HashMap<usize, usize>>, // Games played per position
-    pub position_profit: Vec<HashMap<usize, f32>>,  // Profit per position
+    pub position_profit: Vec<HashMap<usize, Chips>>, // Profit per position
 
     // Round outcomes (counts for win rate calculation)
     pub preflop_wins: Vec<usize>,      // Hands won that ended preflop
@@ -116,7 +117,7 @@ impl StatsStorage {
             // Existing fields
             actions_count: vec![0; num_players],
             vpip_count: vec![0; num_players],
-            vpip_total: vec![0.0; num_players],
+            vpip_total: vec![0; num_players],
             raise_count: vec![0; num_players],
 
             // Correct per-hand tracking (preflop only, binary per hand)
@@ -133,8 +134,8 @@ impl StatsStorage {
             bet_count: vec![0; num_players],
 
             // Financial tracking
-            total_profit: vec![0.0; num_players],
-            total_invested: vec![0.0; num_players],
+            total_profit: vec![0; num_players],
+            total_invested: vec![0; num_players],
             games_won: vec![0; num_players],
             games_lost: vec![0; num_players],
             games_breakeven: vec![0; num_players],
@@ -246,7 +247,7 @@ impl StatsStorage {
         if total_games == 0 {
             0.0
         } else {
-            self.total_profit[player_idx] / total_games as f32
+            self.total_profit[player_idx] as f32 / total_games as f32
         }
     }
 
@@ -256,10 +257,10 @@ impl StatsStorage {
     /// Investment is the total amount of money the player put into pots.
     pub fn roi_percent(&self, player_idx: usize) -> f32 {
         let invested = self.total_invested[player_idx];
-        if invested <= 0.0 {
+        if invested <= 0 {
             0.0
         } else {
-            (self.total_profit[player_idx] / invested) * 100.0
+            (self.total_profit[player_idx] as f32 / invested as f32) * 100.0
         }
     }
 
@@ -282,7 +283,7 @@ impl StatsStorage {
     }
 
     /// Get position profit for a player
-    pub fn position_profit(&self, player_idx: usize) -> &HashMap<usize, f32> {
+    pub fn position_profit(&self, player_idx: usize) -> &HashMap<usize, Chips> {
         &self.position_profit[player_idx]
     }
 
@@ -478,7 +479,7 @@ impl StatsStorage {
                 *self.position_games[i].entry(*position).or_insert(0) += count;
             }
             for (position, profit) in &other.position_profit[i] {
-                *self.position_profit[i].entry(*position).or_insert(0.0) += profit;
+                *self.position_profit[i].entry(*position).or_insert(0) += profit;
             }
 
             // Round outcomes
@@ -589,7 +590,7 @@ struct PlayerHandStats {
     // Note: PFR is derived from preflop_raise_count >= 1 (no separate flag needed)
     // Legacy: action-based tracking (kept for backwards compatibility)
     vpip_count_legacy: usize,
-    vpip_total_legacy: f32,
+    vpip_total_legacy: Chips,
     // Per-action counts (for stats like aggression factor)
     raise_count: usize,
     bet_count: usize,
@@ -600,7 +601,7 @@ struct PlayerHandStats {
     three_bet_count: usize,
     three_bet_opportunities: usize,
     // Financial tracking
-    invested: f32, // Total money put into pot this hand (for ROI calculation)
+    invested: Chips, // Total money put into pot this hand (for ROI calculation)
 
     // Per-street action counts
     flop_bets: usize,
@@ -657,9 +658,9 @@ impl HandAccumulator {
 pub struct StatsTrackingHistorian {
     storage: SharedStatsStorage,
     dealer_idx: usize,
-    starting_stacks: Vec<f32>,
+    starting_stacks: Vec<Chips>,
     current_round: Round,
-    recorded_profit: Vec<f32>, // Track what profit we've already recorded for this game
+    recorded_profit: Vec<Chips>, // Track what profit we've already recorded for this game
     accumulator: HandAccumulator,
 
     // Hand-level tracking for advanced stats
@@ -682,9 +683,9 @@ impl StatsTrackingHistorian {
         Self {
             storage,
             dealer_idx: 0,
-            starting_stacks: vec![0.0; num_players],
+            starting_stacks: vec![0; num_players],
             current_round: Round::Starting,
-            recorded_profit: vec![0.0; num_players],
+            recorded_profit: vec![0; num_players],
             accumulator: HandAccumulator::new(num_players),
             preflop_aggressor: None,
             preflop_raise_number: 0,
@@ -777,7 +778,7 @@ impl StatsTrackingHistorian {
         // Helper: check if this is a raise (bet > current bet to call)
         let is_raise = payload.final_bet > payload.starting_bet;
         // Helper: check if this is a bet (first aggressive action, no prior bet)
-        let is_bet = payload.starting_bet == 0.0 && payload.final_bet > 0.0;
+        let is_bet = payload.starting_bet == 0 && payload.final_bet > 0;
 
         // 3-bet opportunity: only when facing the open-raise (raise_number == 1).
         // This excludes 4-bet and higher situations.
@@ -789,7 +790,7 @@ impl StatsTrackingHistorian {
             AgentAction::Bet(bet_amount) => {
                 let put_into_pot = bet_amount - payload.starting_player_bet;
 
-                if put_into_pot > 0.0 {
+                if put_into_pot > 0 {
                     // Track investment for ROI calculation
                     player_stats.invested += put_into_pot;
 
@@ -859,7 +860,7 @@ impl StatsTrackingHistorian {
                 // C-Bet tracking: preflop aggressor betting first on the flop
                 // Use GameState: bet == 0 on flop means no one has bet yet
                 if payload.round == Round::Flop
-                    && payload.starting_bet == 0.0
+                    && payload.starting_bet == 0
                     && self.preflop_aggressor == Some(payload.idx)
                 {
                     player_stats.cbet_opportunity = true;
@@ -882,7 +883,7 @@ impl StatsTrackingHistorian {
 
                 // Calling is also VPIP (if putting in extra money)
                 let put_into_pot = payload.final_player_bet - payload.starting_player_bet;
-                if put_into_pot > 0.0 {
+                if put_into_pot > 0 {
                     // Track investment for ROI calculation
                     player_stats.invested += put_into_pot;
 
@@ -902,7 +903,7 @@ impl StatsTrackingHistorian {
 
                 // C-Bet tracking: if preflop aggressor folds on flop (before any bet)
                 if payload.round == Round::Flop
-                    && payload.starting_bet == 0.0
+                    && payload.starting_bet == 0
                     && self.preflop_aggressor == Some(payload.idx)
                 {
                     player_stats.cbet_opportunity = true;
@@ -922,7 +923,7 @@ impl StatsTrackingHistorian {
                 }
 
                 let put_into_pot = payload.final_player_bet - payload.starting_player_bet;
-                if put_into_pot > 0.0 {
+                if put_into_pot > 0 {
                     // Track investment for ROI calculation
                     player_stats.invested += put_into_pot;
 
@@ -963,7 +964,7 @@ impl StatsTrackingHistorian {
 
                 // C-Bet tracking
                 if payload.round == Round::Flop
-                    && payload.starting_bet == 0.0
+                    && payload.starting_bet == 0
                     && self.preflop_aggressor == Some(payload.idx)
                 {
                     player_stats.cbet_opportunity = true;
@@ -1150,13 +1151,13 @@ impl StatsTrackingHistorian {
                 storage.showdown_count[player_idx] += 1;
 
                 // If they won money at showdown
-                if final_profit > 0.01 {
+                if final_profit > 0 {
                     storage.showdown_wins[player_idx] += 1;
                 }
             }
 
             // Update win/loss/breakeven counts
-            if final_profit > 0.01 {
+            if final_profit > 0 {
                 storage.games_won[player_idx] += 1;
 
                 // Track round-based wins
@@ -1167,7 +1168,7 @@ impl StatsTrackingHistorian {
                     Round::River => storage.river_wins[player_idx] += 1,
                     _ => {}
                 }
-            } else if final_profit < -0.01 {
+            } else if final_profit < 0 {
                 storage.games_lost[player_idx] += 1;
             } else {
                 storage.games_breakeven[player_idx] += 1;
@@ -1179,7 +1180,7 @@ impl StatsTrackingHistorian {
                 .or_insert(0) += 1;
             *storage.position_profit[player_idx]
                 .entry(player_idx)
-                .or_insert(0.0) += final_profit;
+                .or_insert(0) += final_profit;
         }
 
         Ok(())
@@ -1203,7 +1204,7 @@ impl StatsTrackingHistorian {
         self.current_round = Round::Starting;
 
         // Reset recorded profit for this new game
-        self.recorded_profit = vec![0.0; game_state.num_players];
+        self.recorded_profit = vec![0; game_state.num_players];
 
         // Reset accumulator for the new hand (resets vpip_occurred, pfr_occurred, etc.)
         self.accumulator.reset();
@@ -1245,6 +1246,10 @@ impl Historian for StatsTrackingHistorian {
                 self.record_played_action(game_state, failed_action_payload.result.clone())
             }
             Action::ForcedBet(payload) => self.record_forced_bet(payload),
+            Action::ReturnUncalledBet(payload) => {
+                self.accumulator.player_stats[payload.idx].invested -= payload.amount;
+                Ok(())
+            }
             Action::RoundAdvance(round) => {
                 if *round == Round::Complete {
                     // Record final profits for all players when the game completes
@@ -1277,7 +1282,7 @@ mod tests {
         let hist = Box::new(StatsTrackingHistorian::new_with_num_players(2));
         let storage = hist.get_storage();
 
-        let stacks = vec![100.0; 2];
+        let stacks = vec![100; 2];
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<AllInAgent>::default() as Box<dyn Agent>,
             Box::<AllInAgent>::default() as Box<dyn Agent>,
@@ -1285,7 +1290,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -1306,7 +1311,7 @@ mod tests {
         let hist = Box::new(StatsTrackingHistorian::new_with_num_players(2));
         let storage = hist.get_storage();
 
-        let stacks = vec![100.0; 2];
+        let stacks = vec![100; 2];
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<CallingAgent>::default() as Box<dyn Agent>,
             Box::<CallingAgent>::default() as Box<dyn Agent>,
@@ -1314,7 +1319,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -1335,7 +1340,7 @@ mod tests {
         let hist = Box::new(StatsTrackingHistorian::new_with_num_players(2));
         let storage = hist.get_storage();
 
-        let stacks = vec![100.0; 2];
+        let stacks = vec![100; 2];
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<FoldingAgent>::default() as Box<dyn Agent>,
             Box::<FoldingAgent>::default() as Box<dyn Agent>,
@@ -1343,7 +1348,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -1367,27 +1372,27 @@ mod tests {
     async fn test_replay_agents_had_raises_counted() {
         let hist = Box::new(StatsTrackingHistorian::new_with_num_players(2));
         let storage = hist.get_storage();
-        let stacks = vec![100.0; 2];
+        let stacks = vec![100; 2];
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<VecReplayAgent>::new(VecReplayAgent::new_with_default(
                 "replay-agent-0",
-                vec![AgentAction::Bet(10.0), AgentAction::Bet(40.0)],
-                AgentAction::Bet(0.0),
+                vec![AgentAction::Bet(10), AgentAction::Bet(40)],
+                AgentAction::Bet(0),
             )) as Box<dyn Agent>,
             Box::<VecReplayAgent>::new(VecReplayAgent::new_with_default(
                 "replay-agent-1",
                 vec![
-                    AgentAction::Bet(10.0),
-                    AgentAction::Bet(20.0),
-                    AgentAction::Bet(40.0),
+                    AgentAction::Bet(10),
+                    AgentAction::Bet(20),
+                    AgentAction::Bet(40),
                 ],
-                AgentAction::Bet(0.0),
+                AgentAction::Bet(0),
             )) as Box<dyn Agent>,
         ];
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -1407,13 +1412,13 @@ mod tests {
     async fn test_pfr_tracking() {
         let hist = Box::new(StatsTrackingHistorian::new_with_num_players(2));
         let storage = hist.get_storage();
-        let stacks = vec![100.0; 2];
+        let stacks = vec![100; 2];
 
         // Agent 0 raises preflop, Agent 1 calls
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<VecReplayAgent>::new(VecReplayAgent::new_with_default(
                 "raiser",
-                vec![AgentAction::Bet(20.0)], // Raise preflop
+                vec![AgentAction::Bet(20)], // Raise preflop
                 AgentAction::Call,
             )) as Box<dyn Agent>,
             Box::<VecReplayAgent>::new(VecReplayAgent::new_with_default(
@@ -1425,7 +1430,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -1457,13 +1462,13 @@ mod tests {
     async fn test_call_tracking() {
         let hist = Box::new(StatsTrackingHistorian::new_with_num_players(3));
         let storage = hist.get_storage();
-        let stacks = vec![100.0; 3];
+        let stacks = vec![100; 3];
 
         // Use 3 players with VecReplayAgent to ensure Call actions
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<VecReplayAgent>::new(VecReplayAgent::new_with_default(
                 "raiser",
-                vec![AgentAction::Bet(20.0)], // Raise
+                vec![AgentAction::Bet(20)], // Raise
                 AgentAction::Call,
             )) as Box<dyn Agent>,
             Box::<VecReplayAgent>::new(VecReplayAgent::new_with_default(
@@ -1480,7 +1485,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -1507,7 +1512,7 @@ mod tests {
     async fn test_vpip_calculation() {
         let hist = Box::new(StatsTrackingHistorian::new_with_num_players(2));
         let storage = hist.get_storage();
-        let stacks = vec![100.0; 2];
+        let stacks = vec![100; 2];
 
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<CallingAgent>::default() as Box<dyn Agent>,
@@ -1516,7 +1521,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -1545,20 +1550,20 @@ mod tests {
         let mut stats1 = StatsStorage::new_with_num_players(2);
         stats1.actions_count[0] = 5;
         stats1.vpip_count[0] = 3;
-        stats1.total_profit[0] = 100.0;
+        stats1.total_profit[0] = 100;
         stats1.games_won[0] = 2;
 
         let mut stats2 = StatsStorage::new_with_num_players(2);
         stats2.actions_count[0] = 3;
         stats2.vpip_count[0] = 2;
-        stats2.total_profit[0] = 50.0;
+        stats2.total_profit[0] = 50;
         stats2.games_won[0] = 1;
 
         stats1.merge(&stats2);
 
         assert_eq!(stats1.actions_count[0], 8);
         assert_eq!(stats1.vpip_count[0], 5);
-        assert_eq!(stats1.total_profit[0], 150.0);
+        assert_eq!(stats1.total_profit[0], 150);
         assert_eq!(stats1.games_won[0], 3);
     }
 
@@ -1566,16 +1571,16 @@ mod tests {
     fn test_merge_position_stats() {
         let mut stats1 = StatsStorage::new_with_num_players(2);
         stats1.position_games[0].insert(0, 5);
-        stats1.position_profit[0].insert(0, 100.0);
+        stats1.position_profit[0].insert(0, 100);
 
         let mut stats2 = StatsStorage::new_with_num_players(2);
         stats2.position_games[0].insert(0, 3);
-        stats2.position_profit[0].insert(0, 50.0);
+        stats2.position_profit[0].insert(0, 50);
 
         stats1.merge(&stats2);
 
         assert_eq!(stats1.position_games[0].get(&0), Some(&8));
-        assert_eq!(stats1.position_profit[0].get(&0), Some(&150.0));
+        assert_eq!(stats1.position_profit[0].get(&0), Some(&150));
     }
 
     #[test]
@@ -1603,7 +1608,7 @@ mod tests {
     #[test]
     fn test_profit_per_game() {
         let mut stats = StatsStorage::new_with_num_players(1);
-        stats.total_profit[0] = 300.0;
+        stats.total_profit[0] = 300;
         stats.games_won[0] = 5;
         stats.games_lost[0] = 3;
         stats.games_breakeven[0] = 2;
@@ -1664,7 +1669,7 @@ mod tests {
         let hist = Box::new(StatsTrackingHistorian::new_with_num_players(2));
         let storage = hist.get_storage();
 
-        let stacks = vec![100.0, 100.0];
+        let stacks = vec![100, 100];
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<AllInAgent>::default() as Box<dyn Agent>,
             Box::<FoldingAgent>::default() as Box<dyn Agent>,
@@ -1672,7 +1677,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -1691,7 +1696,7 @@ mod tests {
         // In a zero-sum game, total profit should be very close to zero
         // Allow for small floating point errors
         assert!(
-            total_profit.abs() < 0.01,
+            total_profit == 0,
             "Total profit should be zero (zero-sum), but got: {}. Player 0: {}, Player 1: {}",
             total_profit,
             borrowed.total_profit[0],
@@ -1730,7 +1735,7 @@ mod tests {
         let hist = Box::new(StatsTrackingHistorian::new_with_num_players(3));
         let storage = hist.get_storage();
 
-        let stacks = vec![100.0, 100.0, 100.0];
+        let stacks = vec![100, 100, 100];
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<AllInAgent>::default() as Box<dyn Agent>,
             Box::<CallingAgent>::default() as Box<dyn Agent>,
@@ -1739,7 +1744,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -1758,7 +1763,7 @@ mod tests {
 
         // In a zero-sum game, total profit should be very close to zero
         assert!(
-            total_profit.abs() < 0.01,
+            total_profit == 0,
             "Total profit should be zero (zero-sum), but got: {}. Player profits: [{}, {}, {}]",
             total_profit,
             borrowed.total_profit[0],
@@ -1781,7 +1786,7 @@ mod tests {
         let hist = Box::new(StatsTrackingHistorian::new_with_num_players(2));
         let storage = hist.get_storage();
 
-        let stacks = vec![100.0, 100.0];
+        let stacks = vec![100, 100];
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<AllInAgent>::default() as Box<dyn Agent>,
             Box::<CallingAgent>::default() as Box<dyn Agent>,
@@ -1789,7 +1794,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks.clone())
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -1811,7 +1816,7 @@ mod tests {
             let actual_reward = final_game_state.player_reward(i);
 
             assert!(
-                (tracked_profit - actual_reward).abs() < 0.01,
+                (tracked_profit - actual_reward) == 0,
                 "Player {} tracked profit ({}) should match actual reward ({})",
                 i,
                 tracked_profit,
@@ -2050,7 +2055,7 @@ mod tests {
     #[test]
     fn test_profit_per_game_exact_calculation() {
         let mut stats = StatsStorage::new_with_num_players(1);
-        stats.total_profit[0] = 250.0;
+        stats.total_profit[0] = 250;
         stats.games_won[0] = 3;
         stats.games_lost[0] = 2;
         // 5 total games, 250.0 profit = 50.0 profit per game
@@ -2185,25 +2190,25 @@ mod tests {
         let storage = SharedStatsStorage::new(2);
         let hist = storage.historian();
 
-        let stacks = vec![100.0; 2];
+        let stacks = vec![100; 2];
         // Agent 0 raises, agent 1 re-raises, agent 0 calls
         // Both agents should have exactly 1 VPIP hand despite multiple actions
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<VecReplayAgent>::new(VecReplayAgent::new_with_default(
                 "raiser-caller",
-                vec![AgentAction::Bet(20.0), AgentAction::Call], // Raise then call the 3-bet
+                vec![AgentAction::Bet(20), AgentAction::Call], // Raise then call the 3-bet
                 AgentAction::Call,
             )) as Box<dyn Agent>,
             Box::<VecReplayAgent>::new(VecReplayAgent::new_with_default(
                 "three-better",
-                vec![AgentAction::Bet(40.0)], // 3-bet
+                vec![AgentAction::Bet(40)], // 3-bet
                 AgentAction::Call,
             )) as Box<dyn Agent>,
         ];
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -2249,12 +2254,12 @@ mod tests {
         {
             let mut writer = storage.inner().write().unwrap();
             writer.actions_count[0] = 42;
-            writer.total_profit[0] = 100.0;
+            writer.total_profit[0] = 100;
         }
 
         let snapshot = storage.snapshot();
         assert_eq!(snapshot.actions_count[0], 42);
-        assert_eq!(snapshot.total_profit[0], 100.0);
+        assert_eq!(snapshot.total_profit[0], 100);
     }
 
     #[test]
@@ -2262,7 +2267,7 @@ mod tests {
         let storage = SharedStatsStorage::new(2);
         let mut other = StatsStorage::new_with_num_players(2);
         other.actions_count[0] = 10;
-        other.total_profit[0] = 50.0;
+        other.total_profit[0] = 50;
         other.hands_played[0] = 5;
         other.hands_vpip[0] = 3;
 
@@ -2270,7 +2275,7 @@ mod tests {
 
         let stats = storage.read();
         assert_eq!(stats.actions_count[0], 10);
-        assert_eq!(stats.total_profit[0], 50.0);
+        assert_eq!(stats.total_profit[0], 50);
         assert_eq!(stats.hands_played[0], 5);
         assert_eq!(stats.hands_vpip[0], 3);
     }
@@ -2288,8 +2293,8 @@ mod tests {
     fn test_roi_percent_basic() {
         let mut stats = StatsStorage::new_with_num_players(2);
         // Player 0: invested 100, profit 50 -> ROI = 50%
-        stats.total_invested[0] = 100.0;
-        stats.total_profit[0] = 50.0;
+        stats.total_invested[0] = 100;
+        stats.total_profit[0] = 50;
 
         assert!((stats.roi_percent(0) - 50.0).abs() < 0.01);
     }
@@ -2298,8 +2303,8 @@ mod tests {
     fn test_roi_percent_loss() {
         let mut stats = StatsStorage::new_with_num_players(2);
         // Player 0: invested 100, profit -30 -> ROI = -30%
-        stats.total_invested[0] = 100.0;
-        stats.total_profit[0] = -30.0;
+        stats.total_invested[0] = 100;
+        stats.total_profit[0] = -30;
 
         assert!((stats.roi_percent(0) - (-30.0)).abs() < 0.01);
     }
@@ -2308,8 +2313,8 @@ mod tests {
     fn test_roi_percent_zero_investment() {
         let mut stats = StatsStorage::new_with_num_players(2);
         // Player 0: invested 0 (e.g., folding agent) -> ROI = 0%
-        stats.total_invested[0] = 0.0;
-        stats.total_profit[0] = -10.0; // Lost blinds
+        stats.total_invested[0] = 0;
+        stats.total_profit[0] = -10; // Lost blinds
 
         assert_eq!(stats.roi_percent(0), 0.0);
     }
@@ -2323,7 +2328,7 @@ mod tests {
         let storage = SharedStatsStorage::new(2);
         let hist = storage.historian();
 
-        let stacks = vec![100.0; 2];
+        let stacks = vec![100; 2];
         // Two folders, heads-up. Whoever is in SB folds pre, losing their SB.
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<FoldingAgent>::default() as Box<dyn Agent>,
@@ -2332,7 +2337,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -2368,7 +2373,7 @@ mod tests {
 
         // Player 0 (SB) has a normal stack. Player 1 (BB) has only 3 chips but
         // the big blind is 10 — they can only post 3.
-        let stacks = vec![100.0, 3.0];
+        let stacks = vec![100, 3];
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<FoldingAgent>::default() as Box<dyn Agent>,
             Box::<FoldingAgent>::default() as Box<dyn Agent>,
@@ -2376,7 +2381,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -2390,7 +2395,7 @@ mod tests {
 
         let stats = storage.read();
         assert!(
-            stats.total_invested[1] <= 3.0 + 0.01,
+            stats.total_invested[1] <= 3,
             "Short-stacked BB could only post 3, but total_invested = {}",
             stats.total_invested[1]
         );
@@ -2402,12 +2407,12 @@ mod tests {
         let storage = SharedStatsStorage::new(2);
         let hist = storage.historian();
 
-        let stacks = vec![100.0; 2];
+        let stacks = vec![100; 2];
         // Agent 0 bets, agent 1 folds
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<VecReplayAgent>::new(VecReplayAgent::new_with_default(
                 "bettor",
-                vec![AgentAction::Bet(30.0)], // Bets 30 (puts in 25 more beyond SB of 5)
+                vec![AgentAction::Bet(30)], // Bets 30 (puts in 25 more beyond SB of 5)
                 AgentAction::Fold,
             )) as Box<dyn Agent>,
             Box::<FoldingAgent>::default() as Box<dyn Agent>,
@@ -2415,7 +2420,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -2432,13 +2437,13 @@ mod tests {
         // Player 0 (SB) put in 25 more to make their bet 30 total, plus 5 for the
         // small blind = 30 total.
         assert!(
-            (stats.total_invested[0] - 30.0).abs() < 0.01,
-            "Bettor should have invested SB + voluntary = 30, got {}",
+            stats.total_invested[0] == 10,
+            "Bettor net investment excludes the 20-cent uncalled return, got {}",
             stats.total_invested[0]
         );
         // Player 1 (BB) folded, but still paid the forced big blind.
         assert!(
-            (stats.total_invested[1] - 10.0).abs() < 0.01,
+            (stats.total_invested[1] - 10) == 0,
             "Folder should still have paid the big blind, got {}",
             stats.total_invested[1]
         );
@@ -2450,12 +2455,12 @@ mod tests {
         let storage = SharedStatsStorage::new(2);
         let hist = storage.historian();
 
-        let stacks = vec![100.0; 2];
+        let stacks = vec![100; 2];
         // Agent 0 raises, agent 1 calls
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<VecReplayAgent>::new(VecReplayAgent::new_with_default(
                 "raiser",
-                vec![AgentAction::Bet(20.0)],
+                vec![AgentAction::Bet(20)],
                 AgentAction::Fold,
             )) as Box<dyn Agent>,
             Box::<CallingAgent>::default() as Box<dyn Agent>,
@@ -2463,7 +2468,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -2479,12 +2484,12 @@ mod tests {
         let stats = storage.read();
         // Player 0 (SB) raised to 20, so invested 15 (20 - 5 SB)
         assert!(
-            stats.total_invested[0] > 0.0,
+            stats.total_invested[0] > 0,
             "Raiser should have invested money"
         );
         // Player 1 (BB) called 20, so invested 10 (20 - 10 BB)
         assert!(
-            stats.total_invested[1] > 0.0,
+            stats.total_invested[1] > 0,
             "Caller should have invested money"
         );
     }
@@ -2499,7 +2504,7 @@ mod tests {
         let storage = SharedStatsStorage::new(2);
         let hist = storage.historian();
 
-        let stacks = vec![100.0; 2];
+        let stacks = vec![100; 2];
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<FoldingAgent>::default() as Box<dyn Agent>,
             Box::<FoldingAgent>::default() as Box<dyn Agent>,
@@ -2507,7 +2512,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -2562,7 +2567,7 @@ mod tests {
         let storage = SharedStatsStorage::new(2);
         let hist = storage.historian();
 
-        let stacks = vec![100.0; 2];
+        let stacks = vec![100; 2];
         // Folding agent is SB (position 0), Calling agent is BB (position 1)
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<FoldingAgent>::default() as Box<dyn Agent>,
@@ -2571,7 +2576,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -2612,12 +2617,12 @@ mod tests {
         let storage = SharedStatsStorage::new(2);
         let hist = storage.historian();
 
-        let stacks = vec![100.0; 2];
+        let stacks = vec![100; 2];
         // Raiser is SB, Caller is BB
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<VecReplayAgent>::new(VecReplayAgent::new_with_default(
                 "raiser",
-                vec![AgentAction::Bet(20.0)], // Raise to 20
+                vec![AgentAction::Bet(20)], // Raise to 20
                 AgentAction::Call,
             )) as Box<dyn Agent>,
             Box::<CallingAgent>::default() as Box<dyn Agent>,
@@ -2625,7 +2630,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -2659,7 +2664,7 @@ mod tests {
         let storage = SharedStatsStorage::new(2);
         let hist = storage.historian();
 
-        let stacks = vec![100.0; 2];
+        let stacks = vec![100; 2];
         // SB limps (calls BB), BB checks
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<CallingAgent>::default() as Box<dyn Agent>, // SB limps
@@ -2672,7 +2677,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -2709,7 +2714,7 @@ mod tests {
         let storage = SharedStatsStorage::new(3);
         let hist = storage.historian();
 
-        let stacks = vec![100.0; 3];
+        let stacks = vec![100; 3];
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<FoldingAgent>::default() as Box<dyn Agent>, // UTG
             Box::<FoldingAgent>::default() as Box<dyn Agent>, // SB
@@ -2718,7 +2723,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -2760,7 +2765,7 @@ mod tests {
         let storage = SharedStatsStorage::new(2);
         let hist = storage.historian();
 
-        let stacks = vec![100.0; 2];
+        let stacks = vec![100; 2];
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<AllInAgent>::default() as Box<dyn Agent>, // Goes all-in
             Box::<FoldingAgent>::default() as Box<dyn Agent>, // Folds or bets?
@@ -2768,7 +2773,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -2820,7 +2825,7 @@ mod tests {
             let storage = SharedStatsStorage::new(3);
             let hist = storage.historian();
 
-            let stacks = vec![1000.0; 3]; // Larger stacks to ensure no one busts
+            let stacks = vec![1000; 3]; // Larger stacks to ensure no one busts
             // Mix of opponents like in agent_comparison
             let agents: Vec<Box<dyn Agent>> = vec![
                 Box::<FoldingAgent>::default() as Box<dyn Agent>,
@@ -2830,7 +2835,7 @@ mod tests {
 
             let game_state = GameStateBuilder::new()
                 .stacks(stacks)
-                .blinds(10.0, 5.0)
+                .blinds(10, 5)
                 .build()
                 .unwrap();
 
@@ -2863,7 +2868,7 @@ mod tests {
         let storage = SharedStatsStorage::new(3);
         let hist = storage.historian();
 
-        let stacks = vec![100.0; 3];
+        let stacks = vec![100; 3];
         // Two folders before the third folder - everyone folds
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<FoldingAgent>::default() as Box<dyn Agent>, // UTG - folds
@@ -2873,7 +2878,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -2931,7 +2936,7 @@ mod tests {
                 let storage = SharedStatsStorage::new(3);
                 let hist = storage.historian();
 
-                let stacks = vec![1000.0; 3];
+                let stacks = vec![1000; 3];
 
                 let agents: Vec<Box<dyn Agent>> = perm
                     .iter()
@@ -2952,7 +2957,7 @@ mod tests {
 
                 let game_state = GameStateBuilder::new()
                     .stacks(stacks)
-                    .blinds(10.0, 5.0)
+                    .blinds(10, 5)
                     .build()
                     .unwrap();
 
@@ -3017,7 +3022,7 @@ mod tests {
         let hist = storage.historian();
         let vec_hist = VecHistorian::default();
 
-        let stacks = vec![100.0; 3];
+        let stacks = vec![100; 3];
         // UTG folds, SB (FoldingAgent) faces BB
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<FoldingAgent>::default() as Box<dyn Agent>, // UTG - will fold
@@ -3027,7 +3032,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -3074,7 +3079,7 @@ mod tests {
             let storage = SharedStatsStorage::new(3);
             let hist = storage.historian();
 
-            let stacks = vec![1000.0; 3];
+            let stacks = vec![1000; 3];
             let agents: Vec<Box<dyn Agent>> = vec![
                 Box::<FoldingAgent>::default() as Box<dyn Agent>,
                 Box::new(RandomAgent::default()),
@@ -3083,7 +3088,7 @@ mod tests {
 
             let game_state = GameStateBuilder::new()
                 .stacks(stacks)
-                .blinds(10.0, 5.0)
+                .blinds(10, 5)
                 .build()
                 .unwrap();
 
@@ -3154,7 +3159,7 @@ mod tests {
                 let storage = SharedStatsStorage::new(3);
                 let hist = storage.historian();
 
-                let stacks = vec![1000.0; 3];
+                let stacks = vec![1000; 3];
 
                 let agents: Vec<Box<dyn Agent>> = perm
                     .iter()
@@ -3179,7 +3184,7 @@ mod tests {
 
                 let game_state = GameStateBuilder::new()
                     .stacks(stacks)
-                    .blinds(10.0, 5.0)
+                    .blinds(10, 5)
                     .build()
                     .unwrap();
 
@@ -3260,7 +3265,7 @@ mod tests {
         let vec_hist = VecHistorian::default();
         let vec_storage = vec_hist.get_storage();
 
-        let stacks = vec![1000.0; 3];
+        let stacks = vec![1000; 3];
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::new(RandomAgent::new(
                 "RandomAgg",
@@ -3273,7 +3278,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -3345,12 +3350,12 @@ mod tests {
         let vec_hist = VecHistorian::default();
         let vec_storage = vec_hist.get_storage();
 
-        let stacks = vec![1000.0; 3];
+        let stacks = vec![1000; 3];
         // UTG raises to 40, SB folds, BB (FoldingAgent) should fold
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::new(VecReplayAgent::new_with_default(
                 "Raiser",
-                vec![AgentAction::Bet(40.0)], // UTG raises to 40
+                vec![AgentAction::Bet(40)], // UTG raises to 40
                 AgentAction::Call,
             )),
             Box::new(VecReplayAgent::new_with_default(
@@ -3363,7 +3368,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -3436,7 +3441,7 @@ mod tests {
         let vec_hist = VecHistorian::default();
         let vec_storage = vec_hist.get_storage();
 
-        let stacks = vec![1000.0; 3];
+        let stacks = vec![1000; 3];
         // UTG folds, SB folds, BB (FoldingAgent) wins
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::new(VecReplayAgent::new_with_default(
@@ -3454,7 +3459,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -3534,18 +3539,18 @@ mod tests {
     #[test]
     fn test_position_profit_accessor() {
         let mut stats = StatsStorage::new_with_num_players(2);
-        stats.position_profit[0].insert(0, 100.0);
-        stats.position_profit[0].insert(1, -50.0);
-        stats.position_profit[1].insert(0, -100.0);
-        stats.position_profit[1].insert(1, 50.0);
+        stats.position_profit[0].insert(0, 100);
+        stats.position_profit[0].insert(1, -50);
+        stats.position_profit[1].insert(0, -100);
+        stats.position_profit[1].insert(1, 50);
 
         let profit_0 = stats.position_profit(0);
-        assert_eq!(profit_0.get(&0), Some(&100.0));
-        assert_eq!(profit_0.get(&1), Some(&-50.0));
+        assert_eq!(profit_0.get(&0), Some(&100));
+        assert_eq!(profit_0.get(&1), Some(&-50));
 
         let profit_1 = stats.position_profit(1);
-        assert_eq!(profit_1.get(&0), Some(&-100.0));
-        assert_eq!(profit_1.get(&1), Some(&50.0));
+        assert_eq!(profit_1.get(&0), Some(&-100));
+        assert_eq!(profit_1.get(&1), Some(&50));
     }
 
     #[tokio::test]
@@ -3554,7 +3559,7 @@ mod tests {
         let storage = SharedStatsStorage::new(2);
         let hist = storage.historian();
 
-        let stacks = vec![100.0, 100.0];
+        let stacks = vec![100, 100];
         // AllIn vs Folding - AllIn will win, Folder will lose
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<AllInAgent>::default() as Box<dyn Agent>,
@@ -3563,7 +3568,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -3594,12 +3599,12 @@ mod tests {
 
         // Position profit tracking
         // AllIn agent (pos 0) wins, Folding agent (pos 1) loses
-        let profit_0 = stats.position_profit[0].get(&0).copied().unwrap_or(0.0);
-        let profit_1 = stats.position_profit[1].get(&1).copied().unwrap_or(0.0);
+        let profit_0 = stats.position_profit[0].get(&0).copied().unwrap_or(0);
+        let profit_1 = stats.position_profit[1].get(&1).copied().unwrap_or(0);
 
         // Profits should be opposite (zero-sum)
         assert!(
-            (profit_0 + profit_1).abs() < 0.01,
+            (profit_0 + profit_1) == 0,
             "Position profits should sum to zero, got {} + {} = {}",
             profit_0,
             profit_1,
@@ -3613,7 +3618,7 @@ mod tests {
         let storage = SharedStatsStorage::new(3);
         let hist = storage.historian();
 
-        let stacks = vec![100.0; 3];
+        let stacks = vec![100; 3];
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<AllInAgent>::default() as Box<dyn Agent>,
             Box::<FoldingAgent>::default() as Box<dyn Agent>,
@@ -3622,7 +3627,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -3649,12 +3654,12 @@ mod tests {
         }
 
         // Verify zero-sum across positions
-        let total_position_profit: f32 = (0..3)
-            .map(|p| stats.position_profit[p].get(&p).copied().unwrap_or(0.0))
+        let total_position_profit: Chips = (0..3)
+            .map(|p| stats.position_profit[p].get(&p).copied().unwrap_or(0))
             .sum();
 
         assert!(
-            total_position_profit.abs() < 0.01,
+            total_position_profit == 0,
             "Total position profit should be zero, got {}",
             total_position_profit
         );
@@ -3667,17 +3672,17 @@ mod tests {
         stats1.position_games[0].insert(0, 5);
         stats1.position_games[0].insert(1, 3);
         stats1.position_games[0].insert(2, 2);
-        stats1.position_profit[0].insert(0, 100.0);
-        stats1.position_profit[0].insert(1, -50.0);
-        stats1.position_profit[0].insert(2, 25.0);
+        stats1.position_profit[0].insert(0, 100);
+        stats1.position_profit[0].insert(1, -50);
+        stats1.position_profit[0].insert(2, 25);
 
         let mut stats2 = StatsStorage::new_with_num_players(3);
         stats2.position_games[0].insert(0, 3);
         stats2.position_games[0].insert(1, 4);
         stats2.position_games[0].insert(2, 1);
-        stats2.position_profit[0].insert(0, 50.0);
-        stats2.position_profit[0].insert(1, 30.0);
-        stats2.position_profit[0].insert(2, -10.0);
+        stats2.position_profit[0].insert(0, 50);
+        stats2.position_profit[0].insert(1, 30);
+        stats2.position_profit[0].insert(2, -10);
 
         stats1.merge(&stats2);
 
@@ -3687,9 +3692,9 @@ mod tests {
         assert_eq!(stats1.position_games[0].get(&2), Some(&3)); // 2 + 1
 
         // Verify profits merged correctly
-        assert_eq!(stats1.position_profit[0].get(&0), Some(&150.0)); // 100 + 50
-        assert_eq!(stats1.position_profit[0].get(&1), Some(&-20.0)); // -50 + 30
-        assert_eq!(stats1.position_profit[0].get(&2), Some(&15.0)); // 25 + -10
+        assert_eq!(stats1.position_profit[0].get(&0), Some(&150)); // 100 + 50
+        assert_eq!(stats1.position_profit[0].get(&1), Some(&-20)); // -50 + 30
+        assert_eq!(stats1.position_profit[0].get(&2), Some(&15)); // 25 + -10
     }
 
     #[test]
@@ -3697,19 +3702,19 @@ mod tests {
         // Test merge when players have played different positions
         let mut stats1 = StatsStorage::new_with_num_players(3);
         stats1.position_games[0].insert(0, 5);
-        stats1.position_profit[0].insert(0, 100.0);
+        stats1.position_profit[0].insert(0, 100);
 
         let mut stats2 = StatsStorage::new_with_num_players(3);
         stats2.position_games[0].insert(1, 3);
-        stats2.position_profit[0].insert(1, -50.0);
+        stats2.position_profit[0].insert(1, -50);
 
         stats1.merge(&stats2);
 
         // Both positions should be present after merge
         assert_eq!(stats1.position_games[0].get(&0), Some(&5));
         assert_eq!(stats1.position_games[0].get(&1), Some(&3));
-        assert_eq!(stats1.position_profit[0].get(&0), Some(&100.0));
-        assert_eq!(stats1.position_profit[0].get(&1), Some(&-50.0));
+        assert_eq!(stats1.position_profit[0].get(&0), Some(&100));
+        assert_eq!(stats1.position_profit[0].get(&1), Some(&-50));
     }
 
     #[test]
@@ -3720,29 +3725,29 @@ mod tests {
         // Player 0 won 100 at position 0, lost 50 at position 1
         stats.position_games[0].insert(0, 1);
         stats.position_games[0].insert(1, 1);
-        stats.position_profit[0].insert(0, 100.0);
-        stats.position_profit[0].insert(1, -50.0);
+        stats.position_profit[0].insert(0, 100);
+        stats.position_profit[0].insert(1, -50);
 
         // Player 1 lost 100 at position 0, won 50 at position 1
         stats.position_games[1].insert(0, 1);
         stats.position_games[1].insert(1, 1);
-        stats.position_profit[1].insert(0, -100.0);
-        stats.position_profit[1].insert(1, 50.0);
+        stats.position_profit[1].insert(0, -100);
+        stats.position_profit[1].insert(1, 50);
 
         // Calculate profit per game at each position for player 0
-        let profit_at_0 = *stats.position_profit[0].get(&0).unwrap_or(&0.0);
+        let profit_at_0 = *stats.position_profit[0].get(&0).unwrap_or(&0);
         let games_at_0 = *stats.position_games[0].get(&0).unwrap_or(&0) as f32;
         let ppg_at_0 = if games_at_0 > 0.0 {
-            profit_at_0 / games_at_0
+            profit_at_0 as f32 / games_at_0
         } else {
             0.0
         };
         assert_eq!(ppg_at_0, 100.0);
 
-        let profit_at_1 = *stats.position_profit[0].get(&1).unwrap_or(&0.0);
+        let profit_at_1 = *stats.position_profit[0].get(&1).unwrap_or(&0);
         let games_at_1 = *stats.position_games[0].get(&1).unwrap_or(&0) as f32;
         let ppg_at_1 = if games_at_1 > 0.0 {
-            profit_at_1 / games_at_1
+            profit_at_1 as f32 / games_at_1
         } else {
             0.0
         };
@@ -3779,7 +3784,7 @@ mod tests {
         // Run 10 games
         for seed in 0..10 {
             let hist = storage.historian();
-            let stacks = vec![100.0, 100.0];
+            let stacks = vec![100, 100];
             let agents: Vec<Box<dyn Agent>> = vec![
                 Box::<CallingAgent>::default() as Box<dyn Agent>,
                 Box::<CallingAgent>::default() as Box<dyn Agent>,
@@ -3787,7 +3792,7 @@ mod tests {
 
             let game_state = GameStateBuilder::new()
                 .stacks(stacks)
-                .blinds(10.0, 5.0)
+                .blinds(10, 5)
                 .build()
                 .unwrap();
 
@@ -3816,9 +3821,9 @@ mod tests {
         );
 
         // Total profit should be zero (zero-sum)
-        let total_profit: f32 = stats.total_profit.iter().sum();
+        let total_profit: Chips = stats.total_profit.iter().sum();
         assert!(
-            total_profit.abs() < 0.01,
+            total_profit == 0,
             "Total profit across players should be zero, got {}",
             total_profit
         );
@@ -3831,10 +3836,10 @@ mod tests {
 
         // Player played 4 games at position 0 with profits: +100, -50, +25, -75
         stats.position_games[0].insert(0, 4);
-        stats.position_profit[0].insert(0, 100.0 - 50.0 + 25.0 - 75.0); // = 0.0
+        stats.position_profit[0].insert(0, 100 - 50 + 25 - 75); // = 0
 
-        let profit = stats.position_profit[0].get(&0).copied().unwrap_or(0.0);
-        assert!(profit.abs() < 0.001, "Expected 0.0 profit, got {}", profit);
+        let profit = stats.position_profit[0].get(&0).copied().unwrap_or(0);
+        assert!(profit == 0, "Expected 0 profit, got {}", profit);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3848,7 +3853,7 @@ mod tests {
         // Run 50 games to get statistical significance
         for seed in 0..50 {
             let hist = storage.historian();
-            let stacks = vec![100.0, 100.0];
+            let stacks = vec![100, 100];
             let agents: Vec<Box<dyn Agent>> = vec![
                 Box::<AllInAgent>::default() as Box<dyn Agent>,
                 Box::<CallingAgent>::default() as Box<dyn Agent>,
@@ -3856,7 +3861,7 @@ mod tests {
 
             let game_state = GameStateBuilder::new()
                 .stacks(stacks)
-                .blinds(10.0, 5.0)
+                .blinds(10, 5)
                 .build()
                 .unwrap();
 
@@ -3873,12 +3878,12 @@ mod tests {
         let stats = storage.read();
 
         // Get total position profit for each player
-        let player0_pos_profit: f32 = stats.position_profit[0].values().sum();
-        let player1_pos_profit: f32 = stats.position_profit[1].values().sum();
+        let player0_pos_profit: Chips = stats.position_profit[0].values().sum();
+        let player1_pos_profit: Chips = stats.position_profit[1].values().sum();
 
         // Should be zero-sum
         assert!(
-            (player0_pos_profit + player1_pos_profit).abs() < 0.01,
+            (player0_pos_profit + player1_pos_profit) == 0,
             "Position profits should sum to zero, got {} + {} = {}",
             player0_pos_profit,
             player1_pos_profit,
@@ -3887,13 +3892,13 @@ mod tests {
 
         // Position profit should equal total profit
         assert!(
-            (player0_pos_profit - stats.total_profit[0]).abs() < 0.01,
+            (player0_pos_profit - stats.total_profit[0]) == 0,
             "Player 0 position profit {} should equal total profit {}",
             player0_pos_profit,
             stats.total_profit[0]
         );
         assert!(
-            (player1_pos_profit - stats.total_profit[1]).abs() < 0.01,
+            (player1_pos_profit - stats.total_profit[1]) == 0,
             "Player 1 position profit {} should equal total profit {}",
             player1_pos_profit,
             stats.total_profit[1]
@@ -3911,7 +3916,7 @@ mod tests {
         // Run 30 games
         for seed in 0..30 {
             let hist = storage.historian();
-            let stacks = vec![100.0; 3];
+            let stacks = vec![100; 3];
             let agents: Vec<Box<dyn Agent>> = vec![
                 Box::<AllInAgent>::default() as Box<dyn Agent>,
                 Box::<CallingAgent>::default() as Box<dyn Agent>,
@@ -3920,7 +3925,7 @@ mod tests {
 
             let game_state = GameStateBuilder::new()
                 .stacks(stacks)
-                .blinds(10.0, 5.0)
+                .blinds(10, 5)
                 .build()
                 .unwrap();
 
@@ -3937,11 +3942,11 @@ mod tests {
         let stats = storage.read();
 
         // Get total position profit across all players
-        let total_position_profit: f32 =
+        let total_position_profit: Chips =
             (0..3).flat_map(|p| stats.position_profit[p].values()).sum();
 
         assert!(
-            total_position_profit.abs() < 0.01,
+            total_position_profit == 0,
             "Total position profit should be zero in 3-player game, got {}",
             total_position_profit
         );
@@ -4125,7 +4130,7 @@ mod tests {
     async fn test_fold_count_tracking() {
         let hist = Box::new(StatsTrackingHistorian::new_with_num_players(2));
         let storage = hist.get_storage();
-        let stacks = vec![100.0; 2];
+        let stacks = vec![100; 2];
 
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<FoldingAgent>::default() as Box<dyn Agent>,
@@ -4134,7 +4139,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -4161,17 +4166,17 @@ mod tests {
     async fn test_per_street_action_tracking() {
         let hist = Box::new(StatsTrackingHistorian::new_with_num_players(2));
         let storage = hist.get_storage();
-        let stacks = vec![100.0; 2];
+        let stacks = vec![100; 2];
 
         // One agent bets, one agent calls - this ensures we get post-flop bets and calls
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<VecReplayAgent>::new(VecReplayAgent::new_with_default(
                 "bettor",
                 vec![
-                    AgentAction::Bet(20.0), // Raise preflop
-                    AgentAction::Bet(10.0), // Bet flop
-                    AgentAction::Bet(10.0), // Bet turn
-                    AgentAction::Bet(10.0), // Bet river
+                    AgentAction::Bet(20), // Raise preflop
+                    AgentAction::Bet(10), // Bet flop
+                    AgentAction::Bet(10), // Bet turn
+                    AgentAction::Bet(10), // Bet river
                 ],
                 AgentAction::Call,
             )) as Box<dyn Agent>,
@@ -4189,7 +4194,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -4243,7 +4248,7 @@ mod tests {
     async fn test_cbet_tracking_raiser_bets_flop() {
         let hist = Box::new(StatsTrackingHistorian::new_with_num_players(2));
         let storage = hist.get_storage();
-        let stacks = vec![100.0; 2];
+        let stacks = vec![100; 2];
 
         // Agent 0 raises preflop and bets on flop (c-bet)
         // Agent 1 calls
@@ -4251,8 +4256,8 @@ mod tests {
             Box::<VecReplayAgent>::new(VecReplayAgent::new_with_default(
                 "aggressor",
                 vec![
-                    AgentAction::Bet(20.0), // Raise preflop
-                    AgentAction::Bet(15.0), // Bet on flop (C-Bet)
+                    AgentAction::Bet(20), // Raise preflop
+                    AgentAction::Bet(15), // Bet on flop (C-Bet)
                 ],
                 AgentAction::Call,
             )) as Box<dyn Agent>,
@@ -4268,7 +4273,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -4307,7 +4312,7 @@ mod tests {
         // When BTN raises and pot is unopened (folded to), that's a steal attempt
         let hist = Box::new(StatsTrackingHistorian::new_with_num_players(3));
         let storage = hist.get_storage();
-        let stacks = vec![100.0; 3];
+        let stacks = vec![100; 3];
 
         // In 3-player with dealer at 0:
         // Position 0 = BTN (dealer, acts first preflop in 3-player)
@@ -4318,7 +4323,7 @@ mod tests {
             Box::<VecReplayAgent>::new(VecReplayAgent::new_with_default(
                 "button_stealer",
                 vec![
-                    AgentAction::Bet(20.0), // Raise from button (steal attempt)
+                    AgentAction::Bet(20), // Raise from button (steal attempt)
                 ],
                 AgentAction::Fold,
             )) as Box<dyn Agent>,
@@ -4340,7 +4345,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -4396,7 +4401,7 @@ mod tests {
         // Run multiple games to get showdown scenarios
         for seed in 0..20 {
             let hist = storage.historian();
-            let stacks = vec![100.0; 2];
+            let stacks = vec![100; 2];
 
             // Both players call to showdown
             let agents: Vec<Box<dyn Agent>> = vec![
@@ -4406,7 +4411,7 @@ mod tests {
 
             let game_state = GameStateBuilder::new()
                 .stacks(stacks)
-                .blinds(10.0, 5.0)
+                .blinds(10, 5)
                 .build()
                 .unwrap();
 
@@ -4457,7 +4462,7 @@ mod tests {
         // Run multiple games to get showdown scenarios
         for seed in 0..20 {
             let hist = storage.historian();
-            let stacks = vec![100.0; 2];
+            let stacks = vec![100; 2];
 
             // Both players call to showdown
             let agents: Vec<Box<dyn Agent>> = vec![
@@ -4467,7 +4472,7 @@ mod tests {
 
             let game_state = GameStateBuilder::new()
                 .stacks(stacks)
-                .blinds(10.0, 5.0)
+                .blinds(10, 5)
                 .build()
                 .unwrap();
 
@@ -4606,8 +4611,8 @@ mod tests {
     #[test]
     fn test_roi_percent_calculation() {
         let mut stats = StatsStorage::new_with_num_players(1);
-        stats.total_profit[0] = 100.0;
-        stats.total_invested[0] = 1000.0;
+        stats.total_profit[0] = 100;
+        stats.total_invested[0] = 1000;
 
         // ROI = (100 / 1000) * 100 = 10%
         let roi = stats.roi_percent(0);
@@ -4622,8 +4627,8 @@ mod tests {
     #[test]
     fn test_roi_percent_division() {
         let mut stats = StatsStorage::new_with_num_players(1);
-        stats.total_profit[0] = 50.0;
-        stats.total_invested[0] = 1000.0;
+        stats.total_profit[0] = 50;
+        stats.total_invested[0] = 1000;
 
         // ROI = (50 / 1000) * 100 = 5%
         let roi = stats.roi_percent(0);
@@ -4697,7 +4702,7 @@ mod tests {
         let mut stats1 = StatsStorage::new_with_num_players(1);
         stats1.actions_count[0] = 10;
         stats1.vpip_count[0] = 5;
-        stats1.vpip_total[0] = 100.0;
+        stats1.vpip_total[0] = 100;
         stats1.raise_count[0] = 3;
         stats1.hands_played[0] = 10;
         stats1.hands_vpip[0] = 6;
@@ -4712,7 +4717,7 @@ mod tests {
         let mut stats2 = StatsStorage::new_with_num_players(1);
         stats2.actions_count[0] = 5;
         stats2.vpip_count[0] = 3;
-        stats2.vpip_total[0] = 50.0;
+        stats2.vpip_total[0] = 50;
         stats2.raise_count[0] = 2;
         stats2.hands_played[0] = 5;
         stats2.hands_vpip[0] = 3;
@@ -4728,7 +4733,7 @@ mod tests {
 
         assert_eq!(stats1.actions_count[0], 15); // 10 + 5
         assert_eq!(stats1.vpip_count[0], 8); // 5 + 3
-        assert!((stats1.vpip_total[0] - 150.0).abs() < 0.001); // 100 + 50
+        assert!((stats1.vpip_total[0] - 150) == 0); // 100 + 50
         assert_eq!(stats1.raise_count[0], 5); // 3 + 2
         assert_eq!(stats1.hands_played[0], 15); // 10 + 5
         assert_eq!(stats1.hands_vpip[0], 9); // 6 + 3
@@ -4745,20 +4750,20 @@ mod tests {
     #[test]
     fn test_merge_financial_tracking() {
         let mut stats1 = StatsStorage::new_with_num_players(1);
-        stats1.total_profit[0] = 200.0;
+        stats1.total_profit[0] = 200;
         stats1.games_won[0] = 10;
         stats1.games_lost[0] = 5;
         stats1.games_breakeven[0] = 3;
 
         let mut stats2 = StatsStorage::new_with_num_players(1);
-        stats2.total_profit[0] = -50.0;
+        stats2.total_profit[0] = -50;
         stats2.games_won[0] = 3;
         stats2.games_lost[0] = 4;
         stats2.games_breakeven[0] = 2;
 
         stats1.merge(&stats2);
 
-        assert!((stats1.total_profit[0] - 150.0).abs() < 0.001); // 200 + (-50)
+        assert!((stats1.total_profit[0] - 150) == 0); // 200 + (-50)
         assert_eq!(stats1.games_won[0], 13); // 10 + 3
         assert_eq!(stats1.games_lost[0], 9); // 5 + 4
         assert_eq!(stats1.games_breakeven[0], 5); // 3 + 2
@@ -4878,7 +4883,7 @@ mod tests {
         let storage = SharedStatsStorage::new(2);
         let hist = storage.historian();
 
-        let stacks = vec![100.0, 100.0];
+        let stacks = vec![100, 100];
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<CallingAgent>::default() as Box<dyn Agent>,
             Box::<CallingAgent>::default() as Box<dyn Agent>,
@@ -4886,7 +4891,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -4923,7 +4928,7 @@ mod tests {
         // Run multiple games to ensure we get games that reach all rounds
         for seed in 0..10 {
             let hist = storage.historian();
-            let stacks = vec![100.0, 100.0];
+            let stacks = vec![100, 100];
             let agents: Vec<Box<dyn Agent>> = vec![
                 Box::<CallingAgent>::default() as Box<dyn Agent>,
                 Box::<CallingAgent>::default() as Box<dyn Agent>,
@@ -4931,7 +4936,7 @@ mod tests {
 
             let game_state = GameStateBuilder::new()
                 .stacks(stacks)
-                .blinds(10.0, 5.0)
+                .blinds(10, 5)
                 .build()
                 .unwrap();
 
@@ -4977,7 +4982,7 @@ mod tests {
         // Run games where one player folds early (preflop wins)
         for seed in 0..10 {
             let hist = storage.historian();
-            let stacks = vec![100.0, 100.0];
+            let stacks = vec![100, 100];
             let agents: Vec<Box<dyn Agent>> = vec![
                 Box::<AllInAgent>::default() as Box<dyn Agent>,
                 Box::<FoldingAgent>::default() as Box<dyn Agent>,
@@ -4985,7 +4990,7 @@ mod tests {
 
             let game_state = GameStateBuilder::new()
                 .stacks(stacks)
-                .blinds(10.0, 5.0)
+                .blinds(10, 5)
                 .build()
                 .unwrap();
 
@@ -5014,7 +5019,7 @@ mod tests {
         let storage = SharedStatsStorage::new(2);
         let hist = storage.historian();
 
-        let stacks = vec![100.0, 100.0];
+        let stacks = vec![100, 100];
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<AllInAgent>::default() as Box<dyn Agent>,
             Box::<FoldingAgent>::default() as Box<dyn Agent>,
@@ -5022,7 +5027,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -5056,7 +5061,7 @@ mod tests {
         // Run two separate games and verify each hand is tracked separately
         for seed in 0..2 {
             let hist = storage.historian();
-            let stacks = vec![100.0, 100.0];
+            let stacks = vec![100, 100];
             let agents: Vec<Box<dyn Agent>> = vec![
                 Box::<CallingAgent>::default() as Box<dyn Agent>,
                 Box::<CallingAgent>::default() as Box<dyn Agent>,
@@ -5064,7 +5069,7 @@ mod tests {
 
             let game_state = GameStateBuilder::new()
                 .stacks(stacks)
-                .blinds(10.0, 5.0)
+                .blinds(10, 5)
                 .build()
                 .unwrap();
 
@@ -5097,12 +5102,12 @@ mod tests {
         let storage = SharedStatsStorage::new(2);
         let hist = storage.historian();
 
-        let stacks = vec![100.0, 100.0];
+        let stacks = vec![100, 100];
         // Agent 0 raises (bet action with put_into_pot > 0)
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<VecReplayAgent>::new(VecReplayAgent::new_with_default(
                 "raiser",
-                vec![AgentAction::Bet(30.0)], // Big raise
+                vec![AgentAction::Bet(30)], // Big raise
                 AgentAction::Call,
             )) as Box<dyn Agent>,
             Box::<FoldingAgent>::default() as Box<dyn Agent>,
@@ -5110,7 +5115,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -5137,12 +5142,12 @@ mod tests {
         let storage = SharedStatsStorage::new(2);
         let hist = storage.historian();
 
-        let stacks = vec![100.0, 100.0];
+        let stacks = vec![100, 100];
         // Agent 0 raises, Agent 1 calls (putting in extra money = VPIP)
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<VecReplayAgent>::new(VecReplayAgent::new_with_default(
                 "raiser",
-                vec![AgentAction::Bet(20.0)],
+                vec![AgentAction::Bet(20)],
                 AgentAction::Call,
             )) as Box<dyn Agent>,
             Box::<VecReplayAgent>::new(VecReplayAgent::new_with_default(
@@ -5154,7 +5159,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -5180,7 +5185,7 @@ mod tests {
         let storage = SharedStatsStorage::new(2);
         let hist = storage.historian();
 
-        let stacks = vec![100.0, 100.0];
+        let stacks = vec![100, 100];
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<FoldingAgent>::default() as Box<dyn Agent>,
             Box::<CallingAgent>::default() as Box<dyn Agent>,
@@ -5188,7 +5193,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -5217,7 +5222,7 @@ mod tests {
         let storage = SharedStatsStorage::new(2);
         let hist = storage.historian();
 
-        let stacks = vec![100.0, 100.0];
+        let stacks = vec![100, 100];
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<AllInAgent>::default() as Box<dyn Agent>,
             Box::<CallingAgent>::default() as Box<dyn Agent>,
@@ -5225,7 +5230,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -5256,7 +5261,7 @@ mod tests {
         let storage = SharedStatsStorage::new(2);
         let hist = storage.historian();
 
-        let stacks = vec![100.0, 100.0];
+        let stacks = vec![100, 100];
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<CallingAgent>::default() as Box<dyn Agent>,
             Box::<CallingAgent>::default() as Box<dyn Agent>,
@@ -5264,7 +5269,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -5293,7 +5298,7 @@ mod tests {
         let storage = SharedStatsStorage::new(2);
         let hist = storage.historian();
 
-        let stacks = vec![100.0, 100.0];
+        let stacks = vec![100, 100];
         // Use agents that might cause failed actions (bet too much, etc.)
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<AllInAgent>::default() as Box<dyn Agent>,
@@ -5302,7 +5307,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -5326,7 +5331,7 @@ mod tests {
         let storage = SharedStatsStorage::new(2);
         let hist = storage.historian();
 
-        let stacks = vec![100.0, 100.0];
+        let stacks = vec![100, 100];
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<AllInAgent>::default() as Box<dyn Agent>,
             Box::<FoldingAgent>::default() as Box<dyn Agent>,
@@ -5334,7 +5339,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -5351,7 +5356,7 @@ mod tests {
         let stats = storage.read();
         // One player should have profit
         let total_profit = stats.total_profit[0] + stats.total_profit[1];
-        assert!(total_profit.abs() < 0.01, "Profits should sum to zero");
+        assert!(total_profit == 0, "Profits should sum to zero");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5364,7 +5369,7 @@ mod tests {
 
         for seed in 0..5 {
             let hist = storage.historian();
-            let stacks = vec![100.0, 100.0];
+            let stacks = vec![100, 100];
             // Both players call through to showdown
             let agents: Vec<Box<dyn Agent>> = vec![
                 Box::<CallingAgent>::default() as Box<dyn Agent>,
@@ -5373,7 +5378,7 @@ mod tests {
 
             let game_state = GameStateBuilder::new()
                 .stacks(stacks)
-                .blinds(10.0, 5.0)
+                .blinds(10, 5)
                 .build()
                 .unwrap();
 
@@ -5410,7 +5415,7 @@ mod tests {
 
         for seed in 0..10 {
             let hist = storage.historian();
-            let stacks = vec![100.0, 100.0];
+            let stacks = vec![100, 100];
             let agents: Vec<Box<dyn Agent>> = vec![
                 Box::<CallingAgent>::default() as Box<dyn Agent>,
                 Box::<CallingAgent>::default() as Box<dyn Agent>,
@@ -5418,7 +5423,7 @@ mod tests {
 
             let game_state = GameStateBuilder::new()
                 .stacks(stacks)
-                .blinds(10.0, 5.0)
+                .blinds(10, 5)
                 .build()
                 .unwrap();
 
@@ -5455,7 +5460,7 @@ mod tests {
 
         let storage = SharedStatsStorage::new(2);
         let hist = storage.historian();
-        let stacks = vec![100.0, 100.0];
+        let stacks = vec![100, 100];
         // Both players shove preflop, so both are all-in (and thus removed from
         // player_active) by the time the board runs out to Complete.
         let agents: Vec<Box<dyn Agent>> = vec![
@@ -5473,7 +5478,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -5500,12 +5505,12 @@ mod tests {
         let storage = SharedStatsStorage::new(2);
         let hist = storage.historian();
 
-        let stacks = vec![100.0, 100.0];
+        let stacks = vec![100, 100];
         // Agent 0 raises preflop multiple times if game continues
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<VecReplayAgent>::new(VecReplayAgent::new_with_default(
                 "raiser",
-                vec![AgentAction::Bet(20.0), AgentAction::Bet(60.0)],
+                vec![AgentAction::Bet(20), AgentAction::Bet(60)],
                 AgentAction::Call,
             )) as Box<dyn Agent>,
             Box::<VecReplayAgent>::new(VecReplayAgent::new_with_default(
@@ -5517,7 +5522,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -5549,24 +5554,24 @@ mod tests {
         let storage = SharedStatsStorage::new(2);
         let hist = storage.historian();
 
-        let stacks = vec![200.0, 200.0];
+        let stacks = vec![200, 200];
         // Agent 0 raises, Agent 1 re-raises (3-bet)
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<VecReplayAgent>::new(VecReplayAgent::new_with_default(
                 "raiser",
-                vec![AgentAction::Bet(20.0), AgentAction::Call],
+                vec![AgentAction::Bet(20), AgentAction::Call],
                 AgentAction::Call,
             )) as Box<dyn Agent>,
             Box::<VecReplayAgent>::new(VecReplayAgent::new_with_default(
                 "three-better",
-                vec![AgentAction::Bet(50.0)], // 3-bet
+                vec![AgentAction::Bet(50)], // 3-bet
                 AgentAction::Call,
             )) as Box<dyn Agent>,
         ];
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -5601,14 +5606,14 @@ mod tests {
         let storage = SharedStatsStorage::new(3);
         let hist = storage.historian();
 
-        let stacks = vec![1000.0, 1000.0, 1000.0];
+        let stacks = vec![1000, 1000, 1000];
         let agents: Vec<Box<dyn Agent>> = vec![
             // P0: open-raise to 20, then 4-bet to 120, then call
             Box::new(VecReplayAgent::new_with_default(
                 "open-raiser",
                 vec![
-                    AgentAction::Bet(20.0),
-                    AgentAction::Bet(120.0),
+                    AgentAction::Bet(20),
+                    AgentAction::Bet(120),
                     AgentAction::Call,
                 ],
                 AgentAction::Call,
@@ -5616,7 +5621,7 @@ mod tests {
             // P1: 3-bet to 50, then call
             Box::new(VecReplayAgent::new_with_default(
                 "three-better",
-                vec![AgentAction::Bet(50.0), AgentAction::Call],
+                vec![AgentAction::Bet(50), AgentAction::Call],
                 AgentAction::Call,
             )) as Box<dyn Agent>,
             // P2: fold immediately
@@ -5629,7 +5634,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -5769,10 +5774,10 @@ mod tests {
     #[test]
     fn test_vpip_total_tracking_arithmetic() {
         let mut stats = StatsStorage::new_with_num_players(1);
-        stats.vpip_total[0] = 100.0;
-        stats.vpip_total[0] += 50.0;
+        stats.vpip_total[0] = 100;
+        stats.vpip_total[0] += 50;
         assert!(
-            (stats.vpip_total[0] - 150.0).abs() < 0.01,
+            (stats.vpip_total[0] - 150) == 0,
             "vpip_total should be 100 + 50 = 150"
         );
     }
@@ -5781,10 +5786,10 @@ mod tests {
     #[test]
     fn test_invested_tracking_arithmetic() {
         let mut stats = StatsStorage::new_with_num_players(1);
-        stats.total_invested[0] = 200.0;
-        stats.total_invested[0] += 100.0;
+        stats.total_invested[0] = 200;
+        stats.total_invested[0] += 100;
         assert!(
-            (stats.total_invested[0] - 300.0).abs() < 0.01,
+            (stats.total_invested[0] - 300) == 0,
             "total_invested should be 200 + 100 = 300"
         );
     }
@@ -6002,11 +6007,11 @@ mod tests {
 
         // Simulate accumulated stats (manually set via internal struct)
         // We test this through a full simulation instead
-        let stacks = vec![100.0, 100.0];
+        let stacks = vec![100, 100];
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<VecReplayAgent>::new(VecReplayAgent::new_with_default(
                 "raiser",
-                vec![AgentAction::Bet(20.0)],
+                vec![AgentAction::Bet(20)],
                 AgentAction::Call,
             )) as Box<dyn Agent>,
             Box::<VecReplayAgent>::new(VecReplayAgent::new_with_default(
@@ -6018,7 +6023,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -6046,17 +6051,17 @@ mod tests {
     #[test]
     fn test_total_profit_tracking_arithmetic() {
         let mut stats = StatsStorage::new_with_num_players(1);
-        stats.total_profit[0] = 50.0;
-        stats.total_profit[0] += 25.0;
+        stats.total_profit[0] = 50;
+        stats.total_profit[0] += 25;
         assert!(
-            (stats.total_profit[0] - 75.0).abs() < 0.01,
+            (stats.total_profit[0] - 75) == 0,
             "total_profit should be 50 + 25 = 75"
         );
 
         // Test negative profit (loss)
-        stats.total_profit[0] += -100.0;
+        stats.total_profit[0] += -100;
         assert!(
-            (stats.total_profit[0] - (-25.0)).abs() < 0.01,
+            (stats.total_profit[0] - (-25)) == 0,
             "total_profit should be 75 + (-100) = -25"
         );
     }
@@ -6067,7 +6072,7 @@ mod tests {
         let storage = SharedStatsStorage::new(2);
         let hist = storage.historian();
 
-        let stacks = vec![100.0, 100.0];
+        let stacks = vec![100, 100];
         let agents: Vec<Box<dyn Agent>> = vec![
             Box::<FoldingAgent>::default() as Box<dyn Agent>, // Will lose blinds
             Box::<AllInAgent>::default() as Box<dyn Agent>,   // Will win
@@ -6075,7 +6080,7 @@ mod tests {
 
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -6091,12 +6096,12 @@ mod tests {
         let s = storage.read();
         // Folding agent (player 0) should have lost their blind
         assert!(
-            s.total_profit[0] < 0.0,
+            s.total_profit[0] < 0,
             "Folding agent should have negative profit (lost blind)"
         );
         // All-in agent (player 1) should have won
         assert!(
-            s.total_profit[1] > 0.0,
+            s.total_profit[1] > 0,
             "All-in agent should have positive profit"
         );
     }

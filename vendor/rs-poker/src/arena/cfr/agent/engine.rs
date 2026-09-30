@@ -34,7 +34,7 @@ use little_sorry::{PcfrPlusRegretMatcher, RegretMinimizer};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use smallvec::SmallVec;
-use tracing::event;
+use tracing::{event, instrument::WithSubscriber};
 
 use crate::arena::hand_estimator::sample_world;
 use crate::arena::{
@@ -211,7 +211,7 @@ where
     ///    tree). It applies the candidate action on a cloned state and assumes
     ///    every *subsequent* action (by any player, in any round) is a check
     ///    or call. Remaining community cards are dealt and the pot is
-    ///    distributed with simple one-pot showdown logic. This throws away the
+    ///    distributed with the shared exact main/side-pot settlement. This throws away the
     ///    mutual-best-response signal deep in the tree, but returns a
     ///    realistic showdown reward and has bounded cost.
     async fn compute_reward(
@@ -340,7 +340,7 @@ where
             );
         }
 
-        sim.game_state.player_reward(player_idx as usize)
+        sim.game_state.player_reward(player_idx as usize) as f32
     }
 
     /// Fast-forward reward: apply `action` on a clone, then play the rest of
@@ -350,13 +350,8 @@ where
     /// No CFR sub-agents are spawned and no `HoldemSimulation` is built — we
     /// just mutate a cloned `GameState` directly via the `fast_forward_*`
     /// helpers below, deal the remaining community cards from a reconstructed
-    /// deck, and distribute a single pot at showdown.
-    ///
-    /// Simplifications (per design):
-    /// - One pot only; side pots are collapsed into the main pot.
-    /// - A player who cannot cover the current bet is treated as all-in for
-    ///   what they have and remains eligible for the single pot.
-    /// - Ties split the pot evenly.
+    /// deck, and settle the same main/side pots, shared rake cap, uncalled
+    /// refunds and deterministic odd chips as the recursive simulation.
     fn compute_reward_fast_forward(
         game_state: &GameState,
         action: &AgentAction,
@@ -372,7 +367,7 @@ where
         if contenders <= 1 {
             fast_forward_run_to_showdown(&mut gs, &mut rng);
             fast_forward_distribute_pot(&mut gs);
-            return gs.player_reward(player_idx);
+            return gs.player_reward(player_idx) as f32;
         }
 
         // Try exhaustive board enumeration for improved reward accuracy.
@@ -386,12 +381,7 @@ where
             Round::DealFlop => 3,
             Round::DealTurn => 2, // turn + river
             Round::DealRiver => 1,
-            _ => {
-                // Unexpected round after advancing betting. Fall back.
-                fast_forward_run_to_showdown(&mut gs, &mut rng);
-                fast_forward_distribute_pot(&mut gs);
-                return gs.player_reward(player_idx);
-            }
+            other => panic!("unexpected CFR round after advancing betting: {other:?}"),
         };
 
         // Enumerate all remaining board completions for zero-variance rewards.
@@ -561,7 +551,7 @@ where
         // Penalty for invalid actions - using player's starting stack since
         // losing your whole stack is the worst outcome.
         let invalid_action_penalty =
-            -(game_state.starting_stacks[self.traversal_state.player_idx() as usize]);
+            -(game_state.starting_stacks[self.traversal_state.player_idx() as usize] as f32);
 
         let target_node_idx = self.target_node_idx().unwrap();
 
@@ -741,6 +731,10 @@ where
         let mut diag_stop_cause: StopCause = StopCause::BudgetStop;
 
         loop {
+            // Inline CPU samples can otherwise starve the Tokio deadline
+            // task. Yield before the next complete wave so cancellation is
+            // observed without discarding a partially accumulated vector.
+            tokio::task::yield_now().await;
             // ── Budget / stop check at the WAVE BOUNDARY ──
             //
             // INVARIANT #1: the pre-wave stop check sits before any reward
@@ -956,12 +950,15 @@ where
                     {
                         let ctx = ctx.clone();
                         let gs = gs_arc.clone();
-                        set.spawn(async move {
-                            // Permit is held for the whole subtree's lifetime.
-                            let _permit = permit;
-                            let r = CFRAgent::<T>::compute_reward(&gs, &action, &ctx).await;
-                            (reward_idx, r)
-                        });
+                        set.spawn(
+                            async move {
+                                // Permit is held for the whole subtree's lifetime.
+                                let _permit = permit;
+                                let r = CFRAgent::<T>::compute_reward(&gs, &action, &ctx).await;
+                                (reward_idx, r)
+                            }
+                            .with_current_subscriber(),
+                        );
                         continue;
                     }
                     let r = Self::compute_reward(effective_gs, &action, &ctx).await;
@@ -1122,5 +1119,128 @@ mod wave_tests {
         let mut mean = [0.0f32; 3];
         wave_mean_into(&mut mean, &sums, &counts, penalty);
         assert_eq!(mean, [5.0, -2.0, -7.0]);
+    }
+}
+
+#[cfg(test)]
+mod exact_reward_tests {
+    use super::*;
+    use crate::arena::cfr::action_generator::{
+        ConfigurableActionConfig, ConfigurableActionGenerator,
+    };
+    use crate::arena::{GameStateBuilder, RakeConfig, RakeRate, RakeRounding};
+    use crate::core::Hand;
+    fn context(gs: &GameState, idx: usize) -> ComputeRewardContext<ConfigurableActionGenerator> {
+        let agent = CFRAgentBuilder::<ConfigurableActionGenerator>::new()
+            .name("exact-reward")
+            .player_idx(idx)
+            .cfr_state(CFRState::new(gs.clone()))
+            .traversal_set(TraversalSet::new(gs.num_players))
+            .action_gen_config(ConfigurableActionConfig::default())
+            .build();
+        ComputeRewardContext {
+            traversal_set: agent.traversal_set,
+            traversal_state: agent.traversal_state,
+            cfr_state: agent.cfr_state,
+            action_gen_config: agent.action_gen_config,
+            action_index_mapper: agent.action_index_mapper,
+            limiter: agent.limiter,
+            budget: agent.budget,
+            stop: agent.stop,
+            depth: 0,
+            fast_forward: false,
+            allow_node_mutation: true,
+            estimator: agent.estimator,
+            hand_log: None,
+        }
+    }
+    #[tokio::test]
+    async fn recursive_and_fast_forward_rewards_include_exact_sidepots_rake_and_refunds() {
+        let board = Hand::new_from_str("AsKsQsJsTs").unwrap();
+        let hands = ["2c2d", "3c3d", "4c4d", "5c5d"]
+            .iter()
+            .map(|text| {
+                let mut hand = Hand::new_from_str(text).unwrap();
+                for card in board.iter() {
+                    hand.insert(card);
+                }
+                hand
+            })
+            .collect::<Vec<_>>();
+        let rake = RakeConfig::new(
+            RakeRate::new(5, 100).unwrap(),
+            Some(25),
+            true,
+            RakeRounding::Floor,
+        )
+        .unwrap();
+        let gs = GameStateBuilder::new()
+            .round(Round::Showdown)
+            .blinds(2, 1)
+            .dealer_idx(3)
+            .stacks([0, 0, 0, 500])
+            .player_bet([100, 200, 200, 300])
+            .board(board.iter().collect::<Vec<_>>())
+            .hands(hands)
+            .rake(rake)
+            .build()
+            .unwrap();
+        for (idx, expected) in [-5.0, -6.0, -7.0, -7.0].into_iter().enumerate() {
+            let mut state = gs.clone();
+            state.round_data.to_act_idx = idx;
+            let ctx = context(&state, idx);
+            let recursive = CFRAgent::<ConfigurableActionGenerator>::compute_reward_recursive(
+                &state,
+                &AgentAction::Call,
+                &ctx,
+            )
+            .await;
+            let fast = CFRAgent::<ConfigurableActionGenerator>::compute_reward_fast_forward(
+                &state,
+                &AgentAction::Call,
+                idx,
+            );
+            assert_eq!(recursive, expected);
+            assert_eq!(fast, expected);
+        }
+    }
+    #[tokio::test]
+    async fn recursive_and_fast_forward_rewards_apply_no_flop_no_drop() {
+        let rake = RakeConfig::new(
+            RakeRate::new(5, 100).unwrap(),
+            Some(100),
+            true,
+            RakeRounding::Floor,
+        )
+        .unwrap();
+        let mut gs = GameStateBuilder::new()
+            .round(Round::Preflop)
+            .blinds(2, 1)
+            .stacks([90, 90])
+            .player_bet([10, 10])
+            .rake(rake)
+            .build()
+            .unwrap();
+        gs.player_active.disable(1);
+        gs.round_data.needs_action.disable(1);
+        gs.round_data.to_act_idx = 0;
+        let ctx = context(&gs, 0);
+        assert_eq!(
+            CFRAgent::<ConfigurableActionGenerator>::compute_reward_recursive(
+                &gs,
+                &AgentAction::Call,
+                &ctx
+            )
+            .await,
+            10.0
+        );
+        assert_eq!(
+            CFRAgent::<ConfigurableActionGenerator>::compute_reward_fast_forward(
+                &gs,
+                &AgentAction::Call,
+                0
+            ),
+            10.0
+        );
     }
 }

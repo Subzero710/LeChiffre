@@ -1,3 +1,4 @@
+use crate::arena::Chips;
 use std::path::{Path, PathBuf};
 
 use crate::arena::agent::AgentConfig;
@@ -19,8 +20,8 @@ use super::runner::ArenaComparison;
 /// let comparison = ComparisonBuilder::new()
 ///     .num_games(1000)
 ///     .players_per_table(3)
-///     .big_blind(10.0)
-///     .small_blind(5.0)
+///     .big_blind(10)
+///     .small_blind(5)
 ///     .add_agent_config(AgentConfig::Calling { name: None })
 ///     .add_agent_config(AgentConfig::Folding { name: None })
 ///     .add_agent_config(AgentConfig::AllIn { name: None })
@@ -34,11 +35,11 @@ pub struct ComparisonBuilder {
     agents: Vec<(String, AgentConfig)>,
     num_games: Option<usize>,
     players_per_table: Option<usize>,
-    big_blind: Option<f32>,
-    small_blind: Option<f32>,
+    big_blind: Option<Chips>,
+    small_blind: Option<Chips>,
     min_stack_bb: Option<f32>,
     max_stack_bb: Option<f32>,
-    ante: Option<f32>,
+    ante: Option<Chips>,
     output_dir: Option<PathBuf>,
     seed: Option<u64>,
 }
@@ -62,13 +63,13 @@ impl ComparisonBuilder {
     }
 
     /// Set the big blind amount
-    pub fn big_blind(mut self, big_blind: f32) -> Self {
+    pub fn big_blind(mut self, big_blind: Chips) -> Self {
         self.big_blind = Some(big_blind);
         self
     }
 
     /// Set the small blind amount
-    pub fn small_blind(mut self, small_blind: f32) -> Self {
+    pub fn small_blind(mut self, small_blind: Chips) -> Self {
         self.small_blind = Some(small_blind);
         self
     }
@@ -86,7 +87,7 @@ impl ComparisonBuilder {
     }
 
     /// Set the ante amount
-    pub fn ante(mut self, ante: f32) -> Self {
+    pub fn ante(mut self, ante: Chips) -> Self {
         self.ante = Some(ante);
         self
     }
@@ -154,11 +155,11 @@ impl ComparisonBuilder {
         let config = ComparisonConfig {
             num_games: self.num_games.unwrap_or(1000),
             players_per_table: self.players_per_table.unwrap_or(3),
-            big_blind: self.big_blind.unwrap_or(10.0),
-            small_blind: self.small_blind.unwrap_or(5.0),
+            big_blind: self.big_blind.unwrap_or(10),
+            small_blind: self.small_blind.unwrap_or(5),
             min_stack_bb: self.min_stack_bb.unwrap_or(100.0),
             max_stack_bb: self.max_stack_bb.unwrap_or(100.0),
-            ante: self.ante.unwrap_or(0.0),
+            ante: self.ante.unwrap_or(0),
             output_dir: self.output_dir,
             seed: self.seed,
         };
@@ -279,8 +280,8 @@ mod tests {
 
         assert_eq!(config.num_games, 1000);
         assert_eq!(config.players_per_table, 3);
-        assert_eq!(config.big_blind, 10.0);
-        assert_eq!(config.small_blind, 5.0);
+        assert_eq!(config.big_blind, 10);
+        assert_eq!(config.small_blind, 5);
     }
 
     #[test]
@@ -288,8 +289,8 @@ mod tests {
         let comparison = ComparisonBuilder::new()
             .num_games(500)
             .players_per_table(2)
-            .big_blind(20.0)
-            .small_blind(10.0)
+            .big_blind(20)
+            .small_blind(10)
             .min_stack_bb(50.0)
             .max_stack_bb(150.0)
             .seed(42)
@@ -301,8 +302,8 @@ mod tests {
         let config = comparison.config();
         assert_eq!(config.num_games, 500);
         assert_eq!(config.players_per_table, 2);
-        assert_eq!(config.big_blind, 20.0);
-        assert_eq!(config.small_blind, 10.0);
+        assert_eq!(config.big_blind, 20);
+        assert_eq!(config.small_blind, 10);
         assert_eq!(config.min_stack_bb, 50.0);
         assert_eq!(config.max_stack_bb, 150.0);
         assert_eq!(config.seed, Some(42));

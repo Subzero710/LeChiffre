@@ -47,3 +47,14 @@ pub use converter::*;
 
 #[cfg(feature = "open-hand-history-test-util")]
 pub use test_util::*;
+
+/// Exact decimal currency serialization and parsing.
+pub mod amount;
+
+pub mod room_parser;
+pub use room_parser::*;
+
+#[cfg(feature = "arena")]
+pub mod replay;
+#[cfg(feature = "arena")]
+pub use replay::*;

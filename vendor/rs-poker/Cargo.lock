@@ -1461,6 +1461,7 @@ dependencies = [
  "parking_lot",
  "rand",
  "ratatui",
+ "regex",
  "serde",
  "serde_json",
  "smallvec",

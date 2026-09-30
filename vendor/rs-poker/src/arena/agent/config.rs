@@ -203,9 +203,17 @@ pub enum AgentConfig {
         name: Option<String>,
         /// Probability of folding indexed by raise count
         #[serde(default = "default_percent_fold")]
+        #[cfg_attr(
+            feature = "serde",
+            serde(deserialize_with = "crate::arena::serde_numbers::deserialize")
+        )]
         percent_fold: Vec<f64>,
         /// Probability of calling indexed by raise count
         #[serde(default = "default_percent_call")]
+        #[cfg_attr(
+            feature = "serde",
+            serde(deserialize_with = "crate::arena::serde_numbers::deserialize")
+        )]
         percent_call: Vec<f64>,
     },
     /// Agent that uses Monte Carlo simulation for pot control
@@ -214,6 +222,10 @@ pub enum AgentConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
         /// Probability of calling indexed by raise count
+        #[cfg_attr(
+            feature = "serde",
+            serde(deserialize_with = "crate::arena::serde_numbers::deserialize")
+        )]
         percent_call: Vec<f64>,
     },
     /// CFR agent with depth-based game state iterations
@@ -543,8 +555,8 @@ fn resolve_agent_name(name: &Option<String>, agent_kind: &str, player_idx: usize
 /// use rs_poker::arena::GameStateBuilder;
 ///
 /// let game_state = GameStateBuilder::new()
-///     .num_players_with_stack(2, 100.0)
-///     .blinds(10.0, 5.0)
+///     .num_players_with_stack(2, 100)
+///     .blinds(10, 5)
 ///     .build()
 ///     .unwrap();
 ///
@@ -1141,8 +1153,8 @@ mod tests {
             hand_estimator: EstimatorConfig::default(),
         };
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .build()
             .unwrap();
         let _agent = ConfigAgentBuilder::new(config)
@@ -1166,8 +1178,8 @@ mod tests {
             hand_estimator: EstimatorConfig::default(),
         };
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(3, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(3, 100)
+            .blinds(10, 5)
             .build()
             .unwrap();
         let agent = ConfigAgentBuilder::new(config)
@@ -1186,8 +1198,8 @@ mod tests {
             serde_json::from_str(&json).expect("example config should deserialize");
         assert!(matches!(&config, AgentConfig::CfrConfigurable { .. }));
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .build()
             .unwrap();
         let _agent = ConfigAgentBuilder::new(config)
@@ -1361,8 +1373,8 @@ mod tests {
         use crate::core::{Card, Hand};
 
         let mut game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .build()
             .unwrap();
         game_state.hands[0] = Hand::new_with_cards(vec![Card::from(0), Card::from(1)]);

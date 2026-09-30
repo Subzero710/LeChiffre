@@ -156,29 +156,29 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn test_all_in_for_less() {
         let agent_one = boxed_vec_agent(vec![
-            AgentAction::Bet(10.0),
-            AgentAction::Bet(0.0),
-            AgentAction::Bet(0.0),
-            AgentAction::Bet(690.0),
+            AgentAction::Bet(10),
+            AgentAction::Bet(0),
+            AgentAction::Bet(0),
+            AgentAction::Bet(690),
         ]);
         let agent_two = boxed_vec_agent(vec![
-            AgentAction::Bet(10.0),
-            AgentAction::Bet(0.0),
-            AgentAction::Bet(0.0),
-            AgentAction::Bet(690.0),
+            AgentAction::Bet(10),
+            AgentAction::Bet(0),
+            AgentAction::Bet(0),
+            AgentAction::Bet(690),
         ]);
         let agent_three = boxed_vec_agent(vec![
-            AgentAction::Bet(10.0),
-            AgentAction::Bet(0.0),
-            AgentAction::Bet(0.0),
-            AgentAction::Bet(90.0),
+            AgentAction::Bet(10),
+            AgentAction::Bet(0),
+            AgentAction::Bet(0),
+            AgentAction::Bet(90),
         ]);
-        let agent_four = boxed_vec_agent(vec![AgentAction::Bet(10.0), AgentAction::Fold]);
+        let agent_four = boxed_vec_agent(vec![AgentAction::Bet(10), AgentAction::Fold]);
 
-        let stacks = vec![700.0, 900.0, 100.0, 800.0];
+        let stacks = vec![700, 900, 100, 800];
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
         let agents: Vec<Box<dyn Agent>> = vec![agent_one, agent_two, agent_three, agent_four];
@@ -197,12 +197,12 @@ mod tests {
     async fn test_cant_bet_after_folds() {
         let agent_one = boxed_vec_agent(vec![]);
         let agent_two = boxed_vec_agent(vec![]);
-        let agent_three = boxed_vec_agent(vec![AgentAction::Bet(100.0)]);
+        let agent_three = boxed_vec_agent(vec![AgentAction::Bet(100)]);
 
-        let stacks = vec![100.0, 100.0, 100.0];
+        let stacks = vec![100, 100, 100];
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
         let agents: Vec<Box<dyn Agent>> = vec![agent_one, agent_two, agent_three];
@@ -221,14 +221,14 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_another_three_player() {
-        let sb = 3.0;
-        let bb = 3.0;
+        let sb = 3;
+        let bb = 3;
 
         let agent_one = boxed_vec_agent(vec![AgentAction::Bet(bb), AgentAction::Bet(bb)]);
         let agent_two = boxed_vec_agent(vec![AgentAction::Bet(bb), AgentAction::Bet(bb)]);
         let agent_three = boxed_vec_agent(vec![AgentAction::Fold]);
 
-        let stacks = vec![bb + 5.906776e-3, bb + 5.906776e-39, bb];
+        let stacks = vec![bb + 1, bb + 19, bb];
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
             .blinds(bb, sb)
@@ -253,14 +253,14 @@ mod tests {
         let agent_zero = boxed_vec_agent(vec![AgentAction::Fold]);
         let agent_one = boxed_vec_agent(vec![AgentAction::Fold]);
         let agent_two = boxed_vec_agent(vec![AgentAction::Fold]);
-        let agent_three = boxed_vec_agent(vec![AgentAction::Bet(5.0)]);
-        let agent_four = boxed_vec_agent(vec![AgentAction::Bet(5.0)]);
-        let agent_five = boxed_vec_agent(vec![AgentAction::Bet(259.0), AgentAction::Fold]);
+        let agent_three = boxed_vec_agent(vec![AgentAction::Bet(5)]);
+        let agent_four = boxed_vec_agent(vec![AgentAction::Bet(5)]);
+        let agent_five = boxed_vec_agent(vec![AgentAction::Bet(259), AgentAction::Fold]);
 
-        let stacks = vec![1000.0, 100.0, 1000.0, 5.0, 5.0, 1000.0];
+        let stacks = vec![1000, 100, 1000, 5, 5, 1000];
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(114.0, 96.0)
+            .blinds(114, 96)
             .dealer_idx(210439175936 % 5)
             .build()
             .unwrap();
@@ -291,26 +291,25 @@ mod tests {
         // Previously it would fail as the last two agents in
         // a round both fold leaving orphaned money in the pot.
         let agent_one = boxed_vec_agent(vec![]);
-        let agent_two =
-            boxed_vec_agent(vec![AgentAction::Bet(259.0), AgentAction::Bet(16711936.0)]);
+        let agent_two = boxed_vec_agent(vec![AgentAction::Bet(259), AgentAction::Bet(16711936)]);
         let agent_three = boxed_vec_agent(vec![
-            AgentAction::Bet(259.0),
-            AgentAction::Bet(259.0),
-            AgentAction::Bet(259.0),
+            AgentAction::Bet(259),
+            AgentAction::Bet(259),
+            AgentAction::Bet(259),
             AgentAction::Fold,
         ]);
-        let agent_four = boxed_vec_agent(vec![AgentAction::Bet(57828.0)]);
+        let agent_four = boxed_vec_agent(vec![AgentAction::Bet(57828)]);
         let agent_five = boxed_vec_agent(vec![
-            AgentAction::Bet(259.0),
-            AgentAction::Bet(259.0),
-            AgentAction::Bet(259.0),
+            AgentAction::Bet(259),
+            AgentAction::Bet(259),
+            AgentAction::Bet(259),
             AgentAction::Fold,
         ]);
 
-        let stacks = vec![22784.0, 260.0, 65471.0, 255.0, 65471.0];
+        let stacks = vec![22784, 260, 65471, 255, 65471];
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(114.0, 96.0)
+            .blinds(114, 96)
             .dealer_idx(210439175936 % 5)
             .build()
             .unwrap();
@@ -339,11 +338,11 @@ mod tests {
             AgentAction::Fold,
         ]);
         let agent_one = boxed_vec_agent(vec![]);
-        let stacks = vec![2.8460483e26, 53477376.0];
+        let stacks = vec![i64::MAX / 2, 53477376];
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .big_blind(8365616.5)
-            .small_blind(0.0)
+            .big_blind(8_365_617)
+            .small_blind(0)
             .dealer_idx(1)
             .build()
             .unwrap();
@@ -371,11 +370,11 @@ mod tests {
         let agent_two = boxed_vec_agent(vec![AgentAction::Call]);
         let agent_three = boxed_vec_agent(vec![AgentAction::Call, AgentAction::Call]);
 
-        let stacks = vec![50000.0, 50000.0, 50000.0, 50000.0];
+        let stacks = vec![50000, 50000, 50000, 50000];
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .big_blind(50.0)
-            .small_blind(3.59e-43)
+            .big_blind(50)
+            .small_blind(1)
             .dealer_idx(1)
             .build()
             .unwrap();
@@ -405,7 +404,7 @@ mod tests {
     #[test]
     fn test_slice_replay_agent_name() {
         use super::SliceReplayAgent;
-        let actions = vec![AgentAction::Fold, AgentAction::Bet(10.0)];
+        let actions = vec![AgentAction::Fold, AgentAction::Bet(10)];
         let agent = SliceReplayAgent::new("SliceAgentName", &actions);
         assert_eq!(agent.name(), "SliceAgentName");
         assert!(!agent.name().is_empty());
@@ -417,28 +416,28 @@ mod tests {
     async fn test_slice_replay_agent_index_increment() {
         use super::SliceReplayAgent;
         let actions = vec![
-            AgentAction::Bet(10.0),
-            AgentAction::Bet(20.0),
-            AgentAction::Bet(30.0),
+            AgentAction::Bet(10),
+            AgentAction::Bet(20),
+            AgentAction::Bet(30),
         ];
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .build()
             .unwrap();
         let mut agent = SliceReplayAgent::new("TestAgent", &actions);
 
         // First call should return first action
         let action1 = agent.act(0, &game_state).await;
-        assert_eq!(action1, AgentAction::Bet(10.0));
+        assert_eq!(action1, AgentAction::Bet(10));
 
         // Second call should return second action (idx incremented by 1, not multiplied/subtracted)
         let action2 = agent.act(0, &game_state).await;
-        assert_eq!(action2, AgentAction::Bet(20.0));
+        assert_eq!(action2, AgentAction::Bet(20));
 
         // Third call should return third action
         let action3 = agent.act(0, &game_state).await;
-        assert_eq!(action3, AgentAction::Bet(30.0));
+        assert_eq!(action3, AgentAction::Bet(30));
 
         // Fourth call should return default (exhausted)
         let action4 = agent.act(0, &game_state).await;
@@ -474,13 +473,13 @@ mod tests {
         // - Preflop: Checks (calls matching bet)
         // - Flop: Bets 20, then calls the all-in raise
         let agent_one = boxed_vec_agent_with_default(
-            vec![AgentAction::Call, AgentAction::Bet(20.0), AgentAction::Call],
+            vec![AgentAction::Call, AgentAction::Bet(20), AgentAction::Call],
             AgentAction::Fold,
         );
 
         let game_state = GameStateBuilder::new()
-            .stacks(vec![100.0, 1000.0])
-            .blinds(10.0, 5.0)
+            .stacks(vec![100, 1000])
+            .blinds(10, 5)
             .build()
             .unwrap();
         let agents: Vec<Box<dyn Agent>> = vec![agent_zero, agent_one];
@@ -545,8 +544,8 @@ mod tests {
         );
 
         let game_state = GameStateBuilder::new()
-            .stacks(vec![1000.0, 8.0])
-            .blinds(10.0, 5.0)
+            .stacks(vec![1000, 8])
+            .blinds(10, 5)
             .build()
             .unwrap();
         let agents: Vec<Box<dyn Agent>> = vec![agent_zero, agent_one];
@@ -600,8 +599,8 @@ mod tests {
         let agent_one = boxed_vec_agent_with_default(vec![AgentAction::Call], AgentAction::Call);
 
         let game_state = GameStateBuilder::new()
-            .stacks(vec![1000.0, 8.0])
-            .blinds(10.0, 5.0)
+            .stacks(vec![1000, 8])
+            .blinds(10, 5)
             .build()
             .unwrap();
         let agents: Vec<Box<dyn Agent>> = vec![agent_zero, agent_one];
@@ -700,9 +699,9 @@ mod tests {
             AgentAction::Fold, // Should never be used since player is all-in
         );
 
-        let stacks = vec![3.6171875, 3.6171875];
-        let sb = 0.052481495;
-        let bb = 2.0042896;
+        let stacks = vec![362, 362];
+        let sb = 5;
+        let bb = 200;
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
             .blinds(bb, sb)
@@ -770,10 +769,10 @@ mod tests {
         // - River: Goes all-in
         let agent_zero = boxed_vec_agent_with_default(
             vec![
-                AgentAction::Call,     // preflop: call BB
-                AgentAction::Bet(0.0), // flop: check
-                AgentAction::Bet(0.0), // turn: check
-                AgentAction::AllIn,    // river: all-in
+                AgentAction::Call,   // preflop: call BB
+                AgentAction::Bet(0), // flop: check
+                AgentAction::Bet(0), // turn: check
+                AgentAction::AllIn,  // river: all-in
             ],
             AgentAction::Fold,
         );
@@ -786,17 +785,17 @@ mod tests {
         // - River: Folds to the all-in
         let agent_one = boxed_vec_agent_with_default(
             vec![
-                AgentAction::Call,     // preflop: check
-                AgentAction::Bet(0.0), // flop: check
-                AgentAction::Bet(0.0), // turn: check
-                AgentAction::Fold,     // river: fold to all-in
+                AgentAction::Call,   // preflop: check
+                AgentAction::Bet(0), // flop: check
+                AgentAction::Bet(0), // turn: check
+                AgentAction::Fold,   // river: fold to all-in
             ],
             AgentAction::Fold,
         );
 
         let game_state = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0])
-            .blinds(10.0, 5.0)
+            .stacks(vec![100, 100])
+            .blinds(10, 5)
             .build()
             .unwrap();
         let agents: Vec<Box<dyn Agent>> = vec![agent_zero, agent_one];
@@ -858,7 +857,7 @@ mod tests {
 
         // P0 should win the pot (P1 folded)
         assert!(
-            sim.game_state.player_reward(0) > 0.0,
+            sim.game_state.player_reward(0) > 0,
             "P0 should profit from P1's fold, got reward {}",
             sim.game_state.player_reward(0)
         );
@@ -890,10 +889,10 @@ mod tests {
         // - River: Goes all-in
         let agent_one = boxed_vec_agent_with_default(
             vec![
-                AgentAction::Call,     // preflop
-                AgentAction::Bet(0.0), // flop: check
-                AgentAction::Bet(0.0), // turn: check
-                AgentAction::AllIn,    // river: all-in
+                AgentAction::Call,   // preflop
+                AgentAction::Bet(0), // flop: check
+                AgentAction::Bet(0), // turn: check
+                AgentAction::AllIn,  // river: all-in
             ],
             AgentAction::Fold,
         );
@@ -906,17 +905,17 @@ mod tests {
         // - River: Folds to all-in
         let agent_two = boxed_vec_agent_with_default(
             vec![
-                AgentAction::Call,     // preflop: check
-                AgentAction::Bet(0.0), // flop: check
-                AgentAction::Bet(0.0), // turn: check
-                AgentAction::Fold,     // river: fold to all-in
+                AgentAction::Call,   // preflop: check
+                AgentAction::Bet(0), // flop: check
+                AgentAction::Bet(0), // turn: check
+                AgentAction::Fold,   // river: fold to all-in
             ],
             AgentAction::Fold,
         );
 
         let game_state = GameStateBuilder::new()
-            .stacks(vec![100.0, 100.0, 100.0])
-            .blinds(10.0, 5.0)
+            .stacks(vec![100, 100, 100])
+            .blinds(10, 5)
             .build()
             .unwrap();
         let agents: Vec<Box<dyn Agent>> = vec![agent_zero, agent_one, agent_two];

@@ -1,4 +1,4 @@
-use approx::abs_diff_eq;
+use crate::arena::Chips;
 
 use crate::arena::{GameState, action::AgentAction};
 
@@ -38,14 +38,14 @@ pub const ACTION_IDX_ALL_IN: usize = 14;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ActionIndexMapperConfig {
     /// Minimum bet amount for the mapping range (typically big blind).
-    pub min_bet: f32,
+    pub min_bet: Chips,
     /// Maximum bet amount for the mapping range (typically second largest stack).
-    pub max_bet: f32,
+    pub max_bet: Chips,
 }
 
 impl ActionIndexMapperConfig {
     /// Create a new configuration with the specified bet range.
-    pub fn new(min_bet: f32, max_bet: f32) -> Self {
+    pub fn new(min_bet: Chips, max_bet: Chips) -> Self {
         Self { min_bet, max_bet }
     }
 
@@ -68,12 +68,12 @@ impl ActionIndexMapperConfig {
 /// Returns `(min_bet, max_bet)` where:
 /// - `min_bet` is the big blind
 /// - `max_bet` is the second largest stack (or largest stack if only one player)
-pub fn compute_effective_range(game_state: &GameState) -> (f32, f32) {
+pub fn compute_effective_range(game_state: &GameState) -> (Chips, Chips) {
     let min_bet = game_state.big_blind;
 
     // Find the two largest starting stacks to determine effective stack
-    let mut stacks: Vec<f32> = game_state.starting_stacks.to_vec();
-    stacks.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let mut stacks: Vec<Chips> = game_state.starting_stacks.to_vec();
+    stacks.sort_by(|a, b| b.cmp(a));
 
     let max_bet = if stacks.len() >= 2 {
         // Second largest stack is the effective stack
@@ -82,12 +82,11 @@ pub fn compute_effective_range(game_state: &GameState) -> (f32, f32) {
         // Single player - use their stack
         stacks[0]
     } else {
-        // Fallback - use big blind * 100
-        min_bet * 100.0
+        panic!("action mapper requires at least one stack")
     };
 
     // Ensure max_bet is at least min_bet to avoid division issues
-    let max_bet = max_bet.max(min_bet * 2.0);
+    let max_bet = max_bet.max(min_bet.saturating_mul(2));
 
     (min_bet, max_bet)
 }
@@ -170,9 +169,9 @@ impl ActionIndexMapper {
     pub fn action_to_idx_raw(
         &self,
         action: &AgentAction,
-        current_round_bet: f32,
-        current_player_bet: f32,
-        current_player_stack: f32,
+        current_round_bet: Chips,
+        current_player_bet: Chips,
+        current_player_stack: Chips,
     ) -> usize {
         match action {
             AgentAction::Fold => ACTION_IDX_FOLD,
@@ -183,15 +182,15 @@ impl ActionIndexMapper {
                 // This is important because when call amount == all-in amount
                 // (e.g., calling uses entire stack), we want to treat it as a call
                 // not an all-in raise.
-                if abs_diff_eq!(*amount, current_round_bet) {
+                if *amount == current_round_bet {
                     return ACTION_IDX_CALL;
                 }
 
                 // Check if this bet is actually an all-in
                 let all_in_amount = current_player_bet + current_player_stack;
 
-                // If the bet is approximately equal to all-in, treat it as all-in
-                if abs_diff_eq!(*amount, all_in_amount) {
+                // Treat an exact all-in amount as the all-in action.
+                if *amount == all_in_amount {
                     return ACTION_IDX_ALL_IN;
                 }
 
@@ -206,7 +205,7 @@ impl ActionIndexMapper {
     /// Bets <= min_bet map to ACTION_IDX_RAISE_MIN.
     /// Bets >= max_bet map to ACTION_IDX_RAISE_MAX.
     /// Bets in between are distributed logarithmically across the raise range.
-    fn bet_to_index(&self, bet: f32) -> usize {
+    fn bet_to_index(&self, bet: Chips) -> usize {
         let min_bet = self.config.min_bet;
         let max_bet = self.config.max_bet;
 
@@ -218,15 +217,15 @@ impl ActionIndexMapper {
         }
 
         // Use logarithmic interpolation
-        let log_min = min_bet.ln();
-        let log_max = max_bet.ln();
-        let log_bet = bet.ln();
+        let log_min = (min_bet as f64).ln();
+        let log_max = (max_bet as f64).ln();
+        let log_bet = (bet as f64).ln();
 
         // Compute fraction in log space
         let fraction = (log_bet - log_min) / (log_max - log_min);
 
         // Map to raise index range
-        let num_slots = (ACTION_IDX_RAISE_MAX - ACTION_IDX_RAISE_MIN) as f32;
+        let num_slots = (ACTION_IDX_RAISE_MAX - ACTION_IDX_RAISE_MIN) as f64;
         let index = ACTION_IDX_RAISE_MIN + (fraction * num_slots).round() as usize;
 
         // Clamp to valid range
@@ -236,24 +235,34 @@ impl ActionIndexMapper {
     /// Map an index back to an approximate bet amount.
     ///
     /// This is the inverse of `bet_to_index` and is useful for debugging
-    /// or for generating representative bet amounts for each index.
-    pub fn index_to_bet(&self, index: usize) -> Option<f32> {
+    /// or for generating representative bet amounts for each index. Interior
+    /// amounts round to the nearest cent with ties up. Endpoints and the final
+    /// bounds use integer comparisons, preserving them above f64's exact range.
+    pub fn index_to_bet(&self, index: usize) -> Option<Chips> {
         match index {
             ACTION_IDX_FOLD | ACTION_IDX_CALL | ACTION_IDX_ALL_IN => None,
             idx if (ACTION_IDX_RAISE_MIN..=ACTION_IDX_RAISE_MAX).contains(&idx) => {
                 let min_bet = self.config.min_bet;
                 let max_bet = self.config.max_bet;
 
-                let log_min = min_bet.ln();
-                let log_max = max_bet.ln();
+                if idx == ACTION_IDX_RAISE_MIN {
+                    return Some(min_bet);
+                }
+                if idx == ACTION_IDX_RAISE_MAX {
+                    return Some(max_bet);
+                }
+
+                let log_min = (min_bet as f64).ln();
+                let log_max = (max_bet as f64).ln();
 
                 // Compute fraction from index
-                let num_slots = (ACTION_IDX_RAISE_MAX - ACTION_IDX_RAISE_MIN) as f32;
-                let fraction = (idx - ACTION_IDX_RAISE_MIN) as f32 / num_slots;
+                let num_slots = (ACTION_IDX_RAISE_MAX - ACTION_IDX_RAISE_MIN) as f64;
+                let fraction = (idx - ACTION_IDX_RAISE_MIN) as f64 / num_slots;
 
                 // Convert back from log space
                 let log_bet = log_min + fraction * (log_max - log_min);
-                Some(log_bet.exp())
+                let representative = log_bet.exp().round() as Chips;
+                Some(representative.clamp(min_bet, max_bet))
             }
             _ => None,
         }
@@ -267,14 +276,14 @@ mod tests {
 
     fn create_test_game_state() -> GameState {
         GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .build()
             .unwrap()
     }
 
     fn create_mapper() -> ActionIndexMapper {
-        ActionIndexMapper::new(ActionIndexMapperConfig::new(10.0, 100.0))
+        ActionIndexMapper::new(ActionIndexMapperConfig::new(10, 100))
     }
 
     // === Basic action mapping tests ===
@@ -341,15 +350,15 @@ mod tests {
 
     #[test]
     fn test_raises_spread_across_indices() {
-        let mapper = ActionIndexMapper::new(ActionIndexMapperConfig::new(10.0, 1000.0));
+        let mapper = ActionIndexMapper::new(ActionIndexMapperConfig::new(10, 1000));
         let game_state = create_test_game_state();
 
         // Small raise should map to lower index
-        let small_raise_idx = mapper.action_to_idx(&AgentAction::Bet(20.0), &game_state);
+        let small_raise_idx = mapper.action_to_idx(&AgentAction::Bet(20), &game_state);
         assert!((ACTION_IDX_RAISE_MIN..=ACTION_IDX_RAISE_MAX).contains(&small_raise_idx));
 
         // Large raise should map to higher index
-        let large_raise_idx = mapper.action_to_idx(&AgentAction::Bet(500.0), &game_state);
+        let large_raise_idx = mapper.action_to_idx(&AgentAction::Bet(500), &game_state);
         assert!((ACTION_IDX_RAISE_MIN..=ACTION_IDX_RAISE_MAX).contains(&large_raise_idx));
 
         // Large raise should have higher index than small raise
@@ -358,19 +367,19 @@ mod tests {
 
     #[test]
     fn test_min_bet_maps_to_raise_min() {
-        let mapper = ActionIndexMapper::new(ActionIndexMapperConfig::new(10.0, 100.0));
+        let mapper = ActionIndexMapper::new(ActionIndexMapperConfig::new(10, 100));
         let game_state = create_test_game_state();
 
-        let idx = mapper.action_to_idx(&AgentAction::Bet(10.0), &game_state);
+        let idx = mapper.action_to_idx(&AgentAction::Bet(10), &game_state);
         assert_eq!(idx, ACTION_IDX_RAISE_MIN);
     }
 
     #[test]
     fn test_bet_below_min_maps_to_raise_min() {
-        let mapper = ActionIndexMapper::new(ActionIndexMapperConfig::new(10.0, 100.0));
+        let mapper = ActionIndexMapper::new(ActionIndexMapperConfig::new(10, 100));
         let game_state = create_test_game_state();
 
-        let idx = mapper.action_to_idx(&AgentAction::Bet(5.0), &game_state);
+        let idx = mapper.action_to_idx(&AgentAction::Bet(5), &game_state);
         assert_eq!(idx, ACTION_IDX_RAISE_MIN);
     }
 
@@ -378,14 +387,14 @@ mod tests {
     fn test_bet_at_max_maps_to_raise_max() {
         // Use a custom game state where 100 is not the all-in amount
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 200.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 200)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
-        let mapper = ActionIndexMapper::new(ActionIndexMapperConfig::new(10.0, 100.0));
+        let mapper = ActionIndexMapper::new(ActionIndexMapperConfig::new(10, 100));
 
-        let idx = mapper.action_to_idx(&AgentAction::Bet(100.0), &game_state);
+        let idx = mapper.action_to_idx(&AgentAction::Bet(100), &game_state);
         assert_eq!(idx, ACTION_IDX_RAISE_MAX);
     }
 
@@ -393,14 +402,14 @@ mod tests {
     fn test_bet_above_max_maps_to_raise_max() {
         // Use a custom game state where 150 is not the all-in amount
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 200.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 200)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
-        let mapper = ActionIndexMapper::new(ActionIndexMapperConfig::new(10.0, 100.0));
+        let mapper = ActionIndexMapper::new(ActionIndexMapperConfig::new(10, 100));
 
-        let idx = mapper.action_to_idx(&AgentAction::Bet(150.0), &game_state);
+        let idx = mapper.action_to_idx(&AgentAction::Bet(150), &game_state);
         // This should map to raise_max since 150 > 100 but < all-in (200)
         assert_eq!(idx, ACTION_IDX_RAISE_MAX);
     }
@@ -409,10 +418,10 @@ mod tests {
 
     #[test]
     fn test_log_distribution_midpoint() {
-        let mapper = ActionIndexMapper::new(ActionIndexMapperConfig::new(10.0, 1000.0));
+        let mapper = ActionIndexMapper::new(ActionIndexMapperConfig::new(10, 1000));
 
         // Geometric mean of 10 and 1000 is sqrt(10 * 1000) = 100
-        let midpoint_idx = mapper.bet_to_index(100.0);
+        let midpoint_idx = mapper.bet_to_index(100);
 
         // Should be roughly in the middle of the range (index 26)
         let mid_idx = (ACTION_IDX_RAISE_MIN + ACTION_IDX_RAISE_MAX) / 2;
@@ -426,7 +435,7 @@ mod tests {
 
     #[test]
     fn test_index_to_bet_roundtrip() {
-        let mapper = ActionIndexMapper::new(ActionIndexMapperConfig::new(10.0, 1000.0));
+        let mapper = ActionIndexMapper::new(ActionIndexMapperConfig::new(10, 1000));
 
         // Test that index_to_bet is a reasonable inverse of bet_to_index
         for idx in ACTION_IDX_RAISE_MIN..=ACTION_IDX_RAISE_MAX {
@@ -442,66 +451,92 @@ mod tests {
         }
     }
 
+    #[test]
+    fn representative_bets_preserve_large_integer_bounds() {
+        for (min_bet, max_bet) in [
+            (9_007_199_254_740_993, 9_007_199_254_741_101),
+            (Chips::MAX - 1_000, Chips::MAX - 1),
+        ] {
+            let mapper = ActionIndexMapper::new(ActionIndexMapperConfig::new(min_bet, max_bet));
+            assert_eq!(mapper.index_to_bet(ACTION_IDX_RAISE_MIN), Some(min_bet));
+            assert_eq!(mapper.index_to_bet(ACTION_IDX_RAISE_MAX), Some(max_bet));
+            for idx in ACTION_IDX_RAISE_MIN..=ACTION_IDX_RAISE_MAX {
+                let bet = mapper.index_to_bet(idx).unwrap();
+                assert!((min_bet..=max_bet).contains(&bet));
+            }
+        }
+    }
+
+    #[test]
+    fn effective_range_doubling_stays_within_the_ledger() {
+        let game_state = GameStateBuilder::new()
+            .stacks([1, 1])
+            .blinds(Chips::MAX, Chips::MAX / 2)
+            .build()
+            .unwrap();
+        assert_eq!(compute_effective_range(&game_state), (Chips::MAX, Chips::MAX));
+    }
+
     // === Configuration tests ===
 
     #[test]
     fn test_compute_effective_range() {
         let game_state = GameStateBuilder::new()
-            .stacks(vec![100.0, 200.0, 150.0])
-            .blinds(10.0, 5.0)
+            .stacks(vec![100, 200, 150])
+            .blinds(10, 5)
             .build()
             .unwrap();
 
         let (min_bet, max_bet) = compute_effective_range(&game_state);
 
         // min_bet should be big blind
-        assert_eq!(min_bet, 10.0);
+        assert_eq!(min_bet, 10);
 
-        // max_bet should be second largest stack (150.0)
-        assert_eq!(max_bet, 150.0);
+        // max_bet should be second largest stack (150)
+        assert_eq!(max_bet, 150);
     }
 
     #[test]
     fn test_compute_effective_range_two_players() {
         let game_state = GameStateBuilder::new()
-            .stacks(vec![100.0, 200.0])
-            .blinds(10.0, 5.0)
+            .stacks(vec![100, 200])
+            .blinds(10, 5)
             .build()
             .unwrap();
 
         let (min_bet, max_bet) = compute_effective_range(&game_state);
 
-        assert_eq!(min_bet, 10.0);
-        // Second largest is 100.0
-        assert_eq!(max_bet, 100.0);
+        assert_eq!(min_bet, 10);
+        // Second largest is 100
+        assert_eq!(max_bet, 100);
     }
 
     #[test]
     fn test_config_from_game_state() {
         let game_state = GameStateBuilder::new()
-            .stacks(vec![100.0, 200.0])
-            .blinds(10.0, 5.0)
+            .stacks(vec![100, 200])
+            .blinds(10, 5)
             .build()
             .unwrap();
 
         let config = ActionIndexMapperConfig::from_game_state(&game_state);
 
-        assert_eq!(config.min_bet, 10.0);
-        assert_eq!(config.max_bet, 100.0);
+        assert_eq!(config.min_bet, 10);
+        assert_eq!(config.max_bet, 100);
     }
 
     #[test]
     fn test_mapper_from_game_state() {
         let game_state = GameStateBuilder::new()
-            .stacks(vec![100.0, 200.0])
-            .blinds(10.0, 5.0)
+            .stacks(vec![100, 200])
+            .blinds(10, 5)
             .build()
             .unwrap();
 
         let mapper = ActionIndexMapper::from_game_state(&game_state);
 
-        assert_eq!(mapper.config().min_bet, 10.0);
-        assert_eq!(mapper.config().max_bet, 100.0);
+        assert_eq!(mapper.config().min_bet, 10);
+        assert_eq!(mapper.config().max_bet, 100);
     }
 
     // === Edge case tests ===
@@ -510,15 +545,15 @@ mod tests {
     fn test_small_pot_edge_case() {
         // Very small pot where all bets might cluster at low indices
         let game_state = GameStateBuilder::new()
-            .stacks(vec![10.0, 10.0])
-            .blinds(1.0, 0.5)
+            .stacks(vec![10, 10])
+            .blinds(2, 1)
             .build()
             .unwrap();
 
         let mapper = ActionIndexMapper::from_game_state(&game_state);
 
         // Should still produce valid indices
-        let idx = mapper.action_to_idx(&AgentAction::Bet(5.0), &game_state);
+        let idx = mapper.action_to_idx(&AgentAction::Bet(5), &game_state);
         assert!((ACTION_IDX_RAISE_MIN..=ACTION_IDX_RAISE_MAX).contains(&idx));
     }
 
@@ -526,8 +561,8 @@ mod tests {
     fn test_all_in_close_to_min_raise() {
         // Edge case where all-in is very close to min raise
         let game_state = GameStateBuilder::new()
-            .stacks(vec![12.0, 100.0])
-            .blinds(10.0, 5.0)
+            .stacks(vec![12, 100])
+            .blinds(10, 5)
             .build()
             .unwrap();
 

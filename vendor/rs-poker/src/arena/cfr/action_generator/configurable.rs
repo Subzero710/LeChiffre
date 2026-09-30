@@ -1,3 +1,4 @@
+use crate::arena::{Chips, money::apply_ratio};
 use std::sync::Arc;
 
 use thiserror::Error;
@@ -29,8 +30,16 @@ pub struct RoundActionConfig {
     /// Whether check/call is enabled for this round
     pub call_enabled: bool,
     /// Raise multipliers (e.g., [1.0, 2.0, 3.0] for 1x, 2x, 3x min raise)
+    #[cfg_attr(
+        feature = "serde",
+        serde(deserialize_with = "crate::arena::serde_numbers::deserialize")
+    )]
     pub raise_mult: Vec<f32>,
     /// Pot multipliers (e.g., [0.33, 0.5, 1.0] for 33%, 50%, 100% pot)
+    #[cfg_attr(
+        feature = "serde",
+        serde(deserialize_with = "crate::arena::serde_numbers::deserialize")
+    )]
     pub pot_mult: Vec<f32>,
     /// Whether to include "setup shove" action (bet so pot + call = remaining stack)
     pub setup_shove: bool,
@@ -54,12 +63,12 @@ impl RoundActionConfig {
     /// Validate the round configuration.
     pub fn validate(&self) -> Result<(), ConfigurableActionConfigError> {
         for &mult in &self.raise_mult {
-            if mult < 1.0 {
+            if !mult.is_finite() || mult < 1.0 {
                 return Err(ConfigurableActionConfigError::RaiseMultBelowOne(mult));
             }
         }
         for &mult in &self.pot_mult {
-            if mult < 0.0 {
+            if !mult.is_finite() || mult < 0.0 {
                 return Err(ConfigurableActionConfigError::PotMultNegative(mult));
             }
         }
@@ -177,9 +186,8 @@ impl ConfigurableActionGenerator {
         game_state: &GameState,
     ) -> ActionVec {
         let mut actions = ActionVec::new();
-        // Track used amounts to avoid duplicates (within epsilon)
-        let mut used_amounts: Vec<f32> = Vec::new();
-        let epsilon = 0.01;
+        // Track used amounts to avoid duplicates (exactly)
+        let mut used_amounts: Vec<Chips> = Vec::new();
 
         let current_bet = game_state.current_round_bet();
         let player_bet = game_state.current_round_current_player_bet();
@@ -192,12 +200,10 @@ impl ConfigurableActionGenerator {
         let round_config = config.round_config(game_state.round);
 
         // Helper to check if an amount is already used
-        let is_amount_used = |amount: f32, used: &[f32]| -> bool {
-            used.iter().any(|&a| (a - amount).abs() < epsilon)
-        };
+        let is_amount_used = |amount: Chips, used: &[Chips]| -> bool { used.contains(&amount) };
 
         // Fold - only if there's something to call
-        if to_call > 0.0 {
+        if to_call > 0 {
             actions.push(AgentAction::Fold);
         }
 
@@ -212,7 +218,7 @@ impl ConfigurableActionGenerator {
 
         // Raise multipliers
         for &mult in &round_config.raise_mult {
-            let raise_amount = current_bet + min_raise * mult;
+            let raise_amount = current_bet.saturating_add(apply_ratio(min_raise, mult));
             // Must be at least min raise and less than all-in
             if raise_amount >= min_valid_raise
                 && raise_amount < all_in_amount
@@ -225,7 +231,7 @@ impl ConfigurableActionGenerator {
 
         // Pot multipliers
         for &mult in &round_config.pot_mult {
-            let pot_amount = current_bet + pot * mult;
+            let pot_amount = current_bet.saturating_add(apply_ratio(pot, mult));
             // Must be at least min raise and less than all-in
             if pot_amount >= min_valid_raise
                 && pot_amount < all_in_amount
@@ -238,7 +244,7 @@ impl ConfigurableActionGenerator {
 
         // Setup shove (bet so pot + call = remaining stack)
         if round_config.setup_shove {
-            let setup_bet = (stack + player_bet + current_bet - pot) / 2.0;
+            let setup_bet = apply_ratio((stack + player_bet + current_bet - pot).max(0), 0.5);
             if setup_bet >= min_valid_raise
                 && setup_bet < all_in_amount
                 && !is_amount_used(setup_bet, &used_amounts)
@@ -362,14 +368,14 @@ mod tests {
 
     #[test]
     fn test_configurable_gen_actions_basic() {
-        let stacks = vec![500.0; 2];
+        let stacks = vec![500; 2];
         let mut game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
         game_state.advance_round();
-        game_state.do_bet(30.0, false).unwrap();
+        game_state.do_bet(30, false).unwrap();
 
         let action_gen = create_configurable_generator(&game_state, default_configurable_config());
         let actions = action_gen.gen_possible_actions(&game_state);
@@ -382,10 +388,10 @@ mod tests {
 
     #[test]
     fn test_configurable_no_fold_when_checking() {
-        let stacks = vec![100.0; 2];
+        let stacks = vec![100; 2];
         let mut game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
         game_state.advance_round();
@@ -399,10 +405,10 @@ mod tests {
 
     #[test]
     fn test_configurable_with_setup_shove() {
-        let stacks = vec![500.0; 2];
+        let stacks = vec![500; 2];
         let mut game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
         game_state.advance_round();
@@ -430,10 +436,10 @@ mod tests {
 
     #[test]
     fn test_configurable_per_round_config() {
-        let stacks = vec![500.0; 2];
+        let stacks = vec![500; 2];
         let game_state_preflop = GameStateBuilder::new()
             .stacks(stacks.clone())
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
         // Preflop is the starting round for new games
@@ -508,10 +514,10 @@ mod tests {
 
     #[test]
     fn test_configurable_all_actions_valid_preflop() {
-        let stacks = vec![100.0; 2];
+        let stacks = vec![100; 2];
         let game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
         verify_configurable_actions_valid(&game_state, default_configurable_config());
@@ -519,10 +525,10 @@ mod tests {
 
     #[test]
     fn test_configurable_all_actions_valid_flop() {
-        let stacks = vec![100.0; 2];
+        let stacks = vec![100; 2];
         let mut game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
         game_state.advance_round();
@@ -531,27 +537,27 @@ mod tests {
 
     #[test]
     fn test_configurable_all_actions_valid_facing_bet() {
-        let stacks = vec![500.0; 2];
+        let stacks = vec![500; 2];
         let mut game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
         game_state.advance_round();
-        game_state.do_bet(30.0, false).unwrap();
+        game_state.do_bet(30, false).unwrap();
         verify_configurable_actions_valid(&game_state, default_configurable_config());
     }
 
     #[test]
     fn test_configurable_call_disabled() {
-        let stacks = vec![500.0; 2];
+        let stacks = vec![500; 2];
         let mut game_state = GameStateBuilder::new()
             .stacks(stacks)
-            .blinds(10.0, 5.0)
+            .blinds(10, 5)
             .build()
             .unwrap();
         game_state.advance_round();
-        game_state.do_bet(30.0, false).unwrap();
+        game_state.do_bet(30, false).unwrap();
 
         let config = ConfigurableActionConfig {
             default: RoundActionConfig {

@@ -179,8 +179,8 @@
 //!     Box::<CallingAgentGenerator>::default(),
 //! ];
 //! let game_state = GameStateBuilder::new()
-//!     .num_players_with_stack(3, 100.0)
-//!     .blinds(10.0, 5.0)
+//!     .num_players_with_stack(3, 100)
+//!     .blinds(10, 5)
 //!     .build()
 //!     .unwrap();
 //! let sim_gen = StandardSimulationIterator::new(
@@ -199,6 +199,9 @@ extern crate rand;
 /// Allow all the core poker functionality to be used
 /// externally. Everything in core should be agnostic
 /// to poker style.
+/// Exact poker money; one unit is one cent at currency boundaries.
+pub type Chips = i64;
+
 pub mod core;
 /// The holdem specific code. This contains range
 /// parsing, game state, and starting hand code.

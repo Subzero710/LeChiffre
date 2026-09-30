@@ -146,13 +146,13 @@ mod tests {
 
         let board = (hand_zero & hand_one).iter().collect::<Vec<_>>();
         // Zero is all in.
-        let stacks: Vec<f32> = vec![0.0, 900.0];
-        let player_bet = vec![1000.0, 100.0];
-        let player_bet_round = vec![900.0, 0.0];
+        let stacks: Vec<crate::Chips> = vec![0, 900];
+        let player_bet = vec![1000, 100];
+        let player_bet_round = vec![900, 0];
         // Create a game state where player 0 is all in and player 1 should make a
         // decision to call or fold
         let round_data =
-            RoundData::new_with_bets(100.0, PlayerBitSet::new(num_agents), 1, player_bet_round);
+            RoundData::new_with_bets(100, PlayerBitSet::new(num_agents), 1, player_bet_round);
         let game_state = GameStateBuilder::new()
             .round(Round::River)
             .round_data(round_data)
@@ -160,8 +160,8 @@ mod tests {
             .hands(vec![hand_zero, hand_one])
             .stacks(stacks)
             .player_bet(player_bet)
-            .big_blind(5.0)
-            .small_blind(0.0)
+            .big_blind(5)
+            .small_blind(0)
             .build()
             .unwrap();
 
@@ -170,13 +170,13 @@ mod tests {
         let (sim, _cfr) = run(game_state, 5000).await;
 
         // Player 1 should not put any more bets in and should fold
-        assert_eq!(sim.game_state.player_bet[1], 100.0);
+        assert_eq!(sim.game_state.player_bet[1], 100);
 
         // Player 0 should win the pot
-        assert_eq!(sim.game_state.stacks[0], 1100.0);
+        assert_eq!(sim.game_state.stacks[0], 1100);
 
         // Player 1 didn't put any more in and didn't win
-        assert_eq!(sim.game_state.stacks[1], 900.0);
+        assert_eq!(sim.game_state.stacks[1], 900);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -190,11 +190,11 @@ mod tests {
 
         let board = (hand_zero & hand_one).iter().collect::<Vec<_>>();
         // Zero is all in.
-        let stacks: Vec<f32> = vec![0.0, 900.0];
-        let player_bet = vec![1000.0, 100.0];
-        let player_bet_round = vec![900.0, 0.0];
+        let stacks: Vec<crate::Chips> = vec![0, 900];
+        let player_bet = vec![1000, 100];
+        let player_bet_round = vec![900, 0];
         let round_data =
-            RoundData::new_with_bets(100.0, PlayerBitSet::new(num_agents), 1, player_bet_round);
+            RoundData::new_with_bets(100, PlayerBitSet::new(num_agents), 1, player_bet_round);
         let game_state = GameStateBuilder::new()
             .round(Round::River)
             .round_data(round_data)
@@ -202,8 +202,8 @@ mod tests {
             .hands(vec![hand_zero, hand_one])
             .stacks(stacks)
             .player_bet(player_bet)
-            .big_blind(5.0)
-            .small_blind(0.0)
+            .big_blind(5)
+            .small_blind(0)
             .build()
             .unwrap();
 
@@ -212,10 +212,10 @@ mod tests {
         let (sim, _cfr) = run(game_state, 50000).await;
 
         // Player 1 should call the all-in with three of a kind
-        assert_eq!(sim.game_state.player_bet[1], 1000.0);
+        assert_eq!(sim.game_state.player_bet[1], 1000);
 
         // Player 1 should win the pot
-        assert_eq!(sim.game_state.stacks[1], 2000.0);
+        assert_eq!(sim.game_state.stacks[1], 2000);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -232,7 +232,7 @@ mod tests {
         let (result, _cfr) = run(game_state, 200).await;
 
         // Player 1 should not put any more bets in and should fold
-        assert_eq!(result.game_state.player_bet[1], 100.0);
+        assert_eq!(result.game_state.player_bet[1], 100);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -245,7 +245,7 @@ mod tests {
         let (result, _cfr) = run(game_state, 200).await;
 
         // Player 1 should not put any more bets in and should fold
-        assert_eq!(result.game_state.player_bet[1], 100.0);
+        assert_eq!(result.game_state.player_bet[1], 100);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -274,11 +274,11 @@ mod tests {
         let num_agents = 2;
 
         // Zero is all in.
-        let stacks: Vec<f32> = vec![0.0, 900.0];
-        let player_bet = vec![1000.0, 100.0];
-        let player_bet_round = vec![900.0, 0.0];
+        let stacks: Vec<crate::Chips> = vec![0, 900];
+        let player_bet = vec![1000, 100];
+        let player_bet_round = vec![900, 0];
         let round_data =
-            RoundData::new_with_bets(100.0, PlayerBitSet::new(num_agents), 1, player_bet_round);
+            RoundData::new_with_bets(100, PlayerBitSet::new(num_agents), 1, player_bet_round);
         GameStateBuilder::new()
             .round(round)
             .round_data(round_data)
@@ -286,8 +286,8 @@ mod tests {
             .hands(vec![hand_zero, hand_one])
             .stacks(stacks)
             .player_bet(player_bet)
-            .big_blind(5.0)
-            .small_blind(0.0)
+            .big_blind(5)
+            .small_blind(0)
             .build()
             .unwrap()
     }
@@ -390,11 +390,11 @@ mod tests {
         let hand_one = Hand::new_from_str("KcKsKdAcTh4d8d").unwrap();
 
         let board = (hand_zero & hand_one).iter().collect::<Vec<_>>();
-        let stacks: Vec<f32> = vec![0.0, 900.0];
-        let player_bet = vec![1000.0, 100.0];
-        let player_bet_round = vec![900.0, 0.0];
+        let stacks: Vec<crate::Chips> = vec![0, 900];
+        let player_bet = vec![1000, 100];
+        let player_bet_round = vec![900, 0];
         let round_data =
-            RoundData::new_with_bets(100.0, PlayerBitSet::new(num_agents), 1, player_bet_round);
+            RoundData::new_with_bets(100, PlayerBitSet::new(num_agents), 1, player_bet_round);
         let game_state = GameStateBuilder::new()
             .round(Round::River)
             .round_data(round_data)
@@ -402,8 +402,8 @@ mod tests {
             .hands(vec![hand_zero, hand_one])
             .stacks(stacks)
             .player_bet(player_bet)
-            .big_blind(5.0)
-            .small_blind(0.0)
+            .big_blind(5)
+            .small_blind(0)
             .build()
             .unwrap();
 
@@ -459,8 +459,8 @@ mod tests {
 
         // Create a starting game state (no cards dealt yet)
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -508,8 +508,8 @@ mod tests {
 
         // Create a starting game state (no cards dealt yet)
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 100.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
             .build()
             .unwrap();
 
@@ -556,8 +556,8 @@ mod tests {
         // Run 5 games with fresh agents each time (like agent_comparison does)
         for game_idx in 0..5 {
             let game_state = GameStateBuilder::new()
-                .num_players_with_stack(2, 100.0)
-                .blinds(10.0, 5.0)
+                .num_players_with_stack(2, 100)
+                .blinds(10, 5)
                 .build()
                 .unwrap();
 
@@ -611,8 +611,8 @@ mod tests {
 
         // Create a starting game state
         let game_state = GameStateBuilder::new()
-            .num_players_with_stack(2, 500.0)
-            .blinds(10.0, 5.0)
+            .num_players_with_stack(2, 500)
+            .blinds(10, 5)
             .build()
             .unwrap();
 

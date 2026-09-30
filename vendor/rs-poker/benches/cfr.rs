@@ -1,3 +1,4 @@
+use rs_poker::Chips;
 use std::sync::Arc;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -12,10 +13,10 @@ use rs_poker::arena::{
     HoldemSimulationBuilder, OpponentRanges,
 };
 
-const STARTING_STACK: f32 = 100_000.0;
-const ANTE: f32 = 50.0;
-const SMALL_BLIND: f32 = 250.0;
-const BIG_BLIND: f32 = 500.0;
+const STARTING_STACK: Chips = 100_000;
+const ANTE: Chips = 50;
+const SMALL_BLIND: Chips = 250;
+const BIG_BLIND: Chips = 500;
 const BENCH_SEED: u64 = 0xDEAD_BEEF;
 
 /// CFR configurable agent config matching examples/configs/cfr_configurable.json.

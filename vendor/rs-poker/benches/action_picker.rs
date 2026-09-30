@@ -8,11 +8,11 @@ use rs_poker::arena::cfr::{ActionIndexMapper, ActionIndexMapperConfig, ActionPic
 
 fn make_state_and_mapper() -> (rs_poker::arena::GameState, ActionIndexMapper) {
     let gs = GameStateBuilder::new()
-        .num_players_with_stack(2, 10_000.0)
-        .blinds(100.0, 50.0)
+        .num_players_with_stack(2, 10_000)
+        .blinds(100, 50)
         .build()
         .unwrap();
-    let mapper = ActionIndexMapper::new(ActionIndexMapperConfig::new(100.0, 10_000.0));
+    let mapper = ActionIndexMapper::new(ActionIndexMapperConfig::new(100, 10_000));
     (gs, mapper)
 }
 
@@ -24,9 +24,9 @@ fn make_trained_matcher(
     let mut rewards = vec![0.0f32; 52];
     rewards[0] = 10.0;
     rewards[1] = 30.0;
-    rewards[mapper.action_to_idx(&AgentAction::Bet(300.0), gs)] = 20.0;
-    rewards[mapper.action_to_idx(&AgentAction::Bet(600.0), gs)] = 15.0;
-    rewards[mapper.action_to_idx(&AgentAction::Bet(1200.0), gs)] = 5.0;
+    rewards[mapper.action_to_idx(&AgentAction::Bet(300), gs)] = 20.0;
+    rewards[mapper.action_to_idx(&AgentAction::Bet(600), gs)] = 15.0;
+    rewards[mapper.action_to_idx(&AgentAction::Bet(1200), gs)] = 5.0;
     rewards[51] = 2.0;
     for _ in 0..16 {
         m.update_regret(&rewards);
@@ -41,10 +41,10 @@ fn bench_pick_action(c: &mut Criterion) {
     // Typical CFR action set: fold, call, several bets, all-in
     let actions = vec![
         AgentAction::Fold,
-        AgentAction::Bet(100.0), // call
-        AgentAction::Bet(300.0),
-        AgentAction::Bet(600.0),
-        AgentAction::Bet(1200.0),
+        AgentAction::Bet(100), // call
+        AgentAction::Bet(300),
+        AgentAction::Bet(600),
+        AgentAction::Bet(1200),
         AgentAction::AllIn,
     ];
 
@@ -59,13 +59,13 @@ fn bench_pick_action(c: &mut Criterion) {
     // Collision-heavy set: many bet sizes that will quantise together
     let collision_actions = vec![
         AgentAction::Fold,
-        AgentAction::Bet(100.0),
-        AgentAction::Bet(200.0),
-        AgentAction::Bet(205.0),
-        AgentAction::Bet(210.0),
-        AgentAction::Bet(500.0),
-        AgentAction::Bet(510.0),
-        AgentAction::Bet(520.0),
+        AgentAction::Bet(100),
+        AgentAction::Bet(200),
+        AgentAction::Bet(205),
+        AgentAction::Bet(210),
+        AgentAction::Bet(500),
+        AgentAction::Bet(510),
+        AgentAction::Bet(520),
         AgentAction::AllIn,
     ];
 
