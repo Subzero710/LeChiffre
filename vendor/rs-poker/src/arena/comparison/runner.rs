@@ -450,6 +450,7 @@ impl ArenaComparison {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Chips;
     use crate::arena::comparison::ComparisonBuilder;
 
     #[test]
