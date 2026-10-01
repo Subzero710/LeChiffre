@@ -1,4 +1,4 @@
-use crate::arena::Chips;
+use crate::arena::{Chips, RakeConfig};
 use std::path::{Path, PathBuf};
 
 use crate::arena::agent::AgentConfig;
@@ -42,6 +42,7 @@ pub struct ComparisonBuilder {
     ante: Option<Chips>,
     output_dir: Option<PathBuf>,
     seed: Option<u64>,
+    rake: Option<RakeConfig>,
 }
 
 impl ComparisonBuilder {
@@ -104,6 +105,12 @@ impl ComparisonBuilder {
         self
     }
 
+    /// Set the rake economics applied to every generated game state.
+    pub fn rake(mut self, rake: RakeConfig) -> Self {
+        self.rake = Some(rake);
+        self
+    }
+
     /// Add an agent configuration with an optional name
     pub fn add_agent(mut self, name: String, config: AgentConfig) -> Self {
         self.agents.push((name, config));
@@ -162,6 +169,7 @@ impl ComparisonBuilder {
             ante: self.ante.unwrap_or(0),
             output_dir: self.output_dir,
             seed: self.seed,
+            rake: self.rake.unwrap_or_default(),
         };
 
         // Validate configuration
@@ -282,10 +290,19 @@ mod tests {
         assert_eq!(config.players_per_table, 3);
         assert_eq!(config.big_blind, 10);
         assert_eq!(config.small_blind, 5);
+        assert_eq!(config.rake, RakeConfig::none());
     }
 
     #[test]
     fn test_builder_custom_config() {
+        let rake = RakeConfig::new(
+            crate::arena::RakeRate::new(5, 100).unwrap(),
+            Some(30),
+            true,
+            crate::arena::RakeRounding::Ceil,
+        )
+        .unwrap();
+
         let comparison = ComparisonBuilder::new()
             .num_games(500)
             .players_per_table(2)
@@ -294,6 +311,7 @@ mod tests {
             .min_stack_bb(50.0)
             .max_stack_bb(150.0)
             .seed(42)
+            .rake(rake)
             .add_agent_config(AgentConfig::Folding { name: None })
             .add_agent_config(AgentConfig::Calling { name: None })
             .build()
@@ -307,6 +325,7 @@ mod tests {
         assert_eq!(config.min_stack_bb, 50.0);
         assert_eq!(config.max_stack_bb, 150.0);
         assert_eq!(config.seed, Some(42));
+        assert_eq!(config.rake, rake);
     }
 
     #[test]

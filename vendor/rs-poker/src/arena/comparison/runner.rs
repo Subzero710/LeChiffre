@@ -185,9 +185,12 @@ impl ArenaComparison {
             }
 
             // Generate a game state
-            let game_state = game_state_gen
+            let mut game_state = game_state_gen
                 .next()
                 .ok_or(ComparisonError::GameStateGeneratorExhausted)?;
+            // Comparison-level rake must be part of the state before it is cloned
+            // into permutations and CFR contexts.
+            game_state.rake = self.config.rake;
 
             // Run all permutations with this game state
             let mut perm_ctx = PermutationContext {
@@ -399,6 +402,24 @@ impl ArenaComparison {
             "  Stack Range: {}-{} BB",
             self.config.min_stack_bb, self.config.max_stack_bb
         );
+        if self.config.rake.rate.numerator() == 0 {
+            println!("  Rake: none");
+        } else {
+            let cap = self
+                .config
+                .rake
+                .cap
+                .map_or_else(|| "unlimited".to_string(), |cap| cap.to_string());
+            println!(
+                "  Rake: {}/{} cap={} nfnd={} preflop-3bet={} rounding={:?}",
+                self.config.rake.rate.numerator(),
+                self.config.rake.rate.denominator(),
+                cap,
+                self.config.rake.no_flop_no_drop,
+                self.config.rake.preflop_three_bet_rake,
+                self.config.rake.rounding,
+            );
+        }
         if let Some(seed) = self.config.seed {
             println!("  Random Seed: {}", seed);
         }
@@ -686,6 +707,41 @@ mod tests {
             total_profit.abs() < 1,
             "Total profit should be approximately zero, got {}",
             total_profit
+        );
+    }
+
+    #[tokio::test]
+    async fn test_arena_comparison_applies_rake() {
+        use crate::arena::{RakeConfig, RakeRate, RakeRounding};
+
+        // Deliberately large rake and no NFND so even tiny blind-only pots are
+        // guaranteed to remove chips from the two-player economy.
+        let rake = RakeConfig::new(
+            RakeRate::new(1, 1).unwrap(),
+            None,
+            false,
+            RakeRounding::Floor,
+        )
+        .unwrap();
+        let comparison = ComparisonBuilder::new()
+            .num_games(10)
+            .players_per_table(2)
+            .seed(4242)
+            .rake(rake)
+            .add_agent_config(AgentConfig::Calling {
+                name: Some("A".to_string()),
+            })
+            .add_agent_config(AgentConfig::Calling {
+                name: Some("B".to_string()),
+            })
+            .build()
+            .unwrap();
+
+        let result = comparison.run().await.unwrap();
+        let total_profit: Chips = result.all_stats().values().map(|s| s.total_profit).sum();
+        assert!(
+            total_profit < 0,
+            "raked comparison must remove chips from player profit, got {total_profit}"
         );
     }
 

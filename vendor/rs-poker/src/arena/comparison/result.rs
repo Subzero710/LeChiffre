@@ -108,6 +108,24 @@ impl ComparisonResult {
         ));
         output.push_str(&format!("- **Big Blind**: {}\n", self.config.big_blind));
         output.push_str(&format!("- **Small Blind**: {}\n", self.config.small_blind));
+        if self.config.rake.rate.numerator() == 0 {
+            output.push_str("- **Rake**: none\n");
+        } else {
+            let cap = self
+                .config
+                .rake
+                .cap
+                .map_or_else(|| "unlimited".to_string(), |cap| cap.to_string());
+            output.push_str(&format!(
+                "- **Rake**: {}/{} (cap {}, NFND {}, preflop 3-bet {}, {:?})\n",
+                self.config.rake.rate.numerator(),
+                self.config.rake.rate.denominator(),
+                cap,
+                self.config.rake.no_flop_no_drop,
+                self.config.rake.preflop_three_bet_rake,
+                self.config.rake.rounding,
+            ));
+        }
         output.push_str(&format!(
             "- **Stack Range**: {}-{} BB\n",
             self.config.min_stack_bb, self.config.max_stack_bb

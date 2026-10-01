@@ -51,6 +51,19 @@ Pit agents against each other:
 rsp arena compare ./examples/configs -n 5000 -p 3
 ```
 
+Apply a published cash-game rake schedule to the comparison:
+
+```bash
+rsp arena compare ./examples/configs -n 5000 -p 2 --rake coinpoker
+rsp arena compare ./examples/configs -n 5000 -p 2 --rake pokerstars --rake-currency eur
+rsp arena compare ./examples/configs -n 5000 -p 6 --rake ggpoker --rake-format six-max
+```
+
+`--rake` accepts `none` (default), `coinpoker`, `pokerstars`, and `ggpoker`.
+Use `--rake-currency` and `--rake-format` when the room has multiple published
+currencies or table products. The preset is resolved through `arena::rake::schedule`;
+rates and caps are not duplicated in the CLI.
+
 ![Arena TUI showing agent rankings, profit over time, street distribution, and recent games](docs/arena_tui.png)
 
 Generate hand histories in Open Hand History format:

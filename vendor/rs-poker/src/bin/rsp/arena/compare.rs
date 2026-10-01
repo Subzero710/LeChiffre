@@ -4,8 +4,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use clap::Args;
+use clap::{Args, ValueEnum};
 use rs_poker::arena::comparison::{ArenaComparison, ComparisonBuilder, PermutationResult};
+use rs_poker::arena::rake::schedule::{
+    Currency, Platform, RakeContext, ScheduleError, TableFormat, rake_config_for,
+};
+use rs_poker::arena::RakeConfig;
 
 use crate::tui::app::{self, App};
 use crate::tui::event::{EventHandler, SimError, SimMessage};
@@ -19,6 +23,59 @@ pub enum CompareError {
     Comparison(#[from] rs_poker::arena::comparison::ComparisonError),
     #[error("TUI error: {0}")]
     TuiError(#[from] std::io::Error),
+    #[error(transparent)]
+    RakeSchedule(#[from] ScheduleError),
+    #[error("--rake-currency and --rake-format require --rake to be a room preset")]
+    RakeOptionsWithoutPreset,
+}
+
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum RakePreset {
+    #[default]
+    None,
+    Coinpoker,
+    Pokerstars,
+    Ggpoker,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum RakeCurrencyArg {
+    Usd,
+    Eur,
+    Gbp,
+    Usdt,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum RakeFormatArg {
+    Regular,
+    HeadsUp,
+    SixMax,
+    NineMax,
+    FastFold,
+}
+
+impl From<RakeCurrencyArg> for Currency {
+    fn from(value: RakeCurrencyArg) -> Self {
+        match value {
+            RakeCurrencyArg::Usd => Currency::Usd,
+            RakeCurrencyArg::Eur => Currency::Eur,
+            RakeCurrencyArg::Gbp => Currency::Gbp,
+            RakeCurrencyArg::Usdt => Currency::Usdt,
+        }
+    }
+}
+
+impl From<RakeFormatArg> for TableFormat {
+    fn from(value: RakeFormatArg) -> Self {
+        match value {
+            RakeFormatArg::Regular => TableFormat::Regular,
+            RakeFormatArg::HeadsUp => TableFormat::HeadsUp,
+            RakeFormatArg::SixMax => TableFormat::SixMax,
+            RakeFormatArg::NineMax => TableFormat::NineMax,
+            RakeFormatArg::FastFold => TableFormat::FastFold,
+        }
+    }
 }
 
 #[derive(Args, Debug)]
@@ -63,14 +120,72 @@ pub struct CompareArgs {
     #[arg(short = 's', long = "seed")]
     seed: Option<u64>,
 
+    /// Rake schedule preset. Defaults to no rake.
+    #[arg(long = "rake", value_enum, default_value = "none")]
+    rake: RakePreset,
+
+    /// Override the preset currency (defaults: CoinPoker=USDT, others=USD).
+    #[arg(long = "rake-currency", value_enum)]
+    rake_currency: Option<RakeCurrencyArg>,
+
+    /// Override the table product used to resolve the room rake schedule.
+    /// Auto defaults: CoinPoker HU for -p 2 else regular; PokerStars regular;
+    /// GGPoker six-max for <=6 players else nine-max.
+    #[arg(long = "rake-format", value_enum)]
+    rake_format: Option<RakeFormatArg>,
+
     #[command(flatten)]
     tui: TuiFlags,
+}
+
+fn resolve_rake(args: &CompareArgs) -> Result<RakeConfig, CompareError> {
+    if matches!(args.rake, RakePreset::None) {
+        if args.rake_currency.is_some() || args.rake_format.is_some() {
+            return Err(CompareError::RakeOptionsWithoutPreset);
+        }
+        return Ok(RakeConfig::none());
+    }
+
+    let (platform, default_currency, default_format) = match args.rake {
+        RakePreset::None => unreachable!(),
+        RakePreset::Coinpoker => (
+            Platform::CoinPoker,
+            Currency::Usdt,
+            if args.players_per_table == 2 {
+                TableFormat::HeadsUp
+            } else {
+                TableFormat::Regular
+            },
+        ),
+        RakePreset::Pokerstars => (Platform::PokerStars, Currency::Usd, TableFormat::Regular),
+        RakePreset::Ggpoker => (
+            Platform::GGPoker,
+            Currency::Usd,
+            if args.players_per_table <= 6 {
+                TableFormat::SixMax
+            } else {
+                TableFormat::NineMax
+            },
+        ),
+    };
+
+    let context = RakeContext {
+        platform,
+        currency: args.rake_currency.map(Into::into).unwrap_or(default_currency),
+        small_blind: args.small_blind,
+        big_blind: args.big_blind,
+        dealt_players: args.players_per_table,
+        table_format: args.rake_format.map(Into::into).unwrap_or(default_format),
+    };
+
+    Ok(rake_config_for(context)?)
 }
 
 fn build_comparison(
     args: &CompareArgs,
     default_budget: &rs_poker::arena::cfr::BudgetConfig,
 ) -> Result<ArenaComparison, CompareError> {
+    let rake = resolve_rake(args)?;
     let mut builder = ComparisonBuilder::new()
         .num_games(args.num_games)
         .players_per_table(args.players_per_table)
@@ -78,6 +193,7 @@ fn build_comparison(
         .small_blind(args.small_blind)
         .min_stack_bb(args.min_stack_bb)
         .max_stack_bb(args.max_stack_bb)
+        .rake(rake)
         .load_agents_from_dir(&args.agents_dir)?
         .fill_default_budget(default_budget);
 
@@ -284,5 +400,62 @@ pub async fn run(
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod rake_cli_tests {
+    use super::*;
+
+    fn args(preset: RakePreset, players: usize) -> CompareArgs {
+        CompareArgs {
+            agents_dir: PathBuf::from("agents"),
+            num_games: 1,
+            players_per_table: players,
+            big_blind: 10,
+            small_blind: 5,
+            min_stack_bb: 100.0,
+            max_stack_bb: 100.0,
+            output_dir: None,
+            seed: Some(42),
+            rake: preset,
+            rake_currency: None,
+            rake_format: None,
+            tui: TuiFlags {
+                force_tui: false,
+                no_tui: false,
+            },
+        }
+    }
+
+    #[test]
+    fn no_rake_is_the_default_economy() {
+        assert_eq!(resolve_rake(&args(RakePreset::None, 2)).unwrap(), RakeConfig::none());
+    }
+
+    #[test]
+    fn coinpoker_heads_up_defaults_to_usdt_hu_schedule() {
+        let rake = resolve_rake(&args(RakePreset::Coinpoker, 2)).unwrap();
+        assert_eq!(rake.rate.numerator(), 5);
+        assert_eq!(rake.rate.denominator(), 100);
+        assert_eq!(rake.cap, Some(30));
+        assert!(rake.no_flop_no_drop);
+    }
+
+    #[test]
+    fn pokerstars_defaults_to_usd_regular_schedule() {
+        let rake = resolve_rake(&args(RakePreset::Pokerstars, 2)).unwrap();
+        assert_eq!(rake.rate.numerator(), 500);
+        assert_eq!(rake.rate.denominator(), 10_000);
+        assert_eq!(rake.cap, Some(100));
+    }
+
+    #[test]
+    fn ggpoker_defaults_to_six_max_for_two_players() {
+        let rake = resolve_rake(&args(RakePreset::Ggpoker, 2)).unwrap();
+        assert_eq!(rake.rate.numerator(), 5);
+        assert_eq!(rake.rate.denominator(), 100);
+        assert_eq!(rake.cap, Some(25));
+        assert!(rake.preflop_three_bet_rake);
     }
 }
