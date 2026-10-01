@@ -310,16 +310,7 @@ mod tests {
 
     #[test]
     fn name_and_iterations_are_exposed() {
-        let agent = EquityAgent::new(
-            "Equity-10k",
-            10_000,
-            0.15,
-            0.35,
-            0.60,
-            0.33,
-            0.66,
-            1.0,
-        );
+        let agent = EquityAgent::new("Equity-10k", 10_000, 0.15, 0.35, 0.60, 0.33, 0.66, 1.0);
         assert_eq!(agent.name(), "Equity-10k");
         assert_eq!(agent.iterations(), 10_000);
     }
@@ -373,8 +364,14 @@ mod tests {
         game_state.total_pot = 30;
 
         // Calling costs 10 into a final pot of 40 => required equity 25%.
-        assert_eq!(agent.action_for_equity(&game_state, 0.249), AgentAction::Fold);
-        assert_eq!(agent.action_for_equity(&game_state, 0.30), AgentAction::Call);
+        assert_eq!(
+            agent.action_for_equity(&game_state, 0.249),
+            AgentAction::Fold
+        );
+        assert_eq!(
+            agent.action_for_equity(&game_state, 0.30),
+            AgentAction::Call
+        );
     }
 
     #[test]
@@ -393,9 +390,18 @@ mod tests {
 
         // Heads-up fair share is 50%; 49% checks, 55% has only a 10% normalized
         // edge and also checks, 60% crosses the 15% small-bet threshold.
-        assert_eq!(agent.action_for_equity(&game_state, 0.49), AgentAction::Bet(10));
-        assert_eq!(agent.action_for_equity(&game_state, 0.55), AgentAction::Bet(10));
-        assert_eq!(agent.action_for_equity(&game_state, 0.60), AgentAction::Bet(20));
+        assert_eq!(
+            agent.action_for_equity(&game_state, 0.49),
+            AgentAction::Bet(10)
+        );
+        assert_eq!(
+            agent.action_for_equity(&game_state, 0.55),
+            AgentAction::Bet(10)
+        );
+        assert_eq!(
+            agent.action_for_equity(&game_state, 0.60),
+            AgentAction::Bet(20)
+        );
     }
 
     #[test]
@@ -414,11 +420,20 @@ mod tests {
 
         // Heads-up free action => required equity 50%.
         // 60% equity => edge 20% => 33% pot.
-        assert_eq!(agent.action_for_equity(&game_state, 0.60), AgentAction::Bet(33));
+        assert_eq!(
+            agent.action_for_equity(&game_state, 0.60),
+            AgentAction::Bet(33)
+        );
         // 70% equity => edge 40% => 66% pot.
-        assert_eq!(agent.action_for_equity(&game_state, 0.70), AgentAction::Bet(66));
+        assert_eq!(
+            agent.action_for_equity(&game_state, 0.70),
+            AgentAction::Bet(66)
+        );
         // 85% equity => edge 70% => 100% pot.
-        assert_eq!(agent.action_for_equity(&game_state, 0.85), AgentAction::Bet(100));
+        assert_eq!(
+            agent.action_for_equity(&game_state, 0.85),
+            AgentAction::Bet(100)
+        );
     }
 
     #[test]
@@ -437,11 +452,17 @@ mod tests {
         game_state.total_pot = 20;
 
         // Strong edge asks for a pot-sized raise to 30, which is legal here.
-        assert_eq!(agent.action_for_equity(&game_state, 0.90), AgentAction::Bet(30));
+        assert_eq!(
+            agent.action_for_equity(&game_state, 0.90),
+            AgentAction::Bet(30)
+        );
 
         game_state.stacks[0] = 15;
         // Same request now reaches Hero's 25 total and becomes all-in.
-        assert_eq!(agent.action_for_equity(&game_state, 0.90), AgentAction::AllIn);
+        assert_eq!(
+            agent.action_for_equity(&game_state, 0.90),
+            AgentAction::AllIn
+        );
     }
 
     #[test]
@@ -460,7 +481,10 @@ mod tests {
         game_state.total_pot = 40;
         game_state.max_raises_per_round = Some(3);
 
-        assert_eq!(agent.action_for_equity(&game_state, 0.95), AgentAction::Call);
+        assert_eq!(
+            agent.action_for_equity(&game_state, 0.95),
+            AgentAction::Call
+        );
     }
 
     #[test]
@@ -480,7 +504,13 @@ mod tests {
         game_state.total_pot = 30;
 
         // Nominal gap is 10, but Hero has only 5. Required equity = 5 / 35.
-        assert_eq!(agent.action_for_equity(&game_state, 0.14), AgentAction::Fold);
-        assert_eq!(agent.action_for_equity(&game_state, 0.15), AgentAction::Call);
+        assert_eq!(
+            agent.action_for_equity(&game_state, 0.14),
+            AgentAction::Fold
+        );
+        assert_eq!(
+            agent.action_for_equity(&game_state, 0.15),
+            AgentAction::Call
+        );
     }
 }

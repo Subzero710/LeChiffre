@@ -5,11 +5,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use clap::{Args, ValueEnum};
+use rs_poker::arena::RakeConfig;
 use rs_poker::arena::comparison::{ArenaComparison, ComparisonBuilder, PermutationResult};
 use rs_poker::arena::rake::schedule::{
     Currency, Platform, RakeContext, ScheduleError, TableFormat, rake_config_for,
 };
-use rs_poker::arena::RakeConfig;
 
 use crate::tui::app::{self, App};
 use crate::tui::event::{EventHandler, SimError, SimMessage};
@@ -171,7 +171,10 @@ fn resolve_rake(args: &CompareArgs) -> Result<RakeConfig, CompareError> {
 
     let context = RakeContext {
         platform,
-        currency: args.rake_currency.map(Into::into).unwrap_or(default_currency),
+        currency: args
+            .rake_currency
+            .map(Into::into)
+            .unwrap_or(default_currency),
         small_blind: args.small_blind,
         big_blind: args.big_blind,
         dealt_players: args.players_per_table,
@@ -430,7 +433,10 @@ mod rake_cli_tests {
 
     #[test]
     fn no_rake_is_the_default_economy() {
-        assert_eq!(resolve_rake(&args(RakePreset::None, 2)).unwrap(), RakeConfig::none());
+        assert_eq!(
+            resolve_rake(&args(RakePreset::None, 2)).unwrap(),
+            RakeConfig::none()
+        );
     }
 
     #[test]

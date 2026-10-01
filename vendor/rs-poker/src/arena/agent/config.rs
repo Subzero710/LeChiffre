@@ -161,9 +161,7 @@
 
 use std::sync::Arc;
 
-use crate::arena::agent::{
-    AllInAgent, CallingAgent, EquityAgent, FoldingAgent, RandomAgent,
-};
+use crate::arena::agent::{AllInAgent, CallingAgent, EquityAgent, FoldingAgent, RandomAgent};
 use crate::arena::cfr::{
     BasicCFRActionGenerator, BudgetConfig, CFRAgentBuilder, CFRState, ConfigurableActionConfig,
     ConfigurableActionConfigError, ConfigurableActionGenerator, PreflopChartActionConfig,
@@ -499,22 +497,14 @@ pub enum AgentConfigError {
         "equity edge thresholds must satisfy 0 <= small < medium < large <= 1; \
          got small={small}, medium={medium}, large={large}"
     )]
-    InvalidEquityEdges {
-        small: f32,
-        medium: f32,
-        large: f32,
-    },
+    InvalidEquityEdges { small: f32, medium: f32, large: f32 },
 
     /// Equity bet fractions must be finite, positive, and non-decreasing.
     #[error(
         "equity bet fractions must satisfy 0 < small <= medium <= large; \
          got small={small}, medium={medium}, large={large}"
     )]
-    InvalidEquityBetFractions {
-        small: f32,
-        medium: f32,
-        large: f32,
-    },
+    InvalidEquityBetFractions { small: f32, medium: f32, large: f32 },
 
     /// JSON parsing error
     #[error("JSON parsing error: {0}")]
@@ -1100,7 +1090,9 @@ mod tests {
         let json = r#"{"type":"equity","iterations":10000}"#;
         let config: AgentConfig = serde_json::from_str(json).unwrap();
         match config {
-            AgentConfig::Equity { name, iterations, .. } => {
+            AgentConfig::Equity {
+                name, iterations, ..
+            } => {
                 assert!(name.is_none());
                 assert_eq!(iterations, 10_000);
             }

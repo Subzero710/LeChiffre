@@ -350,7 +350,6 @@ mod tests {
         assert_valid_game_state(&sim.game_state);
     }
 
-
     #[tokio::test]
     async fn test_random_agents_no_fold_get_all_rounds() {
         let stacks = vec![100; 5];
@@ -386,10 +385,6 @@ mod tests {
         assert_eq!(agent.name(), "TestAgent");
         assert!(!agent.name().is_empty());
     }
-
-
-
-
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_random_agent_can_fold_logic() {
@@ -477,10 +472,6 @@ mod tests {
         assert!(sim.game_state.is_complete());
     }
 
-
-
-
-
     #[tokio::test]
     async fn test_random_agent_pot_value_multiplication() {
         // Test: pot_value = (num_players + 1.0) * total_pot
@@ -552,5 +543,4 @@ mod tests {
         sim.run().await;
         assert!(sim.game_state.is_complete());
     }
-
 }

@@ -87,11 +87,12 @@ impl RakeSchedule {
             .ok_or(ScheduleError::UnverifiedPolicy {
                 policy: "rake rounding",
             })?;
-        let no_flop_no_drop = self.no_flop_no_drop.or(no_flop_no_drop).ok_or(
-            ScheduleError::UnverifiedPolicy {
-                policy: "no-flop-no-drop",
-            },
-        )?;
+        let no_flop_no_drop =
+            self.no_flop_no_drop
+                .or(no_flop_no_drop)
+                .ok_or(ScheduleError::UnverifiedPolicy {
+                    policy: "no-flop-no-drop",
+                })?;
         Ok(
             RakeConfig::new(self.rate, Some(self.cap), no_flop_no_drop, rounding)
                 .expect("validated published schedule")
@@ -224,9 +225,7 @@ fn exact_ratio(value: Chips, numerator: Chips, denominator: Chips) -> Option<Chi
 }
 
 fn standard_two_to_one_stakes(c: RakeContext) -> bool {
-    c.small_blind > 0
-        && c.big_blind > 0
-        && c.small_blind.checked_mul(2) == Some(c.big_blind)
+    c.small_blind > 0 && c.big_blind > 0 && c.small_blind.checked_mul(2) == Some(c.big_blind)
 }
 
 fn stars_schedule(c: RakeContext) -> Result<RakeSchedule, ScheduleError> {
@@ -235,29 +234,31 @@ fn stars_schedule(c: RakeContext) -> Result<RakeSchedule, ScheduleError> {
     }
     let bucket = bucket_three(c.dealt_players);
     let row = match c.currency {
-        Currency::Usd => {
-            if c.table_format == TableFormat::FastFold {
-                STARS_USD_ZOOM_MICRO
-                    .iter()
-                    .find(|r| (r.0, r.1) == (c.small_blind, c.big_blind))
-                    .copied()
-                    .or_else(|| {
-                        STARS_USD
-                            .iter()
-                            .find(|r| (r.0, r.1) == (c.small_blind, c.big_blind))
-                            .copied()
-                    })
-            } else {
-                STARS_USD
-                    .iter()
-                    .find(|r| (r.0, r.1) == (c.small_blind, c.big_blind))
-                    .copied()
-            }
-            .or_else(|| {
-                (c.big_blind >= 20_000 && standard_two_to_one_stakes(c))
-                    .then_some((c.small_blind, c.big_blind, 450, [300, 500, 500]))
-            })
+        Currency::Usd => if c.table_format == TableFormat::FastFold {
+            STARS_USD_ZOOM_MICRO
+                .iter()
+                .find(|r| (r.0, r.1) == (c.small_blind, c.big_blind))
+                .copied()
+                .or_else(|| {
+                    STARS_USD
+                        .iter()
+                        .find(|r| (r.0, r.1) == (c.small_blind, c.big_blind))
+                        .copied()
+                })
+        } else {
+            STARS_USD
+                .iter()
+                .find(|r| (r.0, r.1) == (c.small_blind, c.big_blind))
+                .copied()
         }
+        .or_else(|| {
+            (c.big_blind >= 20_000 && standard_two_to_one_stakes(c)).then_some((
+                c.small_blind,
+                c.big_blind,
+                450,
+                [300, 500, 500],
+            ))
+        }),
         Currency::Eur => STARS_EUR
             .iter()
             .find(|r| (r.0, r.1) == (c.small_blind, c.big_blind))

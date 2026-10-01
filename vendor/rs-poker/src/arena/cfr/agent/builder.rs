@@ -225,7 +225,6 @@ where
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,9 +253,6 @@ mod tests {
             .build();
 
         let ranges = agent.estimator.estimate(&game_state, None).await;
-        assert!(matches!(
-            ranges.get(1),
-            Some(HandDistribution::Weighted(_))
-        ));
+        assert!(matches!(ranges.get(1), Some(HandDistribution::Weighted(_))));
     }
 }
