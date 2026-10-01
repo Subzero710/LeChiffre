@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use crate::arena::action::AgentAction;
-use crate::arena::{HandDistributionEstimator, hand_estimator::KnownHandsEstimator};
+use crate::arena::{HandDistributionEstimator, hand_estimator::UniformRandomEstimator};
 
 use super::super::{
     ActionIndexMapper, ActionIndexMapperConfig, Budget, BudgetConfig, CFRState, InFlightLimiter,
@@ -144,9 +144,9 @@ where
         let stop = self
             .stop
             .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
-        let estimator = self
-            .estimator
-            .unwrap_or_else(|| Arc::new(KnownHandsEstimator) as Arc<dyn HandDistributionEstimator>);
+        let estimator = self.estimator.unwrap_or_else(|| {
+            Arc::new(UniformRandomEstimator) as Arc<dyn HandDistributionEstimator>
+        });
 
         // Only agents whose estimator needs history carry a log. Sub-agents are
         // handed one via `hand_log()`; a depth-0 agent that needs history but
@@ -217,9 +217,46 @@ where
     }
 
     /// Set the opponent hand-distribution estimator. Defaults to
-    /// [`KnownHandsEstimator`], which reproduces the pre-estimator behavior.
+    /// [`UniformRandomEstimator`] so an omitted estimator never exposes real
+    /// opponent hole cards to CFR.
     pub fn estimator(mut self, estimator: Arc<dyn HandDistributionEstimator>) -> Self {
         self.estimator = Some(estimator);
         self
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::arena::GameStateBuilder;
+    use crate::arena::cfr::BasicCFRActionGenerator;
+    use crate::arena::hand_estimator::HandDistribution;
+    use crate::core::{Card, Hand};
+
+    #[tokio::test]
+    async fn default_estimator_is_uniform() {
+        let mut game_state = GameStateBuilder::new()
+            .num_players_with_stack(2, 100)
+            .blinds(10, 5)
+            .build()
+            .unwrap();
+        game_state.hands[0] = Hand::new_with_cards(vec![Card::from(0), Card::from(1)]);
+        game_state.hands[1] = Hand::new_with_cards(vec![Card::from(2), Card::from(3)]);
+        game_state.round_data.to_act_idx = 0;
+
+        let agent = CFRAgentBuilder::<BasicCFRActionGenerator>::new()
+            .name("uniform-default-test")
+            .player_idx(0)
+            .action_gen_config(())
+            .traversal_set(TraversalSet::new(2))
+            .cfr_state(CFRState::new(game_state.clone()))
+            .build();
+
+        let ranges = agent.estimator.estimate(&game_state, None).await;
+        assert!(matches!(
+            ranges.get(1),
+            Some(HandDistribution::Weighted(_))
+        ));
     }
 }

@@ -287,7 +287,7 @@ pub enum AgentConfig {
         #[serde(default)]
         exploration: CfrExploration,
         /// Which hand estimator the agent uses for its opponents. Defaults to
-        /// `known` (today's behavior).
+        /// `uniform` so omitted config never exposes real opponent hole cards.
         #[serde(default)]
         hand_estimator: EstimatorConfig,
     },
@@ -303,7 +303,7 @@ pub enum AgentConfig {
         #[serde(default)]
         exploration: CfrExploration,
         /// Which hand estimator the agent uses for its opponents. Defaults to
-        /// `known` (today's behavior).
+        /// `uniform` so omitted config never exposes real opponent hole cards.
         #[serde(default)]
         hand_estimator: EstimatorConfig,
     },
@@ -323,7 +323,7 @@ pub enum AgentConfig {
         #[serde(default)]
         exploration: CfrExploration,
         /// Which hand estimator the agent uses for its opponents. Defaults to
-        /// `known` (today's behavior).
+        /// `uniform` so omitted config never exposes real opponent hole cards.
         #[serde(default)]
         hand_estimator: EstimatorConfig,
         /// Action generator configuration
@@ -343,7 +343,7 @@ pub enum AgentConfig {
         #[serde(default)]
         exploration: CfrExploration,
         /// Which hand estimator the agent uses for its opponents. Defaults to
-        /// `known` (today's behavior).
+        /// `uniform` so omitted config never exposes real opponent hole cards.
         #[serde(default)]
         hand_estimator: EstimatorConfig,
         /// Preflop chart configuration (inline or preset name)
@@ -464,10 +464,12 @@ pub struct CfrExploration {
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[serde(rename_all = "snake_case")]
 pub enum EstimatorConfig {
-    /// Use the real opponent hands (today's behavior). Default.
-    #[default]
+    /// Use the real opponent hands. Explicit opt-in only: this exposes hidden
+    /// information and is intended for diagnostics/tests, not normal play.
     Known,
-    /// Sample opponents uniformly from the remaining deck.
+    /// Sample opponents uniformly from the remaining deck. Safe default for
+    /// imperfect-information play.
+    #[default]
     Uniform,
 }
 
@@ -1276,10 +1278,13 @@ mod tests {
         let config: AgentConfig = serde_json::from_str(json).unwrap();
         match config {
             AgentConfig::CfrBasic {
-                name, exploration, ..
+                name,
+                exploration,
+                hand_estimator,
             } => {
                 assert!(name.is_none());
                 assert_eq!(exploration, CfrExploration::default());
+                assert_eq!(hand_estimator, EstimatorConfig::Uniform);
                 // Default = budget unset; the build path will substitute
                 // BudgetConfig::default() at construction time.
                 assert!(exploration.budget.is_none());
@@ -1569,8 +1574,8 @@ mod tests {
     }
 
     #[test]
-    fn estimator_config_defaults_to_known() {
-        assert_eq!(EstimatorConfig::default(), EstimatorConfig::Known);
+    fn estimator_config_defaults_to_uniform() {
+        assert_eq!(EstimatorConfig::default(), EstimatorConfig::Uniform);
     }
 
     #[test]
@@ -1627,12 +1632,12 @@ mod tests {
     }
 
     #[test]
-    fn cfr_configurable_defaults_hand_estimator_to_known() {
+    fn cfr_configurable_defaults_hand_estimator_to_uniform() {
         let json = r#"{ "type": "cfr_configurable", "action_config": {} }"#;
         let cfg: AgentConfig = serde_json::from_str(json).unwrap();
         match cfg {
             AgentConfig::CfrConfigurable { hand_estimator, .. } => {
-                assert_eq!(hand_estimator, EstimatorConfig::Known);
+                assert_eq!(hand_estimator, EstimatorConfig::Uniform);
             }
             other => panic!("expected CfrConfigurable, got {other:?}"),
         }
