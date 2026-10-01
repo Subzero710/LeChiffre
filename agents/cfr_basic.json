@@ -1,0 +1,17 @@
+{
+  "type": "cfr_basic",
+  "name": "CFRAgent",
+  "hand_estimator": "uniform",
+  "exploration": {
+    "budget": [
+      {
+        "type": "deadline",
+        "millis": 250
+      },
+      {
+        "type": "per_depth_iterations",
+        "counts": [20, 5, 1]
+      }
+    ]
+  }
+}
