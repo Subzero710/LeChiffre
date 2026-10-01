@@ -127,6 +127,7 @@ mod tests {
         MostRestrictive, NUM_ACTION_INDICES, PerDepth, TraversalSet,
     };
     use crate::arena::game_state::{Round, RoundData};
+    use crate::arena::hand_estimator::KnownHandsEstimator;
 
     use crate::arena::{
         Agent, GameState, GameStateBuilder, HoldemSimulation, HoldemSimulationBuilder, test_util,
@@ -333,6 +334,11 @@ mod tests {
                         .cfr_state(cfr_state.clone())
                         .traversal_set(traversal_set.clone())
                         .budget(budget.clone())
+                        // These solver tests construct both exact hole-card hands and
+                        // assert the perfect-information best response. Keep that
+                        // diagnostic contract explicit now that production CFR defaults
+                        // to the hidden-information-safe UniformRandomEstimator.
+                        .estimator(Arc::new(KnownHandsEstimator))
                         .action_gen_config(())
                         .build(),
                 )
