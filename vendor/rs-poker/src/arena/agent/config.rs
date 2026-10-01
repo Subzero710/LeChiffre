@@ -234,21 +234,45 @@ pub enum AgentConfig {
         iterations: usize,
         /// Edge at which passive call/check becomes a small raise.
         #[serde(default = "default_equity_small_edge")]
+        #[cfg_attr(
+            feature = "serde",
+            serde(deserialize_with = "crate::arena::serde_numbers::deserialize")
+        )]
         small_edge: f32,
         /// Edge at which the small raise becomes a medium raise.
         #[serde(default = "default_equity_medium_edge")]
+        #[cfg_attr(
+            feature = "serde",
+            serde(deserialize_with = "crate::arena::serde_numbers::deserialize")
+        )]
         medium_edge: f32,
         /// Edge at which the medium raise becomes a large raise.
         #[serde(default = "default_equity_large_edge")]
+        #[cfg_attr(
+            feature = "serde",
+            serde(deserialize_with = "crate::arena::serde_numbers::deserialize")
+        )]
         large_edge: f32,
         /// Small raise size as a fraction of the current pot.
         #[serde(default = "default_equity_small_bet_pot")]
+        #[cfg_attr(
+            feature = "serde",
+            serde(deserialize_with = "crate::arena::serde_numbers::deserialize")
+        )]
         small_bet_pot: f32,
         /// Medium raise size as a fraction of the current pot.
         #[serde(default = "default_equity_medium_bet_pot")]
+        #[cfg_attr(
+            feature = "serde",
+            serde(deserialize_with = "crate::arena::serde_numbers::deserialize")
+        )]
         medium_bet_pot: f32,
         /// Large raise size as a fraction of the current pot.
         #[serde(default = "default_equity_large_bet_pot")]
+        #[cfg_attr(
+            feature = "serde",
+            serde(deserialize_with = "crate::arena::serde_numbers::deserialize")
+        )]
         large_bet_pot: f32,
     },
     /// CFR agent with depth-based game state iterations

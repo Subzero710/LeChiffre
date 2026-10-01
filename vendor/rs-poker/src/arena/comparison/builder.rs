@@ -191,7 +191,7 @@ fn get_agent_name(config: &AgentConfig, fallback_name: &str) -> String {
         | AgentConfig::Calling { name, .. }
         | AgentConfig::Folding { name, .. }
         | AgentConfig::Random { name, .. }
-        | AgentConfig::RandomPotControl { name, .. }
+        | AgentConfig::Equity { name, .. }
         | AgentConfig::CfrBasic { name, .. }
         | AgentConfig::CfrSimple { name, .. }
         | AgentConfig::CfrConfigurable { name, .. }

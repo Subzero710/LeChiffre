@@ -3129,7 +3129,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn test_debug_folding_agent_agent_comparison_scenario() {
         // Simulate agent_comparison: all 6 agents, 3 at a table, many permutations
-        use crate::arena::agent::{RandomAgent, RandomPotControlAgent};
+        use crate::arena::agent::{EquityAgent, RandomAgent};
         use itertools::Itertools;
         use rand::SeedableRng;
         use rand::rngs::StdRng;
@@ -3145,7 +3145,7 @@ mod tests {
             "Folding",
             "RandomAgg",
             "RandomDef",
-            "RandomPot",
+            "Equity",
         ];
 
         // Test all permutations of 3 agents from 6 types
@@ -3174,9 +3174,7 @@ mod tests {
                                 vec![0.4, 0.5, 0.4],
                             )),
                             "RandomDef" => Box::new(RandomAgent::default()),
-                            "RandomPot" => {
-                                Box::new(RandomPotControlAgent::new("RandomPot", vec![0.5, 0.3]))
-                            }
+                            "Equity" => Box::new(EquityAgent::default()),
                             _ => unreachable!(),
                         }
                     })
