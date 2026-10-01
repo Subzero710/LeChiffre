@@ -1,6 +1,6 @@
 {
-  "type": "cfr_basic",
-  "name": "CFRBasicAgent",
+  "type": "cfr_simple",
+  "name": "CFRSimpleAgent",
   "hand_estimator": "uniform",
   "exploration": {
     "budget": [
