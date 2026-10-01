@@ -32,7 +32,7 @@
 //!
 //! ### Configurable Agents
 //! - `random` - Random decision making with probability vectors
-//! - `equity` - Monte Carlo equity baseline using immediate pot odds
+//! - `equity` - Monte Carlo equity baseline with equity-driven bet sizing
 //!
 //! ## Examples
 //!
@@ -54,7 +54,13 @@
 //! ```json
 //! {
 //!   "type": "equity",
-//!   "iterations": 1000
+//!   "iterations": 1000,
+//!   "small_edge": 0.15,
+//!   "medium_edge": 0.35,
+//!   "large_edge": 0.60,
+//!   "small_bet_pot": 0.33,
+//!   "medium_bet_pot": 0.66,
+//!   "large_bet_pot": 1.0
 //! }
 //! ```
 //!
@@ -216,8 +222,9 @@ pub enum AgentConfig {
         )]
         percent_call: Vec<f64>,
     },
-    /// Equity-only baseline: estimate showdown equity with Monte Carlo and
-    /// call iff that equity meets the immediate pot odds.
+    /// Equity-driven baseline: estimate showdown equity with Monte Carlo,
+    /// compare it to pot odds / equal-share equity, and increase bet size as
+    /// the normalized equity edge grows.
     Equity {
         /// Optional explicit name for the agent
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -225,6 +232,24 @@ pub enum AgentConfig {
         /// Number of Monte Carlo samples used for each decision.
         #[serde(default = "default_equity_iterations")]
         iterations: usize,
+        /// Edge at which passive call/check becomes a small raise.
+        #[serde(default = "default_equity_small_edge")]
+        small_edge: f32,
+        /// Edge at which the small raise becomes a medium raise.
+        #[serde(default = "default_equity_medium_edge")]
+        medium_edge: f32,
+        /// Edge at which the medium raise becomes a large raise.
+        #[serde(default = "default_equity_large_edge")]
+        large_edge: f32,
+        /// Small raise size as a fraction of the current pot.
+        #[serde(default = "default_equity_small_bet_pot")]
+        small_bet_pot: f32,
+        /// Medium raise size as a fraction of the current pot.
+        #[serde(default = "default_equity_medium_bet_pot")]
+        medium_bet_pot: f32,
+        /// Large raise size as a fraction of the current pot.
+        #[serde(default = "default_equity_large_bet_pot")]
+        large_bet_pot: f32,
     },
     /// CFR agent with depth-based game state iterations
     ///
@@ -372,6 +397,30 @@ fn default_equity_iterations() -> usize {
     super::equity::DEFAULT_EQUITY_ITERATIONS
 }
 
+fn default_equity_small_edge() -> f32 {
+    super::equity::DEFAULT_EQUITY_SMALL_EDGE
+}
+
+fn default_equity_medium_edge() -> f32 {
+    super::equity::DEFAULT_EQUITY_MEDIUM_EDGE
+}
+
+fn default_equity_large_edge() -> f32 {
+    super::equity::DEFAULT_EQUITY_LARGE_EDGE
+}
+
+fn default_equity_small_bet_pot() -> f32 {
+    super::equity::DEFAULT_EQUITY_SMALL_BET_POT
+}
+
+fn default_equity_medium_bet_pot() -> f32 {
+    super::equity::DEFAULT_EQUITY_MEDIUM_BET_POT
+}
+
+fn default_equity_large_bet_pot() -> f32 {
+    super::equity::DEFAULT_EQUITY_LARGE_BET_POT
+}
+
 /// Exploration policy for a CFR agent — just the unified budget. All
 /// the previously-separate knobs (`max_recursion_depth`, `concurrency`,
 /// `act_deadline_ms`) now live inside the budget tree.
@@ -418,6 +467,28 @@ pub enum AgentConfigError {
     /// EquityAgent requires at least one Monte Carlo sample per decision.
     #[error("equity iterations must be greater than zero")]
     InvalidEquityIterations,
+
+    /// Equity edge thresholds must be finite, ordered, and stay in [0, 1].
+    #[error(
+        "equity edge thresholds must satisfy 0 <= small < medium < large <= 1; \
+         got small={small}, medium={medium}, large={large}"
+    )]
+    InvalidEquityEdges {
+        small: f32,
+        medium: f32,
+        large: f32,
+    },
+
+    /// Equity bet fractions must be finite, positive, and non-decreasing.
+    #[error(
+        "equity bet fractions must satisfy 0 < small <= medium <= large; \
+         got small={small}, medium={medium}, large={large}"
+    )]
+    InvalidEquityBetFractions {
+        small: f32,
+        medium: f32,
+        large: f32,
+    },
 
     /// JSON parsing error
     #[error("JSON parsing error: {0}")]
@@ -510,9 +581,45 @@ impl AgentConfig {
                 validate_probabilities(percent_fold)?;
                 validate_probabilities(percent_call)?;
             }
-            AgentConfig::Equity { iterations, .. } => {
+            AgentConfig::Equity {
+                iterations,
+                small_edge,
+                medium_edge,
+                large_edge,
+                small_bet_pot,
+                medium_bet_pot,
+                large_bet_pot,
+                ..
+            } => {
                 if *iterations == 0 {
                     return Err(AgentConfigError::InvalidEquityIterations);
+                }
+                if !small_edge.is_finite()
+                    || !medium_edge.is_finite()
+                    || !large_edge.is_finite()
+                    || *small_edge < 0.0
+                    || *small_edge >= *medium_edge
+                    || *medium_edge >= *large_edge
+                    || *large_edge > 1.0
+                {
+                    return Err(AgentConfigError::InvalidEquityEdges {
+                        small: *small_edge,
+                        medium: *medium_edge,
+                        large: *large_edge,
+                    });
+                }
+                if !small_bet_pot.is_finite()
+                    || !medium_bet_pot.is_finite()
+                    || !large_bet_pot.is_finite()
+                    || *small_bet_pot <= 0.0
+                    || *small_bet_pot > *medium_bet_pot
+                    || *medium_bet_pot > *large_bet_pot
+                {
+                    return Err(AgentConfigError::InvalidEquityBetFractions {
+                        small: *small_bet_pot,
+                        medium: *medium_bet_pot,
+                        large: *large_bet_pot,
+                    });
                 }
             }
             AgentConfig::CfrConfigurable { action_config, .. } => {
@@ -716,9 +823,24 @@ impl ConfigAgentBuilder {
                     ))
                 }
             }
-            AgentConfig::Equity { name, iterations } => Box::new(EquityAgent::new(
+            AgentConfig::Equity {
+                name,
+                iterations,
+                small_edge,
+                medium_edge,
+                large_edge,
+                small_bet_pot,
+                medium_bet_pot,
+                large_bet_pot,
+            } => Box::new(EquityAgent::new(
                 resolve_agent_name(name, "EquityAgent", player_idx),
                 *iterations,
+                *small_edge,
+                *medium_edge,
+                *large_edge,
+                *small_bet_pot,
+                *medium_bet_pot,
+                *large_bet_pot,
             )),
             AgentConfig::CfrBasic {
                 name,
@@ -924,9 +1046,24 @@ mod tests {
         let json = r#"{"type":"equity"}"#;
         let config: AgentConfig = serde_json::from_str(json).unwrap();
         match config {
-            AgentConfig::Equity { name, iterations } => {
+            AgentConfig::Equity {
+                name,
+                iterations,
+                small_edge,
+                medium_edge,
+                large_edge,
+                small_bet_pot,
+                medium_bet_pot,
+                large_bet_pot,
+            } => {
                 assert!(name.is_none());
                 assert_eq!(iterations, 1_000);
+                assert_eq!(small_edge, 0.15);
+                assert_eq!(medium_edge, 0.35);
+                assert_eq!(large_edge, 0.60);
+                assert_eq!(small_bet_pot, 0.33);
+                assert_eq!(medium_bet_pot, 0.66);
+                assert_eq!(large_bet_pot, 1.0);
             }
             _ => panic!("Expected Equity variant"),
         }
@@ -937,7 +1074,7 @@ mod tests {
         let json = r#"{"type":"equity","iterations":10000}"#;
         let config: AgentConfig = serde_json::from_str(json).unwrap();
         match config {
-            AgentConfig::Equity { name, iterations } => {
+            AgentConfig::Equity { name, iterations, .. } => {
                 assert!(name.is_none());
                 assert_eq!(iterations, 10_000);
             }
@@ -999,6 +1136,12 @@ mod tests {
             AgentConfig::Equity {
                 name: None,
                 iterations: 1_000,
+                small_edge: default_equity_small_edge(),
+                medium_edge: default_equity_medium_edge(),
+                large_edge: default_equity_large_edge(),
+                small_bet_pot: default_equity_small_bet_pot(),
+                medium_bet_pot: default_equity_medium_bet_pot(),
+                large_bet_pot: default_equity_large_bet_pot(),
             },
         ];
 
@@ -1238,16 +1381,58 @@ mod tests {
         let config = AgentConfig::Equity {
             name: Some("Test".to_string()),
             iterations: 1_000,
+            small_edge: 0.15,
+            medium_edge: 0.35,
+            large_edge: 0.60,
+            small_bet_pot: 0.33,
+            medium_bet_pot: 0.66,
+            large_bet_pot: 1.0,
         };
         assert!(config.validate().is_ok());
 
         let invalid_config = AgentConfig::Equity {
             name: Some("Test".to_string()),
             iterations: 0,
+            small_edge: 0.15,
+            medium_edge: 0.35,
+            large_edge: 0.60,
+            small_bet_pot: 0.33,
+            medium_bet_pot: 0.66,
+            large_bet_pot: 1.0,
         };
         assert!(matches!(
             invalid_config.validate(),
             Err(AgentConfigError::InvalidEquityIterations)
+        ));
+
+        let invalid_edges = AgentConfig::Equity {
+            name: None,
+            iterations: 1_000,
+            small_edge: 0.40,
+            medium_edge: 0.35,
+            large_edge: 0.60,
+            small_bet_pot: 0.33,
+            medium_bet_pot: 0.66,
+            large_bet_pot: 1.0,
+        };
+        assert!(matches!(
+            invalid_edges.validate(),
+            Err(AgentConfigError::InvalidEquityEdges { .. })
+        ));
+
+        let invalid_bets = AgentConfig::Equity {
+            name: None,
+            iterations: 1_000,
+            small_edge: 0.15,
+            medium_edge: 0.35,
+            large_edge: 0.60,
+            small_bet_pot: 0.80,
+            medium_bet_pot: 0.66,
+            large_bet_pot: 1.0,
+        };
+        assert!(matches!(
+            invalid_bets.validate(),
+            Err(AgentConfigError::InvalidEquityBetFractions { .. })
         ));
     }
 
