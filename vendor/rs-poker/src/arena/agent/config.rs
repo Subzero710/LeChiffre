@@ -32,7 +32,7 @@
 //!
 //! ### Configurable Agents
 //! - `random` - Random decision making with probability vectors
-//! - `random_pot_control` - Monte Carlo-based pot control
+//! - `equity` - Monte Carlo equity baseline using immediate pot odds
 //!
 //! ## Examples
 //!
@@ -50,11 +50,11 @@
 //! }
 //! ```
 //!
-//! ### Random Pot Control Agent
+//! ### Equity Agent
 //! ```json
 //! {
-//!   "type": "random_pot_control",
-//!   "percent_call": [0.5, 0.3]
+//!   "type": "equity",
+//!   "iterations": 1000
 //! }
 //! ```
 //!
@@ -156,7 +156,7 @@
 use std::sync::Arc;
 
 use crate::arena::agent::{
-    AllInAgent, CallingAgent, FoldingAgent, RandomAgent, RandomPotControlAgent,
+    AllInAgent, CallingAgent, EquityAgent, FoldingAgent, RandomAgent,
 };
 use crate::arena::cfr::{
     BasicCFRActionGenerator, BudgetConfig, CFRAgentBuilder, CFRState, ConfigurableActionConfig,
@@ -216,17 +216,15 @@ pub enum AgentConfig {
         )]
         percent_call: Vec<f64>,
     },
-    /// Agent that uses Monte Carlo simulation for pot control
-    RandomPotControl {
+    /// Equity-only baseline: estimate showdown equity with Monte Carlo and
+    /// call iff that equity meets the immediate pot odds.
+    Equity {
         /// Optional explicit name for the agent
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
-        /// Probability of calling indexed by raise count
-        #[cfg_attr(
-            feature = "serde",
-            serde(deserialize_with = "crate::arena::serde_numbers::deserialize")
-        )]
-        percent_call: Vec<f64>,
+        /// Number of Monte Carlo samples used for each decision.
+        #[serde(default = "default_equity_iterations")]
+        iterations: usize,
     },
     /// CFR agent with depth-based game state iterations
     ///
@@ -370,6 +368,10 @@ fn default_percent_call() -> Vec<f64> {
     vec![0.5, 0.6, 0.45]
 }
 
+fn default_equity_iterations() -> usize {
+    super::equity::DEFAULT_EQUITY_ITERATIONS
+}
+
 /// Exploration policy for a CFR agent — just the unified budget. All
 /// the previously-separate knobs (`max_recursion_depth`, `concurrency`,
 /// `act_deadline_ms`) now live inside the budget tree.
@@ -412,6 +414,10 @@ pub enum AgentConfigError {
     /// Invalid probability value (must be between 0.0 and 1.0)
     #[error("Invalid probability value: {0} (must be between 0.0 and 1.0)")]
     InvalidProbability(f64),
+
+    /// EquityAgent requires at least one Monte Carlo sample per decision.
+    #[error("equity iterations must be greater than zero")]
+    InvalidEquityIterations,
 
     /// JSON parsing error
     #[error("JSON parsing error: {0}")]
@@ -504,8 +510,10 @@ impl AgentConfig {
                 validate_probabilities(percent_fold)?;
                 validate_probabilities(percent_call)?;
             }
-            AgentConfig::RandomPotControl { percent_call, .. } => {
-                validate_probabilities(percent_call)?;
+            AgentConfig::Equity { iterations, .. } => {
+                if *iterations == 0 {
+                    return Err(AgentConfigError::InvalidEquityIterations);
+                }
             }
             AgentConfig::CfrConfigurable { action_config, .. } => {
                 action_config.validate()?;
@@ -626,9 +634,9 @@ impl ConfigAgentBuilder {
 
     /// Set an RNG seed for the agent.
     ///
-    /// When set, agents that use randomness (Random, RandomPotControl) will use
-    /// a deterministic RNG seeded from this value instead of system entropy.
-    /// CFR agents draw from a thread-local RNG and ignore this seed.
+    /// When set, `RandomAgent` uses a deterministic RNG seeded from this value
+    /// instead of system entropy. Equity/CFR simulations use their own RNG paths
+    /// and ignore this seed.
     pub fn rng_seed(mut self, seed: u64) -> Self {
         self.rng_seed = Some(seed);
         self
@@ -708,18 +716,10 @@ impl ConfigAgentBuilder {
                     ))
                 }
             }
-            AgentConfig::RandomPotControl { name, percent_call } => {
-                let agent_name = resolve_agent_name(name, "RandomPotControlAgent", player_idx);
-                if let Some(seed) = self.rng_seed {
-                    Box::new(RandomPotControlAgent::new_with_seed(
-                        agent_name,
-                        percent_call.clone(),
-                        seed,
-                    ))
-                } else {
-                    Box::new(RandomPotControlAgent::new(agent_name, percent_call.clone()))
-                }
-            }
+            AgentConfig::Equity { name, iterations } => Box::new(EquityAgent::new(
+                resolve_agent_name(name, "EquityAgent", player_idx),
+                *iterations,
+            )),
             AgentConfig::CfrBasic {
                 name,
                 exploration,
@@ -920,15 +920,28 @@ mod tests {
     }
 
     #[test]
-    fn test_deserialize_random_pot_control() {
-        let json = r#"{"type":"random_pot_control","percent_call":[0.5,0.3]}"#;
+    fn test_deserialize_equity_with_default_iterations() {
+        let json = r#"{"type":"equity"}"#;
         let config: AgentConfig = serde_json::from_str(json).unwrap();
         match config {
-            AgentConfig::RandomPotControl { name, percent_call } => {
+            AgentConfig::Equity { name, iterations } => {
                 assert!(name.is_none());
-                assert_eq!(percent_call, vec![0.5, 0.3]);
+                assert_eq!(iterations, 1_000);
             }
-            _ => panic!("Expected RandomPotControl variant"),
+            _ => panic!("Expected Equity variant"),
+        }
+    }
+
+    #[test]
+    fn test_deserialize_equity_with_custom_iterations() {
+        let json = r#"{"type":"equity","iterations":10000}"#;
+        let config: AgentConfig = serde_json::from_str(json).unwrap();
+        match config {
+            AgentConfig::Equity { name, iterations } => {
+                assert!(name.is_none());
+                assert_eq!(iterations, 10_000);
+            }
+            _ => panic!("Expected Equity variant"),
         }
     }
 
@@ -983,9 +996,9 @@ mod tests {
                 percent_fold: vec![0.2],
                 percent_call: vec![0.5],
             },
-            AgentConfig::RandomPotControl {
+            AgentConfig::Equity {
                 name: None,
-                percent_call: vec![0.4, 0.3],
+                iterations: 1_000,
             },
         ];
 
@@ -1221,31 +1234,21 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_random_pot_control_match_arm() {
-        // Test that the RandomPotControl match arm in validate() is executed
-        let config = AgentConfig::RandomPotControl {
+    fn test_validate_equity_match_arm() {
+        let config = AgentConfig::Equity {
             name: Some("Test".to_string()),
-            percent_call: vec![0.5, 0.6], // Valid probabilities
+            iterations: 1_000,
         };
+        assert!(config.validate().is_ok());
 
-        // Should validate successfully
-        let result = config.validate();
-        assert!(
-            result.is_ok(),
-            "Valid RandomPotControl should pass validation"
-        );
-
-        // Test with invalid probability
-        let invalid_config = AgentConfig::RandomPotControl {
+        let invalid_config = AgentConfig::Equity {
             name: Some("Test".to_string()),
-            percent_call: vec![1.5], // Invalid - > 1.0
+            iterations: 0,
         };
-
-        let result = invalid_config.validate();
-        assert!(
-            result.is_err(),
-            "Invalid RandomPotControl should fail validation"
-        );
+        assert!(matches!(
+            invalid_config.validate(),
+            Err(AgentConfigError::InvalidEquityIterations)
+        ));
     }
 
     #[test]
