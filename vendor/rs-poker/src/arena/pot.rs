@@ -78,7 +78,12 @@ pub fn plan_pots(gs: &GameState, flop_dealt: bool) -> Vec<PotSlice> {
         pot.rake = if pot.refund_to.is_some() {
             0
         } else {
-            gs.rake.calculate(pot.gross, flop_dealt, collected)
+            gs.rake.calculate_with_hand_context(
+                pot.gross,
+                flop_dealt,
+                gs.preflop_three_bet_or_higher,
+                collected,
+            )
         };
         pot.net = pot.gross - pot.rake;
         collected += pot.rake;
@@ -269,6 +274,43 @@ mod tests {
             gs.stacks.iter().sum::<Chips>() + 45
         );
     }
+    #[test]
+    fn preflop_three_bet_exception_rakes_only_contested_money() {
+        let rake = RakeConfig::new(
+            RakeRate::new(5, 100).unwrap(),
+            Some(100),
+            true,
+            RakeRounding::Ceil,
+        )
+        .unwrap()
+        .with_preflop_three_bet_rake(true);
+        let mut gs = GameStateBuilder::new()
+            .stacks([100, 100, 100])
+            .blinds(2, 1)
+            .round(Round::Preflop)
+            .rake(rake)
+            .build()
+            .unwrap();
+        gs.round_data.to_act_idx = 0;
+
+        gs.do_bet(4, false).unwrap(); // open raise
+        gs.do_bet(12, false).unwrap(); // 3-bet
+        gs.fold(); // player 2
+        gs.fold(); // opener folds; 3-bettor wins
+        assert!(gs.preflop_three_bet_or_higher);
+
+        let pots = plan_pots(&gs, false);
+        assert_eq!(
+            pots.iter()
+                .map(|p| (p.gross, p.rake, p.refund_to))
+                .collect::<Vec<_>>(),
+            vec![(8, 1, None), (8, 0, Some(1))]
+        );
+        settle_pots(&mut gs);
+        assert_eq!(gs.rake_collected, 1);
+        assert_eq!(gs.stacks.iter().sum::<Chips>() + gs.rake_collected, 300);
+    }
+
     #[test]
     fn no_flop_no_drop_uncontested_hand_and_one_cent_cap() {
         let rake = RakeConfig::new(

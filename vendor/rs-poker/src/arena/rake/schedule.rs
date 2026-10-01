@@ -1,6 +1,8 @@
 //! Published NLHE cash rake data, researched 2026-09-30. Currency amounts are
 //! expressed in their smallest supported unit (cents for USD/EUR/GBP/USDT).
-//! This module does not infer exchange rates or missing room policies.
+//! This module does not infer exchange rates. When a room leaves a monetary
+//! policy unpublished, the project may use an explicit worst-case convention;
+//! those choices are called out in `limitations`.
 use super::{RakeConfig, RakeRate, RakeRounding};
 use crate::Chips;
 use thiserror::Error;
@@ -50,6 +52,8 @@ pub struct RakeSchedule {
     pub rate: RakeRate,
     pub cap: Chips,
     pub no_flop_no_drop: Option<bool>,
+    /// Room-specific exception: rake preflop once betting reaches a 3-bet+.
+    pub preflop_three_bet_rake: bool,
     pub rounding: Option<RakeRounding>,
     pub source: &'static str,
     /// Base percentage rake only. CoinPoker splash fees and GG promotional drops
@@ -90,7 +94,8 @@ impl RakeSchedule {
         )?;
         Ok(
             RakeConfig::new(self.rate, Some(self.cap), no_flop_no_drop, rounding)
-                .expect("validated published schedule"),
+                .expect("validated published schedule")
+                .with_preflop_three_bet_rake(self.preflop_three_bet_rake),
         )
     }
 }
@@ -269,6 +274,7 @@ fn stars_schedule(c: RakeContext) -> Result<RakeSchedule, ScheduleError> {
         rate: RakeRate::new(row.2, 10_000).expect("published PokerStars rate"),
         cap: row.3[bucket],
         no_flop_no_drop: Some(true),
+        preflop_three_bet_rake: false,
         rounding: Some(RakeRounding::HalfToEven),
         source: "https://www.pokerstars.com/poker/room/rake/",
         limitations: "Published NLHE cash rows only; non-USD caps can change after quarterly review",
@@ -281,15 +287,6 @@ fn coin_schedule(c: RakeContext) -> Result<RakeSchedule, ScheduleError> {
         || (c.table_format == TableFormat::HeadsUp && c.dealt_players != 2)
     {
         return Err(ScheduleError::Unsupported(c));
-    }
-
-    if c.table_format == TableFormat::Regular
-        && (c.small_blind, c.big_blind) == (200, 500)
-        && matches!(c.dealt_players, 3 | 4)
-    {
-        return Err(ScheduleError::ConflictingPublishedData {
-            detail: "CoinPoker official localized rake pages disagree on the $2/$5 3-4 player cap ($4.80 vs $5.00)",
-        });
     }
 
     let cap = if c.table_format == TableFormat::HeadsUp {
@@ -329,10 +326,11 @@ fn coin_schedule(c: RakeContext) -> Result<RakeSchedule, ScheduleError> {
     Ok(RakeSchedule {
         rate: RakeRate::new(5, 100).expect("published CoinPoker rate"),
         cap,
-        no_flop_no_drop: None,
-        rounding: None,
+        no_flop_no_drop: Some(true),
+        preflop_three_bet_rake: false,
+        rounding: Some(RakeRounding::Ceil),
         source: "https://coinpoker.com/rake/",
-        limitations: "USDT NLHE base rake; excludes splash fees/cash drops; exact base-rake rounding and no-flop-no-drop remain unverified",
+        limitations: "USDT NLHE base rake; excludes splash fees/cash drops; project worst-case convention uses ceil rounding and chooses the higher published $5.00 cap for the conflicting $2/$5 3-4 player row",
     })
 }
 
@@ -356,10 +354,11 @@ fn gg_schedule(c: RakeContext) -> Result<RakeSchedule, ScheduleError> {
     Ok(RakeSchedule {
         rate: RakeRate::new(5, 100).expect("published GGPoker rate"),
         cap: row.2[bucket],
-        no_flop_no_drop: None,
-        rounding: None,
-        source: "https://legal.ggpoker.com/poker-games/texas-holdem/",
-        limitations: "USD base NLHE rake only; excludes Rush & Cash, jackpot/promotional drops; exact NFND and rounding policy unverified; nine-max antes are outside the rake key",
+        no_flop_no_drop: Some(true),
+        preflop_three_bet_rake: true,
+        rounding: Some(RakeRounding::Ceil),
+        source: "https://help.ggpoker.com/article/Cash-Games---Frequently-Asked-Questions",
+        limitations: "USD base NLHE rake only; official GG FAQ rakes preflop 3-bet+ pots; project worst-case convention uses ceil rounding because the exact fractional-cent rule is unpublished; excludes Rush & Cash, jackpot/promotional drops; nine-max antes are outside the rake key",
     })
 }
 
@@ -506,18 +505,19 @@ mod tests {
     }
 
     #[test]
-    fn coinpoker_caps_high_stakes_and_conflicts_are_explicit() {
-        assert!(matches!(
-            rake_schedule_for(context(
-                Platform::CoinPoker,
-                Currency::Usdt,
-                TableFormat::Regular,
-                200,
-                500,
-                3,
-            )),
-            Err(ScheduleError::ConflictingPublishedData { .. })
-        ));
+    fn coinpoker_caps_high_stakes_and_worst_case_conflict_resolution() {
+        let disputed = rake_config_for(context(
+            Platform::CoinPoker,
+            Currency::Usdt,
+            TableFormat::Regular,
+            200,
+            500,
+            3,
+        ))
+        .unwrap();
+        assert_eq!(disputed.cap, Some(500));
+        assert_eq!(disputed.rounding, RakeRounding::Ceil);
+        assert!(disputed.no_flop_no_drop);
 
         let regular = rake_schedule_for(context(
             Platform::CoinPoker,
@@ -529,7 +529,8 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(regular.cap, 360);
-        assert_eq!(regular.no_flop_no_drop, None);
+        assert_eq!(regular.no_flop_no_drop, Some(true));
+        assert_eq!(regular.rounding, Some(RakeRounding::Ceil));
 
         assert_eq!(
             rake_schedule_for(context(
@@ -588,6 +589,21 @@ mod tests {
             .cap,
             25
         );
+
+        let gg = rake_config_for(context(
+            Platform::GGPoker,
+            Currency::Usd,
+            TableFormat::SixMax,
+            2,
+            5,
+            3,
+        ))
+        .unwrap();
+        assert_eq!(gg.rounding, RakeRounding::Ceil);
+        assert!(gg.no_flop_no_drop);
+        assert!(gg.preflop_three_bet_rake);
+        assert_eq!(gg.calculate_with_hand_context(100, false, false, 0), 0);
+        assert_eq!(gg.calculate_with_hand_context(100, false, true, 0), 5);
         assert_eq!(
             rake_schedule_for(context(
                 Platform::GGPoker,
@@ -617,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn currency_and_unverified_policies_never_default() {
+    fn currency_and_worst_case_room_policies_are_explicit() {
         assert!(
             rake_schedule_for(context(
                 Platform::PokerStars,
@@ -641,45 +657,34 @@ mod tests {
             .is_err()
         );
 
-        let coin = context(
+        let coin = rake_config_for(context(
             Platform::CoinPoker,
             Currency::Usdt,
             TableFormat::Regular,
             2,
             5,
             2,
-        );
-        assert!(matches!(
-            rake_config_for(coin),
-            Err(ScheduleError::UnverifiedPolicy {
-                policy: "rake rounding"
-            })
-        ));
-        assert!(
-            rake_schedule_for(coin)
-                .unwrap()
-                .resolve(Some(RakeRounding::Floor), Some(true))
-                .is_ok()
-        );
+        ))
+        .unwrap();
+        assert_eq!(coin.rounding, RakeRounding::Ceil);
+        assert!(coin.no_flop_no_drop);
+        assert!(!coin.preflop_three_bet_rake);
+        assert_eq!(coin.calculate_with_hand_context(100, false, false, 0), 0);
 
-        let gg = context(
+        let gg = rake_config_for(context(
             Platform::GGPoker,
             Currency::Usd,
             TableFormat::SixMax,
             2,
             5,
             2,
-        );
-        assert!(matches!(
-            rake_config_for(gg),
-            Err(ScheduleError::UnverifiedPolicy { .. })
-        ));
-        assert!(
-            rake_schedule_for(gg)
-                .unwrap()
-                .resolve(Some(RakeRounding::Floor), Some(true))
-                .is_ok()
-        );
+        ))
+        .unwrap();
+        assert_eq!(gg.rounding, RakeRounding::Ceil);
+        assert!(gg.no_flop_no_drop);
+        assert!(gg.preflop_three_bet_rake);
+        assert_eq!(gg.calculate_with_hand_context(100, false, false, 0), 0);
+        assert_eq!(gg.calculate_with_hand_context(100, false, true, 0), 5);
 
         assert!(
             rake_config_for(context(

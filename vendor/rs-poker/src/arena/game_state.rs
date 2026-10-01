@@ -111,6 +111,7 @@ pub struct GameStateBuilder {
     dealer_idx: Option<usize>,                // Default: 0
     max_raises_per_round: Option<Option<u8>>, // Default: Some(3)
     rake: Option<RakeConfig>,                 // Default: no rake
+    preflop_three_bet_or_higher: Option<bool>, // Default: false
 
     // For mid-game states (defaults for new games)
     round: Option<Round>,                 // Default: Round::Starting
@@ -173,6 +174,14 @@ impl GameStateBuilder {
     /// reward paths use the exact same economic rules as the main simulation.
     pub fn rake(mut self, rake: RakeConfig) -> Self {
         self.rake = Some(rake);
+        self
+    }
+
+    /// Set whether the hand has already reached a preflop 3-bet or higher.
+    /// New hands track this automatically; this is for reconstructed mid-hand
+    /// states and exact replay fixtures.
+    pub fn preflop_three_bet_or_higher(mut self, value: bool) -> Self {
+        self.preflop_three_bet_or_higher = Some(value);
         self
     }
 
@@ -331,6 +340,7 @@ impl GameStateBuilder {
         let player_bet = self.player_bet.unwrap_or_else(|| smallvec![0; num_players]);
         let max_raises_per_round = self.max_raises_per_round.unwrap_or(Some(3));
         let rake = self.rake.unwrap_or_default();
+        let preflop_three_bet_or_higher = self.preflop_three_bet_or_higher.unwrap_or(false);
         rake.validate()
             .map_err(GameStateBuilderError::InvalidRake)?;
 
@@ -406,6 +416,7 @@ impl GameStateBuilder {
             max_raises_per_round,
             rake,
             rake_collected: 0,
+            preflop_three_bet_or_higher,
         })
     }
 }
@@ -686,6 +697,9 @@ pub struct GameState {
     pub rake: RakeConfig,
     /// Rake already collected in this hand (shared cap accounting).
     pub rake_collected: Chips,
+    /// Persistent hand-level marker used by room rake policies such as GG's
+    /// preflop 3-bet+ exception.
+    pub preflop_three_bet_or_higher: bool,
 }
 
 impl GameState {
@@ -836,6 +850,13 @@ impl GameState {
 
         self.round_data.do_bet(extra_amount, is_forced);
 
+        if self.round == Round::Preflop
+            && !is_forced
+            && self.round_data.total_raise_count >= 2
+        {
+            self.preflop_three_bet_or_higher = true;
+        }
+
         self.player_bet[idx] += extra_amount;
 
         self.total_pot += extra_amount;
@@ -875,8 +896,12 @@ impl GameState {
     /// the state. `flop_dealt` is explicit so CFR board-enumeration paths can
     /// evaluate a future showdown without materializing every board in the state.
     pub fn rake_amount_for_pot(&self, pot_amount: Chips, flop_dealt: bool) -> Chips {
-        self.rake
-            .calculate(pot_amount, flop_dealt, self.rake_collected)
+        self.rake.calculate_with_hand_context(
+            pot_amount,
+            flop_dealt,
+            self.preflop_three_bet_or_higher,
+            self.rake_collected,
+        )
     }
 
     /// Return the amount of a pot left for players after rake, without mutating
@@ -1938,6 +1963,25 @@ mod tests {
         let cloned = gs.clone();
         assert_eq!(cloned.rake, rake);
         assert_eq!(cloned.rake_collected, 0);
+    }
+
+    #[test]
+    fn test_preflop_three_bet_marker_is_persistent() {
+        let mut gs = GameStateBuilder::new()
+            .stacks([100, 100, 100])
+            .blinds(2, 1)
+            .round(Round::Preflop)
+            .build()
+            .unwrap();
+        gs.round_data.to_act_idx = 0;
+
+        gs.do_bet(4, false).unwrap(); // open raise
+        assert!(!gs.preflop_three_bet_or_higher);
+        gs.do_bet(12, false).unwrap(); // 3-bet
+        assert!(gs.preflop_three_bet_or_higher);
+
+        gs.advance_round();
+        assert!(gs.preflop_three_bet_or_higher);
     }
 
     #[test]

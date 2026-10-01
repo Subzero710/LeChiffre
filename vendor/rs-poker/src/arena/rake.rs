@@ -62,7 +62,12 @@ pub struct RakeConfig {
     pub rate: RakeRate,
     /// None means unlimited; negative caps are invalid.
     pub cap: Option<Chips>,
+    /// Baseline no-flop-no-drop rule. Some rooms (currently GG) make an
+    /// explicit exception for preflop pots that reach a 3-bet or higher.
     pub no_flop_no_drop: bool,
+    /// When true, a preflop 3-bet+ pot is rake-eligible even though
+    /// `no_flop_no_drop` is enabled.
+    pub preflop_three_bet_rake: bool,
     pub rounding: RakeRounding,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -83,11 +88,19 @@ impl RakeConfig {
             rate,
             cap,
             no_flop_no_drop,
+            preflop_three_bet_rake: false,
             rounding,
         };
         config.validate()?;
         Ok(config)
     }
+    /// Enable a room-specific exception that rakes preflop pots once the
+    /// betting reaches a 3-bet or higher.
+    pub const fn with_preflop_three_bet_rake(mut self, enabled: bool) -> Self {
+        self.preflop_three_bet_rake = enabled;
+        self
+    }
+
     pub fn validate(&self) -> Result<(), RakeConfigError> {
         if let Some(cap) = self.cap
             && cap < 0
@@ -101,20 +114,36 @@ impl RakeConfig {
             rate: RakeRate::zero(),
             cap: None,
             no_flop_no_drop: false,
+            preflop_three_bet_rake: false,
             rounding: RakeRounding::HalfToEven,
         }
     }
     /// Gross slice -> rational amount -> rounding -> remaining hand cap.
     /// Multiplication is widened to i128; no money crosses a float boundary.
+    /// This compatibility wrapper assumes the hand did not reach a preflop
+    /// 3-bet; the arena uses `calculate_with_hand_context` below.
     pub fn calculate(
         &self,
         pot_amount: Chips,
         flop_dealt: bool,
         already_collected: Chips,
     ) -> Chips {
+        self.calculate_with_hand_context(pot_amount, flop_dealt, false, already_collected)
+    }
+
+    /// Calculate rake with the room-relevant preflop betting context.
+    pub fn calculate_with_hand_context(
+        &self,
+        pot_amount: Chips,
+        flop_dealt: bool,
+        preflop_three_bet_or_higher: bool,
+        already_collected: Chips,
+    ) -> Chips {
         assert!(pot_amount >= 0 && already_collected >= 0);
         self.validate().expect("invalid rake configuration");
-        if self.no_flop_no_drop && !flop_dealt {
+        let preflop_exception =
+            self.preflop_three_bet_rake && preflop_three_bet_or_higher;
+        if self.no_flop_no_drop && !flop_dealt && !preflop_exception {
             return 0;
         }
         let amount = self.rounding.round(
@@ -201,6 +230,23 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn preflop_three_bet_exception_is_explicit() {
+        let c = RakeConfig::new(
+            RakeRate::new(5, 100).unwrap(),
+            None,
+            true,
+            RakeRounding::Ceil,
+        )
+        .unwrap()
+        .with_preflop_three_bet_rake(true);
+
+        assert_eq!(c.calculate_with_hand_context(100, false, false, 0), 0);
+        assert_eq!(c.calculate_with_hand_context(100, false, true, 0), 5);
+        assert_eq!(c.calculate_with_hand_context(21, false, true, 0), 2);
+        assert_eq!(c.calculate_with_hand_context(21, true, false, 0), 2);
+    }
+
     #[test]
     fn invalid_configs_are_rejected() {
         assert!(RakeRate::new(1, 0).is_err());

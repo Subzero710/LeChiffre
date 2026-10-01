@@ -76,8 +76,10 @@ zero rake.
 Each gross pot slice is multiplied in `i128`, rounded with integer
 quotient/remainder arithmetic, then limited by the remaining hand cap and
 the pot amount. Supported rounding policies are floor, ceil, and true
-round-half-to-even. The cap is shared across all pots in the hand. For NLHE,
-no-flop-no-drop permits rake only after three board cards have been dealt.
+round-half-to-even. The cap is shared across all pots in the hand. Baseline
+no-flop-no-drop permits rake only after three board cards have been dealt; a
+persistent hand marker can additionally enable the documented GG exception
+that makes preflop 3-bet-or-higher pots rake-eligible.
 
 ## Published platform schedules
 
@@ -90,8 +92,8 @@ fee update service or a currency converter.
 | Platform | Implemented stakes/product | Rate and caps | Explicit policy limits |
 | --- | --- | --- | --- |
 | PokerStars | Published USD/EUR/GBP NLHE cash rows; regular and Zoom, including the special USD Zoom micro-stakes table | Published row-specific rates/caps; USD $100/$200+ uses the published high-stakes row | Published half-to-even and no-rake-before-flop behavior; non-USD caps remain a dated snapshot because PokerStars reviews them quarterly |
-| CoinPoker | USDT NLHE regular and heads-up schedules through the published high/VIP rows | 5%; regular and HU caps are kept separate; BB-denominated high-stakes caps are resolved exactly | Exact base-rake rounding and no-flop-no-drop remain unverified; localized official pages currently disagree on the $2/$5 3–4 player cap, so that exact context returns an error |
-| GGPoker | Published USD six-max rows through $10/$20 and nine-max rows through $5/$10 | 5%; separate caps for 2, 3, 4, and 5+ players, including the published BB-derived high-stakes caps | Exact rounding and no-flop-no-drop require caller input; Rush & Cash/promotional charges are excluded; nine-max antes are supplied separately |
+| CoinPoker | USDT NLHE regular and heads-up schedules through the published high/VIP rows | 5%; regular and HU caps are kept separate; BB-denominated high-stakes caps are resolved exactly | Official material supports no rake before the flop; where the room does not publish fractional-cent rounding this project uses the worst-case `Ceil` convention. Localized official pages disagree on the $2/$5 3–4 player cap, so the project deliberately selects the higher `$5.00` value |
+| GGPoker | Published USD six-max rows through $10/$20 and nine-max rows through $5/$10 | 5%; separate caps for 2, 3, 4, and 5+ players, including the published BB-derived high-stakes caps | Current GG cash-game FAQ says preflop rake is taken only on pots that involve a 3-bet or higher. The exact fractional-cent rounding rule is unpublished, so the project uses worst-case `Ceil`; Rush & Cash/promotional charges remain excluded; nine-max antes are supplied separately |
 
 Official sources:
 
@@ -100,6 +102,7 @@ Official sources:
 - [CoinPoker fees (French locale)](https://coinpoker.com/fr/rake/)
 - [CoinPoker USDT poker](https://coinpoker.com/online-poker/tether/)
 - [GGPoker six-max/nine-max NLHE information](https://legal.ggpoker.com/poker-games/texas-holdem/)
+- [GGPoker cash-game FAQ](https://help.ggpoker.com/article/Cash-Games---Frequently-Asked-Questions)
 
 `RakeContext` includes an explicit currency/denomination. The schedule never
 selects a USD row for EUR/GBP/USDT merely because the numerical blinds match.
@@ -109,14 +112,16 @@ and play in USDT. No exchange-rate conversion is performed.
 
 CoinPoker splash charges and external cash drops are excluded from the base
 rake model. GG jackpot, promotional, and Rush & Cash charges are also outside
-these schedules. Unsupported stakes/products/currencies return
-`ScheduleError::Unsupported`; a documented conflict between current official
-CoinPoker locale pages returns `ScheduleError::ConflictingPublishedData` rather
-than silently choosing one value.
+these schedules. Unsupported stakes/products/currencies return `ScheduleError::Unsupported`.
+When official room material conflicts or omits a fractional-cent rounding rule,
+the project applies one explicit worst-case convention rather than silently
+pretending the value is published: choose the higher conflicting cap and round
+rake upward with `Ceil`. These assumptions are recorded in each schedule's
+`limitations` string.
 
-`rake_config_for` returns an error if the schedule lacks a verified policy.
-Callers can inspect `rake_schedule_for` and supply explicit missing policies
-to `RakeSchedule::resolve`. Verified policies retain their published value.
+`rake_config_for` resolves every currently supported PokerStars, CoinPoker and
+GGPoker schedule into a concrete `RakeConfig`. `RakeSchedule::resolve` remains
+available for future schedules that deliberately leave a policy unresolved.
 Observed hand payouts never choose the replay's rake policy automatically.
 
 ## Exact OHH currency boundary
@@ -255,6 +260,6 @@ the workspace has no Rust toolchain.
 Other technical limits remain explicit: callers can mutate public state
 fields and violate invariants; pot planning asserts on inconsistent state;
 cross-hand raw statistics still have finite `i64` accumulation limits;
-full-state replay snapshots consume memory; unverified room policies and
-unsupported monetary adjustments require additional work rather than an
-inferred policy. This is not a claim that all definition-of-done checks passed.
+full-state replay snapshots consume memory; documented worst-case room assumptions and
+unsupported monetary adjustments remain explicit rather than being hidden
+inside inferred behavior. This is not a claim that all definition-of-done checks passed.
