@@ -1,0 +1,51 @@
+Random AI Test Branch
+=====================
+
+Purpose
+-------
+This branch introduces a small, reproducible experiment to help you learn how
+to test poker agents and compare their results. It uses the RandomAgent
+provided by the rs_poker library, with two different probability profiles.
+The second profile is a new cautious randomized opponent, not a new poker
+engine or a trained AI.
+
+Files changed
+-------------
+- Cargo.toml: adds rand as a direct dependency so the experiment can seed the
+  deck shuffling independently of the agent decisions.
+- Cargo.lock: records rand as a direct dependency of the project.
+- README.md: documents how to run the experiment and its tests.
+
+Files added
+-----------
+- examples/random_ai_experiment.rs: runs 40 heads-up games, alternates the
+  dealer position, prints summary statistics, and creates an SVG chart.
+  Its tests check seeded repeatability, chip conservation, correct batch
+  accounting, and chart contents.
+- TEST_BRANCH_GUIDE.txt: this overview of the learning example and commands.
+
+Files intentionally unchanged
+------------------------------
+- src/main.rs: the original one-game example remains unchanged.
+- vendor/rs-poker: the poker library source is used as-is.
+
+Run the experiment
+------------------
+    cargo run --example random_ai_experiment
+
+Run only this example's tests
+-----------------------------
+    cargo test --example random_ai_experiment
+
+The chart is generated at target/random_ai_results.svg. Open that SVG in a web
+browser or an SVG-capable image viewer. Since every game and agent has a fixed
+seed, the same run produces the same outcomes on the same implementation.
+
+How to read the results
+-----------------------
+- Win rate is the percentage of games won. Ties are reported separately and
+  are not counted as wins for either agent.
+- Average final stack is the average number of chips left after a game. Both
+  players start with 100 chips, so their two averages should add up to 200.
+- This is a small experiment, not proof that one strategy is generally better.
+  Try changing MATCH_COUNT or the fold/call probabilities and run it again.

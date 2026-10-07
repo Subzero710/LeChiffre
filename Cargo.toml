@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 rs_poker = { path = "vendor/rs-poker" }
+rand = "~0.10.1"
 tokio = "1.43.4"
 
 

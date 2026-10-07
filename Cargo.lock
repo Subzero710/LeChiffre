@@ -6,6 +6,7 @@ version = 4
 name = "LeChiffre"
 version = "0.1.0"
 dependencies = [
+ "rand",
  "rs_poker",
  "tokio",
 ]
