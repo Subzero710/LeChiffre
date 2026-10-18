@@ -198,10 +198,16 @@ impl Agent for MyAgent {
 | `FoldingAgent` | Always folds (checks when possible) |
 | `AllInAgent` | Always goes all-in |
 | `RandomAgent` | Configurable fold/call probabilities per street |
-| `RandomPotControlAgent` | Random with pot-size-aware bet limiting |
+| `EquityAgent` | Monte Carlo showdown-equity baseline with configurable bet sizing |
 | `ConfigAgentBuilder` | JSON-configurable preflop ranges + postflop strategy |
 | `VecReplayAgent` | Replays a recorded action sequence |
 | `CFRAgent` | Counterfactual Regret Minimization solver |
+
+Ready-to-use JSON profiles are provided for the built-in agents, including
+Equity and the CFR variants. `EquityAgent` estimates showdown equity with Monte
+Carlo samples, then maps its edge over the pot to configurable bet-size
+fractions. Its iteration count, edge thresholds, and sizing fractions can be
+tuned in its agent configuration.
 
 ### Historians
 
@@ -220,6 +226,8 @@ Event recorders that observe every action during simulation:
 
 - **`HoldemCompetition`** — run multiple cash game hands and track per-player P&L, win/loss counts, and per-street statistics
 - **`SingleTableTournament`** — elimination-style tournament with finishing positions and stack tracking
+- **Rake-aware comparisons** — apply a rake schedule to games and account for the chips removed from each pot. The `rsp arena compare` command accepts `--rake`, `--rake-currency`, and `--rake-format` options.
+- **Rotation benchmarks** — `rsp arena rotate` runs complete button rotations while carrying player stacks between hands, with rebuy support and statistics grouped by position. Rotation results can also be exported for analysis and viewed in the arena TUI.
 
 ## CFR Solver
 
@@ -232,6 +240,7 @@ The CFR (Counterfactual Regret Minimization) agent learns game-theory optimal st
 - **Depth-based iteration scheduling** — more iterations at deeper nodes where the tree is smaller
 - **Configurable action generators** — per-street bet sizing (raise multipliers, pot fractions, all-in)
 - **Graphviz export** for decision tree visualization
+- **Uniform opponent-hand estimation by default** — CFR configurations do not use known opponent cards unless a known-hands estimator is explicitly selected. This avoids accidental hidden-card leakage in ordinary simulations.
 
 Run CFR agents via the CLI:
 
@@ -305,3 +314,4 @@ Avoids the O(N!) complexity of traditional ICM by simulating all-in confrontatio
 ## License
 
 Apache-2.0
+
