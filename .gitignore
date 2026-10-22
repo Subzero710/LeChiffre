@@ -1,2 +1,4 @@
 /target
 /.idea
+/runs
+/tests/fixtures/leduc_openspiel.tsv
