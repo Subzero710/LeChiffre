@@ -1,0 +1,2 @@
+opponent,hands,pairs,seed,total_chips,chips_per_100,ci95_low,ci95_high,exact_per_100,mean_seat0,mean_seat1
+checkpoint,100000,50000,123,-1944.000000000,-1.944000000,-2.987264516,-0.900735484,-2.157685294,-0.153340000,0.114460000

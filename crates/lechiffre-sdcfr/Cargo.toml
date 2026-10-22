@@ -1,0 +1,15 @@
+[package]
+name = "lechiffre-sdcfr"
+version = "0.1.0"
+edition = "2024"
+description = "CPU reference implementation of neural Single Deep CFR for LeChiffre"
+
+[lib]
+name = "lechiffre_sdcfr"
+
+[[bin]]
+name = "lechiffre-sdcfr"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
