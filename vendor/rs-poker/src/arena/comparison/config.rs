@@ -1,4 +1,4 @@
-use crate::arena::{Chips, money::apply_ratio};
+use crate::arena::{Chips, RakeConfig, money::apply_ratio};
 use std::path::PathBuf;
 
 use super::error::{ComparisonConfigError, Result};
@@ -24,6 +24,8 @@ pub struct ComparisonConfig {
     pub output_dir: Option<PathBuf>,
     /// Optional random seed for reproducibility
     pub seed: Option<u64>,
+    /// Rake economics applied to every generated game state.
+    pub rake: RakeConfig,
 }
 
 impl Default for ComparisonConfig {
@@ -38,6 +40,7 @@ impl Default for ComparisonConfig {
             ante: 0,
             output_dir: None,
             seed: None,
+            rake: RakeConfig::none(),
         }
     }
 }
@@ -134,6 +137,7 @@ mod tests {
         assert_eq!(config.ante, 0);
         assert!(config.output_dir.is_none());
         assert!(config.seed.is_none());
+        assert_eq!(config.rake, RakeConfig::none());
     }
 
     #[test]

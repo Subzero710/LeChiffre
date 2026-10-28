@@ -73,7 +73,7 @@ fn config_label(config: &AgentConfig, path: &std::path::Path) -> String {
         | AgentConfig::Calling { name, .. }
         | AgentConfig::Folding { name, .. }
         | AgentConfig::Random { name, .. }
-        | AgentConfig::RandomPotControl { name, .. }
+        | AgentConfig::Equity { name, .. }
         | AgentConfig::CfrBasic { name, .. }
         | AgentConfig::CfrSimple { name, .. }
         | AgentConfig::CfrConfigurable { name, .. }
@@ -137,12 +137,12 @@ fn resolve_preflop_config(config: &AgentConfig) -> (PreflopChartConfig, bool, Op
                     .to_string(),
             ),
         ),
-        AgentConfig::RandomPotControl { percent_call, .. } => (
-            PreflopChartConfig::with_single_position(random_position_charts(&[], percent_call)),
+        AgentConfig::Equity { .. } => (
+            PreflopChartConfig::with_single_position(PositionCharts::default()),
             true,
             Some(
-                "Synthesized from first element of percent_call \
-                 (RandomPotControl only defines call frequency)"
+                "EquityAgent has no static preflop chart — actions are computed \
+                 at runtime from Monte Carlo equity, equity edge, and pot-sized betting thresholds."
                     .to_string(),
             ),
         ),
@@ -263,6 +263,15 @@ mod tests {
             .unwrap();
         assert!((vso.raise() - 0.3).abs() < 1e-5);
         assert!((vso.call() - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn equity_has_banner_but_empty_chart() {
+        let cfg = config_from_json(r#"{"type":"equity"}"#);
+        let (chart_cfg, synth, banner) = resolve_preflop_config(&cfg);
+        assert!(synth);
+        assert!(banner.is_some());
+        assert!(chart_cfg.chart_for(0, PreflopScenario::Rfi).is_empty());
     }
 
     #[test]

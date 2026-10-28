@@ -29,6 +29,12 @@ pub enum SimError {
         #[source]
         source: rs_poker::arena::comparison::ComparisonError,
     },
+    /// The rotation benchmark returned a domain error.
+    #[error("rotation benchmark failed: {source}")]
+    RotationFailed {
+        #[source]
+        source: rs_poker::arena::rotation::RotationError,
+    },
     /// Too many consecutive game setup failures.
     #[error("too many consecutive failures ({consecutive_failures})")]
     TooManyFailures { consecutive_failures: usize },

@@ -141,8 +141,7 @@ impl RakeConfig {
     ) -> Chips {
         assert!(pot_amount >= 0 && already_collected >= 0);
         self.validate().expect("invalid rake configuration");
-        let preflop_exception =
-            self.preflop_three_bet_rake && preflop_three_bet_or_higher;
+        let preflop_exception = self.preflop_three_bet_rake && preflop_three_bet_or_higher;
         if self.no_flop_no_drop && !flop_dealt && !preflop_exception {
             return 0;
         }

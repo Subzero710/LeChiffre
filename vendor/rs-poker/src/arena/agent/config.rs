@@ -32,7 +32,7 @@
 //!
 //! ### Configurable Agents
 //! - `random` - Random decision making with probability vectors
-//! - `random_pot_control` - Monte Carlo-based pot control
+//! - `equity` - Monte Carlo equity baseline with equity-driven bet sizing
 //!
 //! ## Examples
 //!
@@ -50,11 +50,17 @@
 //! }
 //! ```
 //!
-//! ### Random Pot Control Agent
+//! ### Equity Agent
 //! ```json
 //! {
-//!   "type": "random_pot_control",
-//!   "percent_call": [0.5, 0.3]
+//!   "type": "equity",
+//!   "iterations": 1000,
+//!   "small_edge": 0.15,
+//!   "medium_edge": 0.35,
+//!   "large_edge": 0.60,
+//!   "small_bet_pot": 0.33,
+//!   "medium_bet_pot": 0.66,
+//!   "large_bet_pot": 1.0
 //! }
 //! ```
 //!
@@ -155,9 +161,7 @@
 
 use std::sync::Arc;
 
-use crate::arena::agent::{
-    AllInAgent, CallingAgent, FoldingAgent, RandomAgent, RandomPotControlAgent,
-};
+use crate::arena::agent::{AllInAgent, CallingAgent, EquityAgent, FoldingAgent, RandomAgent};
 use crate::arena::cfr::{
     BasicCFRActionGenerator, BudgetConfig, CFRAgentBuilder, CFRState, ConfigurableActionConfig,
     ConfigurableActionConfigError, ConfigurableActionGenerator, PreflopChartActionConfig,
@@ -216,17 +220,58 @@ pub enum AgentConfig {
         )]
         percent_call: Vec<f64>,
     },
-    /// Agent that uses Monte Carlo simulation for pot control
-    RandomPotControl {
+    /// Equity-driven baseline: estimate showdown equity with Monte Carlo,
+    /// compare it to pot odds / equal-share equity, and increase bet size as
+    /// the normalized equity edge grows.
+    Equity {
         /// Optional explicit name for the agent
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
-        /// Probability of calling indexed by raise count
+        /// Number of Monte Carlo samples used for each decision.
+        #[serde(default = "default_equity_iterations")]
+        iterations: usize,
+        /// Edge at which passive call/check becomes a small raise.
+        #[serde(default = "default_equity_small_edge")]
         #[cfg_attr(
             feature = "serde",
             serde(deserialize_with = "crate::arena::serde_numbers::deserialize")
         )]
-        percent_call: Vec<f64>,
+        small_edge: f32,
+        /// Edge at which the small raise becomes a medium raise.
+        #[serde(default = "default_equity_medium_edge")]
+        #[cfg_attr(
+            feature = "serde",
+            serde(deserialize_with = "crate::arena::serde_numbers::deserialize")
+        )]
+        medium_edge: f32,
+        /// Edge at which the medium raise becomes a large raise.
+        #[serde(default = "default_equity_large_edge")]
+        #[cfg_attr(
+            feature = "serde",
+            serde(deserialize_with = "crate::arena::serde_numbers::deserialize")
+        )]
+        large_edge: f32,
+        /// Small raise size as a fraction of the current pot.
+        #[serde(default = "default_equity_small_bet_pot")]
+        #[cfg_attr(
+            feature = "serde",
+            serde(deserialize_with = "crate::arena::serde_numbers::deserialize")
+        )]
+        small_bet_pot: f32,
+        /// Medium raise size as a fraction of the current pot.
+        #[serde(default = "default_equity_medium_bet_pot")]
+        #[cfg_attr(
+            feature = "serde",
+            serde(deserialize_with = "crate::arena::serde_numbers::deserialize")
+        )]
+        medium_bet_pot: f32,
+        /// Large raise size as a fraction of the current pot.
+        #[serde(default = "default_equity_large_bet_pot")]
+        #[cfg_attr(
+            feature = "serde",
+            serde(deserialize_with = "crate::arena::serde_numbers::deserialize")
+        )]
+        large_bet_pot: f32,
     },
     /// CFR agent with depth-based game state iterations
     ///
@@ -240,7 +285,7 @@ pub enum AgentConfig {
         #[serde(default)]
         exploration: CfrExploration,
         /// Which hand estimator the agent uses for its opponents. Defaults to
-        /// `known` (today's behavior).
+        /// `uniform` so omitted config never exposes real opponent hole cards.
         #[serde(default)]
         hand_estimator: EstimatorConfig,
     },
@@ -256,7 +301,7 @@ pub enum AgentConfig {
         #[serde(default)]
         exploration: CfrExploration,
         /// Which hand estimator the agent uses for its opponents. Defaults to
-        /// `known` (today's behavior).
+        /// `uniform` so omitted config never exposes real opponent hole cards.
         #[serde(default)]
         hand_estimator: EstimatorConfig,
     },
@@ -276,7 +321,7 @@ pub enum AgentConfig {
         #[serde(default)]
         exploration: CfrExploration,
         /// Which hand estimator the agent uses for its opponents. Defaults to
-        /// `known` (today's behavior).
+        /// `uniform` so omitted config never exposes real opponent hole cards.
         #[serde(default)]
         hand_estimator: EstimatorConfig,
         /// Action generator configuration
@@ -296,7 +341,7 @@ pub enum AgentConfig {
         #[serde(default)]
         exploration: CfrExploration,
         /// Which hand estimator the agent uses for its opponents. Defaults to
-        /// `known` (today's behavior).
+        /// `uniform` so omitted config never exposes real opponent hole cards.
         #[serde(default)]
         hand_estimator: EstimatorConfig,
         /// Preflop chart configuration (inline or preset name)
@@ -370,6 +415,34 @@ fn default_percent_call() -> Vec<f64> {
     vec![0.5, 0.6, 0.45]
 }
 
+fn default_equity_iterations() -> usize {
+    super::equity::DEFAULT_EQUITY_ITERATIONS
+}
+
+fn default_equity_small_edge() -> f32 {
+    super::equity::DEFAULT_EQUITY_SMALL_EDGE
+}
+
+fn default_equity_medium_edge() -> f32 {
+    super::equity::DEFAULT_EQUITY_MEDIUM_EDGE
+}
+
+fn default_equity_large_edge() -> f32 {
+    super::equity::DEFAULT_EQUITY_LARGE_EDGE
+}
+
+fn default_equity_small_bet_pot() -> f32 {
+    super::equity::DEFAULT_EQUITY_SMALL_BET_POT
+}
+
+fn default_equity_medium_bet_pot() -> f32 {
+    super::equity::DEFAULT_EQUITY_MEDIUM_BET_POT
+}
+
+fn default_equity_large_bet_pot() -> f32 {
+    super::equity::DEFAULT_EQUITY_LARGE_BET_POT
+}
+
 /// Exploration policy for a CFR agent — just the unified budget. All
 /// the previously-separate knobs (`max_recursion_depth`, `concurrency`,
 /// `act_deadline_ms`) now live inside the budget tree.
@@ -389,10 +462,12 @@ pub struct CfrExploration {
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[serde(rename_all = "snake_case")]
 pub enum EstimatorConfig {
-    /// Use the real opponent hands (today's behavior). Default.
-    #[default]
+    /// Use the real opponent hands. Explicit opt-in only: this exposes hidden
+    /// information and is intended for diagnostics/tests, not normal play.
     Known,
-    /// Sample opponents uniformly from the remaining deck.
+    /// Sample opponents uniformly from the remaining deck. Safe default for
+    /// imperfect-information play.
+    #[default]
     Uniform,
 }
 
@@ -412,6 +487,24 @@ pub enum AgentConfigError {
     /// Invalid probability value (must be between 0.0 and 1.0)
     #[error("Invalid probability value: {0} (must be between 0.0 and 1.0)")]
     InvalidProbability(f64),
+
+    /// EquityAgent requires at least one Monte Carlo sample per decision.
+    #[error("equity iterations must be greater than zero")]
+    InvalidEquityIterations,
+
+    /// Equity edge thresholds must be finite, ordered, and stay in [0, 1].
+    #[error(
+        "equity edge thresholds must satisfy 0 <= small < medium < large <= 1; \
+         got small={small}, medium={medium}, large={large}"
+    )]
+    InvalidEquityEdges { small: f32, medium: f32, large: f32 },
+
+    /// Equity bet fractions must be finite, positive, and non-decreasing.
+    #[error(
+        "equity bet fractions must satisfy 0 < small <= medium <= large; \
+         got small={small}, medium={medium}, large={large}"
+    )]
+    InvalidEquityBetFractions { small: f32, medium: f32, large: f32 },
 
     /// JSON parsing error
     #[error("JSON parsing error: {0}")]
@@ -504,8 +597,46 @@ impl AgentConfig {
                 validate_probabilities(percent_fold)?;
                 validate_probabilities(percent_call)?;
             }
-            AgentConfig::RandomPotControl { percent_call, .. } => {
-                validate_probabilities(percent_call)?;
+            AgentConfig::Equity {
+                iterations,
+                small_edge,
+                medium_edge,
+                large_edge,
+                small_bet_pot,
+                medium_bet_pot,
+                large_bet_pot,
+                ..
+            } => {
+                if *iterations == 0 {
+                    return Err(AgentConfigError::InvalidEquityIterations);
+                }
+                if !small_edge.is_finite()
+                    || !medium_edge.is_finite()
+                    || !large_edge.is_finite()
+                    || *small_edge < 0.0
+                    || *small_edge >= *medium_edge
+                    || *medium_edge >= *large_edge
+                    || *large_edge > 1.0
+                {
+                    return Err(AgentConfigError::InvalidEquityEdges {
+                        small: *small_edge,
+                        medium: *medium_edge,
+                        large: *large_edge,
+                    });
+                }
+                if !small_bet_pot.is_finite()
+                    || !medium_bet_pot.is_finite()
+                    || !large_bet_pot.is_finite()
+                    || *small_bet_pot <= 0.0
+                    || *small_bet_pot > *medium_bet_pot
+                    || *medium_bet_pot > *large_bet_pot
+                {
+                    return Err(AgentConfigError::InvalidEquityBetFractions {
+                        small: *small_bet_pot,
+                        medium: *medium_bet_pot,
+                        large: *large_bet_pot,
+                    });
+                }
             }
             AgentConfig::CfrConfigurable { action_config, .. } => {
                 action_config.validate()?;
@@ -626,9 +757,9 @@ impl ConfigAgentBuilder {
 
     /// Set an RNG seed for the agent.
     ///
-    /// When set, agents that use randomness (Random, RandomPotControl) will use
-    /// a deterministic RNG seeded from this value instead of system entropy.
-    /// CFR agents draw from a thread-local RNG and ignore this seed.
+    /// When set, `RandomAgent` uses a deterministic RNG seeded from this value
+    /// instead of system entropy. Equity/CFR simulations use their own RNG paths
+    /// and ignore this seed.
     pub fn rng_seed(mut self, seed: u64) -> Self {
         self.rng_seed = Some(seed);
         self
@@ -708,18 +839,25 @@ impl ConfigAgentBuilder {
                     ))
                 }
             }
-            AgentConfig::RandomPotControl { name, percent_call } => {
-                let agent_name = resolve_agent_name(name, "RandomPotControlAgent", player_idx);
-                if let Some(seed) = self.rng_seed {
-                    Box::new(RandomPotControlAgent::new_with_seed(
-                        agent_name,
-                        percent_call.clone(),
-                        seed,
-                    ))
-                } else {
-                    Box::new(RandomPotControlAgent::new(agent_name, percent_call.clone()))
-                }
-            }
+            AgentConfig::Equity {
+                name,
+                iterations,
+                small_edge,
+                medium_edge,
+                large_edge,
+                small_bet_pot,
+                medium_bet_pot,
+                large_bet_pot,
+            } => Box::new(EquityAgent::new(
+                resolve_agent_name(name, "EquityAgent", player_idx),
+                *iterations,
+                *small_edge,
+                *medium_edge,
+                *large_edge,
+                *small_bet_pot,
+                *medium_bet_pot,
+                *large_bet_pot,
+            )),
             AgentConfig::CfrBasic {
                 name,
                 exploration,
@@ -920,15 +1058,45 @@ mod tests {
     }
 
     #[test]
-    fn test_deserialize_random_pot_control() {
-        let json = r#"{"type":"random_pot_control","percent_call":[0.5,0.3]}"#;
+    fn test_deserialize_equity_with_default_iterations() {
+        let json = r#"{"type":"equity"}"#;
         let config: AgentConfig = serde_json::from_str(json).unwrap();
         match config {
-            AgentConfig::RandomPotControl { name, percent_call } => {
+            AgentConfig::Equity {
+                name,
+                iterations,
+                small_edge,
+                medium_edge,
+                large_edge,
+                small_bet_pot,
+                medium_bet_pot,
+                large_bet_pot,
+            } => {
                 assert!(name.is_none());
-                assert_eq!(percent_call, vec![0.5, 0.3]);
+                assert_eq!(iterations, 1_000);
+                assert_eq!(small_edge, 0.15);
+                assert_eq!(medium_edge, 0.35);
+                assert_eq!(large_edge, 0.60);
+                assert_eq!(small_bet_pot, 0.33);
+                assert_eq!(medium_bet_pot, 0.66);
+                assert_eq!(large_bet_pot, 1.0);
             }
-            _ => panic!("Expected RandomPotControl variant"),
+            _ => panic!("Expected Equity variant"),
+        }
+    }
+
+    #[test]
+    fn test_deserialize_equity_with_custom_iterations() {
+        let json = r#"{"type":"equity","iterations":10000}"#;
+        let config: AgentConfig = serde_json::from_str(json).unwrap();
+        match config {
+            AgentConfig::Equity {
+                name, iterations, ..
+            } => {
+                assert!(name.is_none());
+                assert_eq!(iterations, 10_000);
+            }
+            _ => panic!("Expected Equity variant"),
         }
     }
 
@@ -983,9 +1151,15 @@ mod tests {
                 percent_fold: vec![0.2],
                 percent_call: vec![0.5],
             },
-            AgentConfig::RandomPotControl {
+            AgentConfig::Equity {
                 name: None,
-                percent_call: vec![0.4, 0.3],
+                iterations: 1_000,
+                small_edge: default_equity_small_edge(),
+                medium_edge: default_equity_medium_edge(),
+                large_edge: default_equity_large_edge(),
+                small_bet_pot: default_equity_small_bet_pot(),
+                medium_bet_pot: default_equity_medium_bet_pot(),
+                large_bet_pot: default_equity_large_bet_pot(),
             },
         ];
 
@@ -1096,10 +1270,13 @@ mod tests {
         let config: AgentConfig = serde_json::from_str(json).unwrap();
         match config {
             AgentConfig::CfrBasic {
-                name, exploration, ..
+                name,
+                exploration,
+                hand_estimator,
             } => {
                 assert!(name.is_none());
                 assert_eq!(exploration, CfrExploration::default());
+                assert_eq!(hand_estimator, EstimatorConfig::Uniform);
                 // Default = budget unset; the build path will substitute
                 // BudgetConfig::default() at construction time.
                 assert!(exploration.budget.is_none());
@@ -1221,31 +1398,63 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_random_pot_control_match_arm() {
-        // Test that the RandomPotControl match arm in validate() is executed
-        let config = AgentConfig::RandomPotControl {
+    fn test_validate_equity_match_arm() {
+        let config = AgentConfig::Equity {
             name: Some("Test".to_string()),
-            percent_call: vec![0.5, 0.6], // Valid probabilities
+            iterations: 1_000,
+            small_edge: 0.15,
+            medium_edge: 0.35,
+            large_edge: 0.60,
+            small_bet_pot: 0.33,
+            medium_bet_pot: 0.66,
+            large_bet_pot: 1.0,
         };
+        assert!(config.validate().is_ok());
 
-        // Should validate successfully
-        let result = config.validate();
-        assert!(
-            result.is_ok(),
-            "Valid RandomPotControl should pass validation"
-        );
-
-        // Test with invalid probability
-        let invalid_config = AgentConfig::RandomPotControl {
+        let invalid_config = AgentConfig::Equity {
             name: Some("Test".to_string()),
-            percent_call: vec![1.5], // Invalid - > 1.0
+            iterations: 0,
+            small_edge: 0.15,
+            medium_edge: 0.35,
+            large_edge: 0.60,
+            small_bet_pot: 0.33,
+            medium_bet_pot: 0.66,
+            large_bet_pot: 1.0,
         };
+        assert!(matches!(
+            invalid_config.validate(),
+            Err(AgentConfigError::InvalidEquityIterations)
+        ));
 
-        let result = invalid_config.validate();
-        assert!(
-            result.is_err(),
-            "Invalid RandomPotControl should fail validation"
-        );
+        let invalid_edges = AgentConfig::Equity {
+            name: None,
+            iterations: 1_000,
+            small_edge: 0.40,
+            medium_edge: 0.35,
+            large_edge: 0.60,
+            small_bet_pot: 0.33,
+            medium_bet_pot: 0.66,
+            large_bet_pot: 1.0,
+        };
+        assert!(matches!(
+            invalid_edges.validate(),
+            Err(AgentConfigError::InvalidEquityEdges { .. })
+        ));
+
+        let invalid_bets = AgentConfig::Equity {
+            name: None,
+            iterations: 1_000,
+            small_edge: 0.15,
+            medium_edge: 0.35,
+            large_edge: 0.60,
+            small_bet_pot: 0.80,
+            medium_bet_pot: 0.66,
+            large_bet_pot: 1.0,
+        };
+        assert!(matches!(
+            invalid_bets.validate(),
+            Err(AgentConfigError::InvalidEquityBetFractions { .. })
+        ));
     }
 
     #[test]
@@ -1357,8 +1566,8 @@ mod tests {
     }
 
     #[test]
-    fn estimator_config_defaults_to_known() {
-        assert_eq!(EstimatorConfig::default(), EstimatorConfig::Known);
+    fn estimator_config_defaults_to_uniform() {
+        assert_eq!(EstimatorConfig::default(), EstimatorConfig::Uniform);
     }
 
     #[test]
@@ -1415,12 +1624,12 @@ mod tests {
     }
 
     #[test]
-    fn cfr_configurable_defaults_hand_estimator_to_known() {
+    fn cfr_configurable_defaults_hand_estimator_to_uniform() {
         let json = r#"{ "type": "cfr_configurable", "action_config": {} }"#;
         let cfg: AgentConfig = serde_json::from_str(json).unwrap();
         match cfg {
             AgentConfig::CfrConfigurable { hand_estimator, .. } => {
-                assert_eq!(hand_estimator, EstimatorConfig::Known);
+                assert_eq!(hand_estimator, EstimatorConfig::Uniform);
             }
             other => panic!("expected CfrConfigurable, got {other:?}"),
         }

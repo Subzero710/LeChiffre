@@ -155,6 +155,9 @@ pub mod test_util;
 #[cfg(any(test, feature = "open-hand-history"))]
 pub mod comparison;
 
+#[cfg(feature = "open-hand-history")]
+pub mod rotation;
+
 pub use agent::{Agent, AgentGenerator, CloneAgentGenerator, ConfigAgentBuilder};
 pub use game_state::{
     CloneGameStateGenerator, GameState, GameStateBuilder, GameStateGenerator,

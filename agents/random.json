@@ -1,0 +1,6 @@
+{
+  "type": "random",
+  "name": "RandomAgent",
+  "percent_fold": [0.3333333333333333],
+  "percent_call": [0.5]
+}

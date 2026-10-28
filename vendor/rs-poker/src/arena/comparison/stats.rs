@@ -118,6 +118,30 @@ impl AgentStatsBuilder {
     /// * `permutation` - Vector of agent indices representing seat assignments
     /// * `stats` - StatsStorage containing the results from this game
     pub fn merge_permutation_stats(&mut self, permutation: &[usize], stats: &StatsStorage) {
+        self.merge_stats_with_positions(permutation, stats, |seat_idx| seat_idx);
+    }
+
+    /// Merge statistics from one hand while explicitly mapping each physical
+    /// seat to a position key. The rotation benchmark uses this to aggregate
+    /// BTN/SB/BB/... rather than the fixed physical chair number.
+    pub fn merge_hand_stats(
+        &mut self,
+        seating: &[usize],
+        positions: &[usize],
+        stats: &StatsStorage,
+    ) {
+        assert_eq!(seating.len(), positions.len());
+        self.merge_stats_with_positions(seating, stats, |seat_idx| positions[seat_idx]);
+    }
+
+    fn merge_stats_with_positions<F>(
+        &mut self,
+        permutation: &[usize],
+        stats: &StatsStorage,
+        position_for_seat: F,
+    ) where
+        F: Fn(usize) -> usize,
+    {
         for (seat_idx, &agent_idx) in permutation.iter().enumerate() {
             let agent_stats = &mut self.agent_accumulated[agent_idx];
             let player_idx = 0; // We aggregate all stats to index 0 for each agent
@@ -181,7 +205,7 @@ impl AgentStatsBuilder {
 
             // Track position-specific stats
             let pos_map = &mut self.position_tracking[agent_idx];
-            let (games, profit) = pos_map.entry(seat_idx).or_insert((0, 0));
+            let (games, profit) = pos_map.entry(position_for_seat(seat_idx)).or_insert((0, 0));
             *games += 1;
             *profit += stats.total_profit[seat_idx];
         }
@@ -400,6 +424,26 @@ mod tests {
             .unwrap();
         assert_eq!(seat1_stats.games_played, 1);
         assert_eq!(seat1_stats.profit, -20);
+    }
+
+    #[test]
+    fn test_merge_hand_stats_uses_explicit_position_keys() {
+        let names = vec!["Agent0".to_string(), "Agent1".to_string()];
+        let mut builder = AgentStatsBuilder::new(names);
+        let mut stats = StatsStorage::new_with_num_players(2);
+        stats.total_profit[0] = 25;
+        stats.games_won[0] = 1;
+        stats.total_profit[1] = -25;
+        stats.games_lost[1] = 1;
+
+        // Physical seat 0 is position 1 (SB), physical seat 1 is position 0 (BTN).
+        builder.merge_hand_stats(&[0, 1], &[1, 0], &stats);
+        let result = builder.build();
+
+        let agent0 = result.get("Agent0").unwrap();
+        assert!(agent0.position_stats.iter().any(|p| p.seat_index == 1));
+        let agent1 = result.get("Agent1").unwrap();
+        assert!(agent1.position_stats.iter().any(|p| p.seat_index == 0));
     }
 
     #[test]

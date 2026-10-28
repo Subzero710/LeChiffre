@@ -265,18 +265,17 @@ fn parse_hand(
     if !(2..=3).contains(&stakes.len()) {
         return Err(fail(*first, header, "unsupported stake/ante syntax"));
     }
-    let currency = if room == Room::CoinPoker
-        && (stakes[0].starts_with('$') || stakes[0].starts_with('₮'))
-    {
-        // CoinPoker's published tables display dollar-denominated stakes while
-        // the poker platform uses USDT as its primary game currency. Normalize
-        // either export symbol to USDT without performing an exchange-rate conversion.
-        "USDT"
-    } else if stakes[0].starts_with('$') {
-        "USD"
-    } else {
-        return Err(fail(*first, header, "unverified currency"));
-    };
+    let currency =
+        if room == Room::CoinPoker && (stakes[0].starts_with('$') || stakes[0].starts_with('₮')) {
+            // CoinPoker's published tables display dollar-denominated stakes while
+            // the poker platform uses USDT as its primary game currency. Normalize
+            // either export symbol to USDT without performing an exchange-rate conversion.
+            "USDT"
+        } else if stakes[0].starts_with('$') {
+            "USD"
+        } else {
+            return Err(fail(*first, header, "unverified currency"));
+        };
     let small_blind_amount = money(stakes[0]).map_err(|e| fail(*first, header, &e))?;
     let big_blind_amount = money(stakes[1]).map_err(|e| fail(*first, header, &e))?;
     let ante_amount = if stakes.len() == 3 {
@@ -828,7 +827,8 @@ mod tests {
         assert_eq!(cp[0].pots[0].amount, 24);
         assert_eq!(cp[0].pots[0].rake, Some(1));
 
-        let dollar_coin = include_str!("../../tests/fixtures/rooms/coinpoker.txt").replace('₮', "$");
+        let dollar_coin =
+            include_str!("../../tests/fixtures/rooms/coinpoker.txt").replace('₮', "$");
         let dollar_coin = CoinPokerParser::default().parse(&dollar_coin).unwrap();
         assert_eq!(dollar_coin[0].currency, "USDT");
         let gg = GGPokerParser {

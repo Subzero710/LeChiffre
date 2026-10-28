@@ -201,6 +201,7 @@ mod tests {
         BasicCFRActionGenerator, ConfigurableActionConfig, ConfigurableActionGenerator,
         IterationCount, MaxWidth, MostRestrictive, PerDepth, TraversalSet,
     };
+    use crate::arena::hand_estimator::KnownHandsEstimator;
     use crate::arena::{Agent, HoldemSimulationBuilder};
 
     use super::super::{Budget, CFRState, NUM_ACTION_INDICES};
@@ -682,6 +683,9 @@ mod tests {
             .cfr_state(cfr_state.clone())
             .traversal_set(traversal_set.clone())
             .budget(budget)
+            // This test names the opponent's exact hole cards and checks the
+            // perfect-information best response, so opt into known hands explicitly.
+            .estimator(Arc::new(KnownHandsEstimator))
             .action_gen_config(action_config)
             .build();
 
@@ -1114,6 +1118,9 @@ mod tests {
             .cfr_state(cfr_state.clone())
             .traversal_set(traversal_set)
             .budget(budget)
+            // This test names the opponent's exact hole cards and checks the
+            // perfect-information best response, so opt into known hands explicitly.
+            .estimator(Arc::new(KnownHandsEstimator))
             .action_gen_config(ConfigurableActionConfig::default())
             .build();
 
