@@ -1,3 +1,5 @@
+mod behavioural;
+
 use rs_poker::arena::{Agent, GameStateBuilder, HoldemSimulationBuilder, agent::RandomAgent};
 
 #[tokio::main]
