@@ -30,7 +30,9 @@ async fn main() {
     ];
 
     let adapter = RsPokerAdapter::new();
-    let agents = adapter.wrap_agents(agents);
+    let agents = adapter
+        .wrap_agents(agents)
+        .expect("LeChiffre supports only 2..=6-max");
 
     let mut simulation = HoldemSimulationBuilder::default()
         .game_state(game_state)

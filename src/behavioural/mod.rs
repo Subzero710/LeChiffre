@@ -1,25 +1,23 @@
 //! Behavioural Engine data contracts.
 
 mod event;
+mod history;
 mod profile;
 mod sequence;
 
 pub use event::{
     ActionKind, BehaviourEvent, BehaviourEventError, DecisionContext, HandId, ObservedAction,
-    PublicCard, Rank, Street, Suit,
+    Position, PublicCard, Rank, Street, Suit,
 };
+pub use history::{BehaviourHistory, SubjectHand};
 pub use profile::{BehaviourProfile, BehaviourProfileError};
 pub use sequence::{BehaviourSequence, BehaviourSequenceError};
 
-/// Infers the behavioural profile of `subject_seat` from the public action sequence.
+/// Infers a behavioural profile from multiple real hands of the same subject.
 pub trait BehaviourAnalyzer {
     type Error;
 
-    fn analyze(
-        &self,
-        sequence: &BehaviourSequence,
-        subject_seat: usize,
-    ) -> Result<BehaviourProfile, Self::Error>;
+    fn analyze(&self, history: &BehaviourHistory) -> Result<BehaviourProfile, Self::Error>;
 }
 
 /// Generates behaviour for a supplied profile from the public history and current context.

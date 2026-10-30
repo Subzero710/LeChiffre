@@ -1,12 +1,12 @@
 use std::fmt;
 
-use super::event::{BehaviourEvent, HandId};
+use super::event::{BehaviourEvent, HandId, Position};
 
 /// Ordered public behavioural observations for one poker hand.
 ///
 /// The sequence contains every observed player action, not only the actions of
 /// the player being profiled. This preserves the stimulus/response relation
-/// required by the Analyzer (e.g. "tank 20s while facing a 3-bet").
+/// required by the Analyzer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BehaviourSequence {
     hand_id: HandId,
@@ -29,10 +29,13 @@ impl BehaviourSequence {
         &self.events
     }
 
-    pub fn events_for_seat(&self, seat: usize) -> impl Iterator<Item = &BehaviourEvent> {
+    pub fn events_for_position(
+        &self,
+        position: Position,
+    ) -> impl Iterator<Item = &BehaviourEvent> {
         self.events
             .iter()
-            .filter(move |event| event.actor_seat() == seat)
+            .filter(move |event| event.actor_position() == position)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -95,17 +98,16 @@ mod tests {
         ActionKind, BehaviourEvent, DecisionContext, ObservedAction, Street,
     };
 
-    fn event(hand_id: &str, sequence_index: u32, actor_seat: usize) -> BehaviourEvent {
+    fn event(hand_id: &str, sequence_index: u32, position: Position) -> BehaviourEvent {
         BehaviourEvent::new(
             hand_id,
             sequence_index,
             DecisionContext {
                 street: Street::Preflop,
                 board: vec![],
-                actor_seat,
-                dealer_seat: 1,
-                players_at_table: 2,
-                players_active: 2,
+                actor_position: position,
+                players_at_table: 6,
+                players_active: 6,
                 pot_bb: 2.0,
                 actor_stack_bb: 99.0,
                 effective_stack_bb: 99.0,
@@ -127,21 +129,21 @@ mod tests {
     }
 
     #[test]
-    fn keeps_actions_from_multiple_players_in_order() {
+    fn keeps_actions_from_multiple_positions_in_order() {
         let mut seq = BehaviourSequence::new("hand-10");
-        seq.push(event("hand-10", 0, 0)).unwrap();
-        seq.push(event("hand-10", 1, 1)).unwrap();
+        seq.push(event("hand-10", 0, Position::Cutoff)).unwrap();
+        seq.push(event("hand-10", 1, Position::Button)).unwrap();
 
         assert_eq!(seq.len(), 2);
-        assert_eq!(seq.events_for_seat(0).count(), 1);
-        assert_eq!(seq.events_for_seat(1).count(), 1);
+        assert_eq!(seq.events_for_position(Position::Cutoff).count(), 1);
+        assert_eq!(seq.events_for_position(Position::Button).count(), 1);
     }
 
     #[test]
     fn rejects_out_of_order_event() {
         let mut seq = BehaviourSequence::new("hand-10");
         assert_eq!(
-            seq.push(event("hand-10", 2, 0)),
+            seq.push(event("hand-10", 2, Position::Cutoff)),
             Err(BehaviourSequenceError::UnexpectedSequenceIndex {
                 expected: 0,
                 actual: 2,
@@ -153,7 +155,7 @@ mod tests {
     fn rejects_event_from_another_hand() {
         let mut seq = BehaviourSequence::new("hand-10");
         assert_eq!(
-            seq.push(event("hand-11", 0, 0)),
+            seq.push(event("hand-11", 0, Position::Cutoff)),
             Err(BehaviourSequenceError::WrongHand {
                 expected: HandId::from("hand-10"),
                 actual: HandId::from("hand-11"),

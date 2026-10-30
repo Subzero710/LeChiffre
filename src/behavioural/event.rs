@@ -35,6 +35,18 @@ impl fmt::Display for HandId {
     }
 }
 
+/// Canonical table position for LeChiffre's 2..=6-max NLHE scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Position {
+    UnderTheGun,
+    Hijack,
+    Cutoff,
+    Button,
+    ButtonSmallBlind,
+    SmallBlind,
+    BigBlind,
+}
+
 /// Betting street visible to every player.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Street {
@@ -93,8 +105,7 @@ pub struct DecisionContext {
     pub street: Street,
     pub board: Vec<PublicCard>,
 
-    pub actor_seat: usize,
-    pub dealer_seat: usize,
+    pub actor_position: Position,
     pub players_at_table: usize,
     pub players_active: usize,
 
@@ -184,8 +195,8 @@ impl BehaviourEvent {
         })
     }
 
-    pub fn actor_seat(&self) -> usize {
-        self.context.actor_seat
+    pub fn actor_position(&self) -> Position {
+        self.context.actor_position
     }
 }
 
@@ -224,10 +235,9 @@ mod tests {
         DecisionContext {
             street: Street::Preflop,
             board: vec![],
-            actor_seat: 0,
-            dealer_seat: 1,
-            players_at_table: 2,
-            players_active: 2,
+            actor_position: Position::Cutoff,
+            players_at_table: 6,
+            players_active: 6,
             pot_bb: 2.5,
             actor_stack_bb: 99.0,
             effective_stack_bb: 99.0,
@@ -256,7 +266,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(event.hand_id.as_str(), "hand-7");
-        assert_eq!(event.actor_seat(), 0);
+        assert_eq!(event.actor_position(), Position::Cutoff);
         assert_eq!(event.action.decision_time_ms, Some(18_400));
     }
 
@@ -286,8 +296,7 @@ mod tests {
             DecisionContext {
                 street: Street::River,
                 board: vec![],
-                actor_seat: 99,
-                dealer_seat: 88,
+                actor_position: Position::UnderTheGun,
                 players_at_table: 1,
                 players_active: 0,
                 pot_bb: 2.5,

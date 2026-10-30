@@ -11,7 +11,7 @@ use rs_poker::core::{Card, Suit as RsSuit, Value as RsValue};
 
 use crate::behavioural::{
     ActionKind, BehaviourEvent, BehaviourEventError, BehaviourSequence, BehaviourSequenceError,
-    DecisionContext, HandId, ObservedAction, PublicCard, Rank, Street, Suit,
+    DecisionContext, HandId, ObservedAction, Position, PublicCard, Rank, Street, Suit,
 };
 
 type DecisionKey = (u128, usize);
@@ -38,8 +38,13 @@ impl RsPokerAdapter {
         Self::default()
     }
 
-    pub fn wrap_agents(&self, agents: Vec<Box<dyn Agent>>) -> Vec<Box<dyn Agent>> {
-        agents
+    pub fn wrap_agents(
+        &self,
+        agents: Vec<Box<dyn Agent>>,
+    ) -> Result<Vec<Box<dyn Agent>>, RsPokerAdapterError> {
+        validate_player_count(agents.len())?;
+
+        Ok(agents
             .into_iter()
             .map(|agent| {
                 Box::new(ObservedAgent {
@@ -47,7 +52,7 @@ impl RsPokerAdapter {
                     state: Arc::clone(&self.state),
                 }) as Box<dyn Agent>
             })
-            .collect()
+            .collect())
     }
 
     pub fn historian(&self) -> Box<dyn Historian> {
@@ -183,8 +188,11 @@ pub(super) fn decision_context(game_state: &GameState) -> DecisionContext {
     DecisionContext {
         street: street(game_state.round),
         board: game_state.board.iter().copied().map(public_card).collect(),
-        actor_seat,
-        dealer_seat: game_state.dealer_idx,
+        actor_position: position_for_index(
+            game_state.num_players,
+            game_state.dealer_idx,
+            actor_seat,
+        ),
         players_at_table: game_state.num_players,
         players_active: live_players.count(),
         pot_bb: to_bb(game_state.total_pot, game_state.big_blind),
@@ -201,6 +209,44 @@ pub(super) fn decision_context(game_state: &GameState) -> DecisionContext {
                 + to_bb(game_state.current_round_min_raise(), game_state.big_blind),
         ),
         bet_or_raise_count_this_street: game_state.round_data.total_raise_count,
+    }
+}
+
+pub(super) fn validate_player_count(players: usize) -> Result<(), RsPokerAdapterError> {
+    if (2..=6).contains(&players) {
+        Ok(())
+    } else {
+        Err(RsPokerAdapterError::UnsupportedPlayerCount { players })
+    }
+}
+
+pub(super) fn position_for_index(
+    num_players: usize,
+    dealer_idx: usize,
+    actor_idx: usize,
+) -> Position {
+    assert!(
+        (2..=6).contains(&num_players),
+        "LeChiffre supports only 2..=6-max"
+    );
+    assert!(dealer_idx < num_players, "dealer index is outside the table");
+    assert!(actor_idx < num_players, "actor index is outside the table");
+
+    let distance_from_button = (actor_idx + num_players - dealer_idx) % num_players;
+
+    match (num_players, distance_from_button) {
+        (2, 0) => Position::ButtonSmallBlind,
+        (2, 1) => Position::BigBlind,
+        (_, 0) => Position::Button,
+        (_, 1) => Position::SmallBlind,
+        (_, 2) => Position::BigBlind,
+        (4, 3) => Position::Cutoff,
+        (5, 3) => Position::Hijack,
+        (5, 4) => Position::Cutoff,
+        (6, 3) => Position::UnderTheGun,
+        (6, 4) => Position::Hijack,
+        (6, 5) => Position::Cutoff,
+        _ => unreachable!("validated 2..=6-max position mapping is exhaustive"),
     }
 }
 
@@ -298,6 +344,7 @@ fn rs_poker_hand_id(hand_id: u128) -> HandId {
 #[derive(Debug)]
 pub enum RsPokerAdapterError {
     StoragePoisoned,
+    UnsupportedPlayerCount { players: usize },
     SequenceTooLong { hand_id: u128 },
     MissingDecision { hand_id: u128, seat: usize },
     BehaviourEvent(BehaviourEventError),
@@ -308,6 +355,9 @@ impl fmt::Display for RsPokerAdapterError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::StoragePoisoned => write!(f, "behaviour adapter storage lock poisoned"),
+            Self::UnsupportedPlayerCount { players } => {
+                write!(f, "LeChiffre supports only 2..=6-max, got {players} players")
+            }
             Self::SequenceTooLong { hand_id } => {
                 write!(f, "hand {hand_id} has more than u32::MAX behavioural events")
             }
@@ -381,6 +431,35 @@ mod tests {
         assert_eq!(semantic_action(&raise, 8), ActionKind::Raise);
     }
 
+    #[test]
+    fn maps_positions_for_two_to_six_players() {
+        assert_eq!(position_for_index(2, 0, 0), Position::ButtonSmallBlind);
+        assert_eq!(position_for_index(2, 0, 1), Position::BigBlind);
+
+        assert_eq!(position_for_index(3, 0, 0), Position::Button);
+        assert_eq!(position_for_index(3, 0, 1), Position::SmallBlind);
+        assert_eq!(position_for_index(3, 0, 2), Position::BigBlind);
+
+        assert_eq!(position_for_index(4, 0, 3), Position::Cutoff);
+        assert_eq!(position_for_index(5, 0, 3), Position::Hijack);
+        assert_eq!(position_for_index(5, 0, 4), Position::Cutoff);
+        assert_eq!(position_for_index(6, 0, 3), Position::UnderTheGun);
+        assert_eq!(position_for_index(6, 0, 4), Position::Hijack);
+        assert_eq!(position_for_index(6, 0, 5), Position::Cutoff);
+
+        assert_eq!(position_for_index(6, 4, 4), Position::Button);
+        assert_eq!(position_for_index(6, 4, 5), Position::SmallBlind);
+        assert_eq!(position_for_index(6, 4, 0), Position::BigBlind);
+    }
+
+    #[test]
+    fn rejects_tables_above_six_max() {
+        assert!(matches!(
+            validate_player_count(7),
+            Err(RsPokerAdapterError::UnsupportedPlayerCount { players: 7 })
+        ));
+    }
+
     #[tokio::test]
     async fn records_behaviour_sequence_from_rs_poker() {
         let adapter = RsPokerAdapter::new();
@@ -388,7 +467,7 @@ mod tests {
             Box::<CallingAgent>::default(),
             Box::<CallingAgent>::default(),
         ];
-        let agents = adapter.wrap_agents(agents);
+        let agents = adapter.wrap_agents(agents).unwrap();
         let game_state = GameStateBuilder::new()
             .num_players_with_stack(2, 100)
             .blinds(2, 1)
