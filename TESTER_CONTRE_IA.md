@@ -73,4 +73,4 @@ cargo run --release --manifest-path crates/lechiffre-sdcfr/Cargo.toml -- match -
 
 Le fichier créé est `runs/matchs-leduc/matches.csv`. Utilise un nouveau dossier pour chaque test enregistré.
 
-Les mêmes commandes fonctionnent avec `--game kuhn` et une sauvegarde Kuhn. Le raccordement au Texas Hold'em reste une étape suivante.
+Les mêmes commandes fonctionnent avec `--game kuhn` et une sauvegarde Kuhn. Pour le nouveau Hold'em réduit, utilise le binaire distinct `crates/lechiffre-nlhe/` et les commandes de [LIRE-MOI_NLHE.md](LIRE-MOI_NLHE.md).

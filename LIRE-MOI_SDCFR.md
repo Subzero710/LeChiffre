@@ -110,7 +110,7 @@ Les tests comparent tous les 9 450 états situés après la distribution privée
 
 Les sauvegardes contiennent les réseaux, toute leur archive, les réservoirs et l'état aléatoire. La reprise est vérifiée comme identique à une exécution continue dans le même environnement. La limite de cette implémentation de référence reste de 64 Mio par sauvegarde ; l'archive grandit avec les itérations. Aucun ancien réseau n'est supprimé silencieusement.
 
-La prochaine étape est l'adaptateur `rs_poker`, puis un premier NLHE heads-up réduit. Le GPU, la généralisation au NLHE, le multiway et le Cerveau Psychologue restent à développer. Le programme principal existant de LeChiffre n'utilise pas encore ce réseau. Le backend neuronal reste une référence CPU Rust ; l'intégration de Burn viendra avec l'étude des performances sur des jeux plus grands.
+Un premier adaptateur `rs_poker` et le NLHE heads-up réduit sont maintenant disponibles dans `crates/lechiffre-nlhe/`. Consulte [LIRE-MOI_NLHE.md](LIRE-MOI_NLHE.md) pour ces nouvelles commandes. La généralisation au NLHE libre, le GPU, le multiway et le Cerveau Psychologue restent à développer. Le programme principal historique n'est pas remplacé. Le backend neuronal reste une référence CPU Rust ; l'intégration de Burn viendra avec l'étude des performances sur des jeux plus grands.
 
 ## Références
 

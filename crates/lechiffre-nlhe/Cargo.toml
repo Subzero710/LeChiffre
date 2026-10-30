@@ -1,0 +1,15 @@
+[package]
+name = "lechiffre-nlhe"
+version = "0.1.0"
+edition = "2024"
+description = "Reduced heads-up NLHE adapter for LeChiffre Single Deep CFR"
+
+[dependencies]
+lechiffre-sdcfr = { path = "../lechiffre-sdcfr" }
+rs_poker = { path = "../../vendor/rs-poker", default-features = false, features = ["arena", "serde"] }
+
+[dev-dependencies]
+tokio = { version = "~1.43", features = ["macros", "rt"] }
+
+[lints.rust]
+unsafe_code = "forbid"

@@ -98,6 +98,9 @@ impl Trainer {
     pub fn completed(&self) -> u64 {
         self.completed
     }
+    pub fn game_id(&self) -> &str {
+        &self.game_id
+    }
     pub fn archive(&self, player: usize) -> &[Snapshot] {
         &self.archive[player]
     }
@@ -233,6 +236,11 @@ fn traverse_cached<G: Game>(
                 observation.features.iter().map(|x| x.to_bits()).collect(),
                 observation.legal.clone(),
             );
+            // NLHE has many distinct observations: inference caching is optional
+            // and must not retain an unbounded copy of all visited states.
+            if cache.len() >= 16_384 {
+                cache.clear();
+            }
             let policy = cache
                 .entry(key)
                 .or_insert_with(|| {
