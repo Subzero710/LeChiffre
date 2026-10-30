@@ -50,7 +50,6 @@ pub enum ActionKind {
     Call,
     Bet,
     Raise,
-    AllIn,
 }
 
 /// Public poker state immediately before a player makes a decision.
@@ -142,6 +141,7 @@ impl DecisionContext {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObservedAction {
     pub kind: ActionKind,
+    pub is_all_in: bool,
 
     /// Chips newly committed by this action, in big blinds.
     /// Zero for fold/check.
@@ -162,18 +162,96 @@ impl ObservedAction {
         validate_non_negative("amount_added_bb", self.amount_added_bb)?;
         validate_non_negative("street_total_after_bb", self.street_total_after_bb)?;
 
-        if matches!(self.kind, ActionKind::Fold | ActionKind::Check)
-            && !approx_eq(self.amount_added_bb, 0.0)
-        {
-            return Err(BehaviourEventError::UnexpectedAmountForAction(self.kind));
-        }
-
         let expected_total = context.actor_street_commitment_bb + self.amount_added_bb;
         if !approx_eq(self.street_total_after_bb, expected_total) {
             return Err(BehaviourEventError::InconsistentStreetTotal {
                 expected: expected_total,
                 actual: self.street_total_after_bb,
             });
+        }
+
+        if self.amount_added_bb > context.actor_stack_bb + 1e-4 {
+            return Err(BehaviourEventError::AmountExceedsStack {
+                amount: self.amount_added_bb,
+                stack: context.actor_stack_bb,
+            });
+        }
+
+        if self.is_all_in {
+            if matches!(self.kind, ActionKind::Fold | ActionKind::Check)
+                || !approx_eq(self.amount_added_bb, context.actor_stack_bb)
+            {
+                return Err(BehaviourEventError::InconsistentAllInFlag);
+            }
+        } else if self.amount_added_bb > 0.0
+            && approx_eq(self.amount_added_bb, context.actor_stack_bb)
+        {
+            return Err(BehaviourEventError::InconsistentAllInFlag);
+        }
+
+        match self.kind {
+            ActionKind::Fold => {
+                if !approx_eq(self.amount_added_bb, 0.0) {
+                    return Err(BehaviourEventError::UnexpectedAmountForAction(self.kind));
+                }
+            }
+            ActionKind::Check => {
+                if !approx_eq(self.amount_added_bb, 0.0) {
+                    return Err(BehaviourEventError::UnexpectedAmountForAction(self.kind));
+                }
+                if !approx_eq(context.to_call_bb, 0.0) {
+                    return Err(BehaviourEventError::IllegalCheckFacingBet);
+                }
+            }
+            ActionKind::Call => {
+                if approx_eq(context.to_call_bb, 0.0) {
+                    return Err(BehaviourEventError::IllegalCallWithoutBet);
+                }
+
+                let expected_call = if self.is_all_in {
+                    context.actor_stack_bb.min(context.to_call_bb)
+                } else {
+                    context.to_call_bb
+                };
+
+                if !approx_eq(self.amount_added_bb, expected_call) {
+                    return Err(BehaviourEventError::InvalidCallAmount {
+                        expected: expected_call,
+                        actual: self.amount_added_bb,
+                    });
+                }
+            }
+            ActionKind::Bet => {
+                if !approx_eq(context.current_bet_bb, 0.0) {
+                    return Err(BehaviourEventError::IllegalBetFacingBet);
+                }
+                if self.amount_added_bb <= 0.0 {
+                    return Err(BehaviourEventError::NonPositiveAggressiveAction(self.kind));
+                }
+            }
+            ActionKind::Raise => {
+                if approx_eq(context.current_bet_bb, 0.0) {
+                    return Err(BehaviourEventError::IllegalRaiseWithoutBet);
+                }
+                if self.street_total_after_bb <= context.current_bet_bb + 1e-4 {
+                    return Err(BehaviourEventError::InvalidRaiseAmount {
+                        current_bet: context.current_bet_bb,
+                        actual: self.street_total_after_bb,
+                    });
+                }
+
+                if !self.is_all_in {
+                    let minimum = context
+                        .min_raise_to_bb
+                        .ok_or(BehaviourEventError::RaiseUnavailable)?;
+                    if self.street_total_after_bb + 1e-4 < minimum {
+                        return Err(BehaviourEventError::RaiseTooSmall {
+                            minimum,
+                            actual: self.street_total_after_bb,
+                        });
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -226,6 +304,17 @@ pub enum BehaviourEventError {
     InvalidNumber { field: &'static str },
     NegativeNumber { field: &'static str },
     UnexpectedAmountForAction(ActionKind),
+    AmountExceedsStack { amount: f32, stack: f32 },
+    InconsistentAllInFlag,
+    IllegalCheckFacingBet,
+    IllegalCallWithoutBet,
+    InvalidCallAmount { expected: f32, actual: f32 },
+    IllegalBetFacingBet,
+    IllegalRaiseWithoutBet,
+    InvalidRaiseAmount { current_bet: f32, actual: f32 },
+    RaiseUnavailable,
+    RaiseTooSmall { minimum: f32, actual: f32 },
+    NonPositiveAggressiveAction(ActionKind),
     InconsistentToCall { expected: f32, actual: f32 },
     InconsistentStreetTotal { expected: f32, actual: f32 },
 }
@@ -252,6 +341,30 @@ impl fmt::Display for BehaviourEventError {
             Self::NegativeNumber { field } => write!(f, "{field} must be non-negative"),
             Self::UnexpectedAmountForAction(action) => {
                 write!(f, "{action:?} cannot add chips")
+            }
+            Self::AmountExceedsStack { amount, stack } => {
+                write!(f, "action adds {amount} BB with only {stack} BB remaining")
+            }
+            Self::InconsistentAllInFlag => {
+                write!(f, "is_all_in does not match the committed amount")
+            }
+            Self::IllegalCheckFacingBet => write!(f, "cannot check while facing a bet"),
+            Self::IllegalCallWithoutBet => write!(f, "cannot call when there is nothing to call"),
+            Self::InvalidCallAmount { expected, actual } => {
+                write!(f, "call adds {actual} BB, expected {expected} BB")
+            }
+            Self::IllegalBetFacingBet => write!(f, "cannot bet when a street bet already exists"),
+            Self::IllegalRaiseWithoutBet => write!(f, "cannot raise when no street bet exists"),
+            Self::InvalidRaiseAmount { current_bet, actual } => write!(
+                f,
+                "raise-to amount is {actual} BB, current bet is {current_bet} BB"
+            ),
+            Self::RaiseUnavailable => write!(f, "raise is unavailable in this context"),
+            Self::RaiseTooSmall { minimum, actual } => {
+                write!(f, "raise-to amount is {actual} BB, minimum is {minimum} BB")
+            }
+            Self::NonPositiveAggressiveAction(action) => {
+                write!(f, "{action:?} must add chips")
             }
             Self::InconsistentToCall { expected, actual } => {
                 write!(f, "to_call_bb is {actual}, expected {expected}")
@@ -311,6 +424,7 @@ mod tests {
             context(),
             ObservedAction {
                 kind: ActionKind::Call,
+                is_all_in: false,
                 amount_added_bb: 1.5,
                 street_total_after_bb: 2.0,
                 decision_time_ms: Some(18_400),
@@ -357,6 +471,7 @@ mod tests {
             ctx,
             ObservedAction {
                 kind: ActionKind::Check,
+                is_all_in: false,
                 amount_added_bb: 0.0,
                 street_total_after_bb: 2.0,
                 decision_time_ms: Some(250),
@@ -364,5 +479,134 @@ mod tests {
         );
 
         assert!(event.is_ok());
+    }
+
+    #[test]
+    fn rejects_check_facing_bet() {
+        let event = BehaviourEvent::new(
+            7,
+            0,
+            context(),
+            ObservedAction {
+                kind: ActionKind::Check,
+                is_all_in: false,
+                amount_added_bb: 0.0,
+                street_total_after_bb: 0.5,
+                decision_time_ms: None,
+            },
+        );
+
+        assert_eq!(event, Err(BehaviourEventError::IllegalCheckFacingBet));
+    }
+
+    #[test]
+    fn accepts_short_all_in_call() {
+        let mut ctx = context();
+        ctx.actor_stack_bb = 1.0;
+
+        let event = BehaviourEvent::new(
+            7,
+            0,
+            ctx,
+            ObservedAction {
+                kind: ActionKind::Call,
+                is_all_in: true,
+                amount_added_bb: 1.0,
+                street_total_after_bb: 1.5,
+                decision_time_ms: None,
+            },
+        );
+
+        assert!(event.is_ok());
+    }
+
+    #[test]
+    fn rejects_wrong_non_all_in_call_amount() {
+        let event = BehaviourEvent::new(
+            7,
+            0,
+            context(),
+            ObservedAction {
+                kind: ActionKind::Call,
+                is_all_in: false,
+                amount_added_bb: 1.0,
+                street_total_after_bb: 1.5,
+                decision_time_ms: None,
+            },
+        );
+
+        assert_eq!(
+            event,
+            Err(BehaviourEventError::InvalidCallAmount {
+                expected: 1.5,
+                actual: 1.0,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_inconsistent_all_in_flag() {
+        let mut ctx = context();
+        ctx.actor_stack_bb = 1.5;
+
+        let event = BehaviourEvent::new(
+            7,
+            0,
+            ctx,
+            ObservedAction {
+                kind: ActionKind::Call,
+                is_all_in: false,
+                amount_added_bb: 1.5,
+                street_total_after_bb: 2.0,
+                decision_time_ms: None,
+            },
+        );
+
+        assert_eq!(event, Err(BehaviourEventError::InconsistentAllInFlag));
+    }
+
+    #[test]
+    fn accepts_short_all_in_raise_below_minimum() {
+        let mut ctx = context();
+        ctx.actor_stack_bb = 2.0;
+
+        let event = BehaviourEvent::new(
+            7,
+            0,
+            ctx,
+            ObservedAction {
+                kind: ActionKind::Raise,
+                is_all_in: true,
+                amount_added_bb: 2.0,
+                street_total_after_bb: 2.5,
+                decision_time_ms: None,
+            },
+        );
+
+        assert!(event.is_ok());
+    }
+
+    #[test]
+    fn rejects_non_all_in_raise_below_minimum() {
+        let event = BehaviourEvent::new(
+            7,
+            0,
+            context(),
+            ObservedAction {
+                kind: ActionKind::Raise,
+                is_all_in: false,
+                amount_added_bb: 2.0,
+                street_total_after_bb: 2.5,
+                decision_time_ms: None,
+            },
+        );
+
+        assert_eq!(
+            event,
+            Err(BehaviourEventError::RaiseTooSmall {
+                minimum: 4.0,
+                actual: 2.5,
+            })
+        );
     }
 }

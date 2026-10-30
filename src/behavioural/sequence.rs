@@ -114,6 +114,7 @@ mod tests {
             },
             ObservedAction {
                 kind: ActionKind::Check,
+                is_all_in: false,
                 amount_added_bb: 0.0,
                 street_total_after_bb: 1.0,
                 decision_time_ms: Some(320),

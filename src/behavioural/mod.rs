@@ -22,13 +22,14 @@ pub trait BehaviourAnalyzer {
     ) -> Result<BehaviourProfile, Self::Error>;
 }
 
-/// Generates behaviour for a supplied profile in the given public context.
+/// Generates behaviour for a supplied profile from the public history and current context.
 pub trait BehaviourGenerator {
     type Error;
 
     fn generate(
         &self,
         profile: &BehaviourProfile,
+        sequence: &BehaviourSequence,
         context: &DecisionContext,
     ) -> Result<ObservedAction, Self::Error>;
 }
