@@ -1,5 +1,7 @@
+mod adapters;
 mod behavioural;
 
+use adapters::rs_poker::RsPokerAdapter;
 use rs_poker::arena::{Agent, GameStateBuilder, HoldemSimulationBuilder, agent::RandomAgent};
 
 #[tokio::main]
@@ -27,14 +29,25 @@ async fn main() {
         )),
     ];
 
+    let adapter = RsPokerAdapter::new();
+    let agents = adapter.wrap_agents(agents);
+
     let mut simulation = HoldemSimulationBuilder::default()
         .game_state(game_state)
         .agents(agents)
+        .historians(vec![adapter.historian()])
         .build()
         .expect("failed to build simulation");
 
+    let hand_id = simulation.id;
     simulation.run().await;
 
+    let sequence = adapter
+        .sequence(hand_id)
+        .expect("failed to read behavioural sequence")
+        .expect("behavioural sequence was not recorded");
+
     println!("Random vs Random completed");
+    println!("Behavioural events: {}", sequence.len());
     println!("Final stacks: {:?}", simulation.game_state.stacks);
 }
