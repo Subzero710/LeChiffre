@@ -1,5 +1,39 @@
-use std::collections::HashSet;
 use std::fmt;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HandId(String);
+
+impl HandId {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl From<String> for HandId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for HandId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
+impl fmt::Display for HandId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 /// Betting street visible to every player.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -80,35 +114,6 @@ pub struct DecisionContext {
 
 impl DecisionContext {
     pub fn validate(&self) -> Result<(), BehaviourEventError> {
-        if self.players_at_table < 2 {
-            return Err(BehaviourEventError::InvalidPlayerCount);
-        }
-        if self.players_active == 0 || self.players_active > self.players_at_table {
-            return Err(BehaviourEventError::InvalidActivePlayerCount);
-        }
-        if self.actor_seat >= self.players_at_table || self.dealer_seat >= self.players_at_table {
-            return Err(BehaviourEventError::InvalidSeat);
-        }
-
-        let expected_board_len = match self.street {
-            Street::Preflop => 0,
-            Street::Flop => 3,
-            Street::Turn => 4,
-            Street::River => 5,
-        };
-        if self.board.len() != expected_board_len {
-            return Err(BehaviourEventError::InvalidBoardLength {
-                street: self.street,
-                expected: expected_board_len,
-                actual: self.board.len(),
-            });
-        }
-
-        let unique_cards: HashSet<_> = self.board.iter().copied().collect();
-        if unique_cards.len() != self.board.len() {
-            return Err(BehaviourEventError::DuplicateBoardCard);
-        }
-
         validate_non_negative("pot_bb", self.pot_bb)?;
         validate_non_negative("actor_stack_bb", self.actor_stack_bb)?;
         validate_non_negative("effective_stack_bb", self.effective_stack_bb)?;
@@ -123,16 +128,6 @@ impl DecisionContext {
             validate_non_negative("min_raise_to_bb", value)?;
         }
 
-        // Keep redundant betting fields internally consistent.
-        let expected_to_call =
-            (self.current_bet_bb - self.actor_street_commitment_bb).max(0.0);
-        if !approx_eq(self.to_call_bb, expected_to_call) {
-            return Err(BehaviourEventError::InconsistentToCall {
-                expected: expected_to_call,
-                actual: self.to_call_bb,
-            });
-        }
-
         Ok(())
     }
 }
@@ -144,12 +139,9 @@ pub struct ObservedAction {
     pub is_all_in: bool,
 
     /// Chips newly committed by this action, in big blinds.
-    /// Zero for fold/check.
     pub amount_added_bb: f32,
 
     /// Player's total commitment on the current street after the action.
-    /// This remains meaningful for fold/check because a player may already have
-    /// chips committed on that street (for example the big blind checking).
     pub street_total_after_bb: f32,
 
     /// Wall-clock decision latency once the action was available, in ms.
@@ -158,18 +150,9 @@ pub struct ObservedAction {
 }
 
 impl ObservedAction {
-    fn validate_against(&self, context: &DecisionContext) -> Result<(), BehaviourEventError> {
+    fn validate(&self) -> Result<(), BehaviourEventError> {
         validate_non_negative("amount_added_bb", self.amount_added_bb)?;
         validate_non_negative("street_total_after_bb", self.street_total_after_bb)?;
-
-        let expected_total = context.actor_street_commitment_bb + self.amount_added_bb;
-        if !approx_eq(self.street_total_after_bb, expected_total) {
-            return Err(BehaviourEventError::InconsistentStreetTotal {
-                expected: expected_total,
-                actual: self.street_total_after_bb,
-            });
-        }
-
         Ok(())
     }
 }
@@ -177,7 +160,7 @@ impl ObservedAction {
 /// One behavioural observation: public state before the decision and the observed response.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BehaviourEvent {
-    pub hand_id: u128,
+    pub hand_id: HandId,
     pub sequence_index: u32,
     pub context: DecisionContext,
     pub action: ObservedAction,
@@ -185,16 +168,16 @@ pub struct BehaviourEvent {
 
 impl BehaviourEvent {
     pub fn new(
-        hand_id: u128,
+        hand_id: impl Into<HandId>,
         sequence_index: u32,
         context: DecisionContext,
         action: ObservedAction,
     ) -> Result<Self, BehaviourEventError> {
         context.validate()?;
-        action.validate_against(&context)?;
+        action.validate()?;
 
         Ok(Self {
-            hand_id,
+            hand_id: hand_id.into(),
             sequence_index,
             context,
             action,
@@ -206,50 +189,17 @@ impl BehaviourEvent {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BehaviourEventError {
-    InvalidPlayerCount,
-    InvalidActivePlayerCount,
-    InvalidSeat,
-    InvalidBoardLength {
-        street: Street,
-        expected: usize,
-        actual: usize,
-    },
-    DuplicateBoardCard,
     InvalidNumber { field: &'static str },
     NegativeNumber { field: &'static str },
-    InconsistentToCall { expected: f32, actual: f32 },
-    InconsistentStreetTotal { expected: f32, actual: f32 },
 }
 
 impl fmt::Display for BehaviourEventError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidPlayerCount => write!(f, "players_at_table must be at least 2"),
-            Self::InvalidActivePlayerCount => write!(
-                f,
-                "players_active must be between 1 and players_at_table"
-            ),
-            Self::InvalidSeat => write!(f, "actor/dealer seat is outside the table"),
-            Self::InvalidBoardLength {
-                street,
-                expected,
-                actual,
-            } => write!(
-                f,
-                "{street:?} requires {expected} public cards, got {actual}"
-            ),
-            Self::DuplicateBoardCard => write!(f, "board contains a duplicate card"),
             Self::InvalidNumber { field } => write!(f, "{field} must be finite"),
             Self::NegativeNumber { field } => write!(f, "{field} must be non-negative"),
-            Self::InconsistentToCall { expected, actual } => {
-                write!(f, "to_call_bb is {actual}, expected {expected}")
-            }
-            Self::InconsistentStreetTotal { expected, actual } => write!(
-                f,
-                "street_total_after_bb is {actual}, expected {expected}"
-            ),
         }
     }
 }
@@ -264,10 +214,6 @@ fn validate_non_negative(field: &'static str, value: f32) -> Result<(), Behaviou
         return Err(BehaviourEventError::NegativeNumber { field });
     }
     Ok(())
-}
-
-fn approx_eq(left: f32, right: f32) -> bool {
-    (left - right).abs() <= 1e-4
 }
 
 #[cfg(test)]
@@ -296,7 +242,7 @@ mod tests {
     #[test]
     fn accepts_well_formed_event() {
         let event = BehaviourEvent::new(
-            7,
+            "hand-7",
             0,
             context(),
             ObservedAction {
@@ -309,6 +255,7 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(event.hand_id.as_str(), "hand-7");
         assert_eq!(event.actor_seat(), 0);
         assert_eq!(event.action.decision_time_ms, Some(18_400));
     }
@@ -316,7 +263,7 @@ mod tests {
     #[test]
     fn accepts_missing_timing() {
         let event = BehaviourEvent::new(
-            7,
+            "hand-7",
             0,
             context(),
             ObservedAction {
@@ -332,16 +279,31 @@ mod tests {
     }
 
     #[test]
-    fn does_not_revalidate_poker_legality() {
+    fn does_not_revalidate_poker_state_or_action_semantics() {
         let event = BehaviourEvent::new(
-            7,
+            "hand-7",
             0,
-            context(),
+            DecisionContext {
+                street: Street::River,
+                board: vec![],
+                actor_seat: 99,
+                dealer_seat: 88,
+                players_at_table: 1,
+                players_active: 0,
+                pot_bb: 2.5,
+                actor_stack_bb: 1.0,
+                effective_stack_bb: 50.0,
+                actor_street_commitment_bb: 20.0,
+                current_bet_bb: 1.0,
+                to_call_bb: 17.0,
+                min_raise_to_bb: Some(0.0),
+                bet_or_raise_count_this_street: 255,
+            },
             ObservedAction {
-                kind: ActionKind::Call,
+                kind: ActionKind::Check,
                 is_all_in: true,
-                amount_added_bb: 1.0,
-                street_total_after_bb: 1.5,
+                amount_added_bb: 3.0,
+                street_total_after_bb: 42.0,
                 decision_time_ms: None,
             },
         );
@@ -363,14 +325,14 @@ mod tests {
     #[test]
     fn rejects_negative_action_amount() {
         let event = BehaviourEvent::new(
-            7,
+            "hand-7",
             0,
             context(),
             ObservedAction {
                 kind: ActionKind::Fold,
                 is_all_in: false,
                 amount_added_bb: -1.0,
-                street_total_after_bb: -0.5,
+                street_total_after_bb: 0.0,
                 decision_time_ms: None,
             },
         );
@@ -381,37 +343,5 @@ mod tests {
                 field: "amount_added_bb"
             })
         );
-    }
-
-    #[test]
-    fn rejects_inconsistent_to_call() {
-        let mut ctx = context();
-        ctx.to_call_bb = 0.25;
-
-        assert!(matches!(
-            ctx.validate(),
-            Err(BehaviourEventError::InconsistentToCall { .. })
-        ));
-    }
-
-    #[test]
-    fn rejects_inconsistent_street_total() {
-        let event = BehaviourEvent::new(
-            7,
-            0,
-            context(),
-            ObservedAction {
-                kind: ActionKind::Raise,
-                is_all_in: true,
-                amount_added_bb: 2.0,
-                street_total_after_bb: 9.0,
-                decision_time_ms: None,
-            },
-        );
-
-        assert!(matches!(
-            event,
-            Err(BehaviourEventError::InconsistentStreetTotal { .. })
-        ));
     }
 }

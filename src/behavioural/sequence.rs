@@ -1,6 +1,6 @@
 use std::fmt;
 
-use super::event::BehaviourEvent;
+use super::event::{BehaviourEvent, HandId};
 
 /// Ordered public behavioural observations for one poker hand.
 ///
@@ -9,20 +9,20 @@ use super::event::BehaviourEvent;
 /// required by the Analyzer (e.g. "tank 20s while facing a 3-bet").
 #[derive(Debug, Clone, PartialEq)]
 pub struct BehaviourSequence {
-    hand_id: u128,
+    hand_id: HandId,
     events: Vec<BehaviourEvent>,
 }
 
 impl BehaviourSequence {
-    pub fn new(hand_id: u128) -> Self {
+    pub fn new(hand_id: impl Into<HandId>) -> Self {
         Self {
-            hand_id,
+            hand_id: hand_id.into(),
             events: Vec::new(),
         }
     }
 
-    pub fn hand_id(&self) -> u128 {
-        self.hand_id
+    pub fn hand_id(&self) -> &HandId {
+        &self.hand_id
     }
 
     pub fn events(&self) -> &[BehaviourEvent] {
@@ -46,12 +46,13 @@ impl BehaviourSequence {
     pub fn push(&mut self, event: BehaviourEvent) -> Result<(), BehaviourSequenceError> {
         if event.hand_id != self.hand_id {
             return Err(BehaviourSequenceError::WrongHand {
-                expected: self.hand_id,
+                expected: self.hand_id.clone(),
                 actual: event.hand_id,
             });
         }
 
-        let expected_index = self.events.len() as u32;
+        let expected_index = u32::try_from(self.events.len())
+            .map_err(|_| BehaviourSequenceError::SequenceTooLong)?;
         if event.sequence_index != expected_index {
             return Err(BehaviourSequenceError::UnexpectedSequenceIndex {
                 expected: expected_index,
@@ -66,13 +67,15 @@ impl BehaviourSequence {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BehaviourSequenceError {
-    WrongHand { expected: u128, actual: u128 },
+    SequenceTooLong,
+    WrongHand { expected: HandId, actual: HandId },
     UnexpectedSequenceIndex { expected: u32, actual: u32 },
 }
 
 impl fmt::Display for BehaviourSequenceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::SequenceTooLong => write!(f, "behaviour sequence has more than u32::MAX events"),
             Self::WrongHand { expected, actual } => {
                 write!(f, "event belongs to hand {actual}, expected {expected}")
             }
@@ -92,7 +95,7 @@ mod tests {
         ActionKind, BehaviourEvent, DecisionContext, ObservedAction, Street,
     };
 
-    fn event(hand_id: u128, sequence_index: u32, actor_seat: usize) -> BehaviourEvent {
+    fn event(hand_id: &str, sequence_index: u32, actor_seat: usize) -> BehaviourEvent {
         BehaviourEvent::new(
             hand_id,
             sequence_index,
@@ -125,9 +128,9 @@ mod tests {
 
     #[test]
     fn keeps_actions_from_multiple_players_in_order() {
-        let mut seq = BehaviourSequence::new(10);
-        seq.push(event(10, 0, 0)).unwrap();
-        seq.push(event(10, 1, 1)).unwrap();
+        let mut seq = BehaviourSequence::new("hand-10");
+        seq.push(event("hand-10", 0, 0)).unwrap();
+        seq.push(event("hand-10", 1, 1)).unwrap();
 
         assert_eq!(seq.len(), 2);
         assert_eq!(seq.events_for_seat(0).count(), 1);
@@ -136,9 +139,9 @@ mod tests {
 
     #[test]
     fn rejects_out_of_order_event() {
-        let mut seq = BehaviourSequence::new(10);
+        let mut seq = BehaviourSequence::new("hand-10");
         assert_eq!(
-            seq.push(event(10, 2, 0)),
+            seq.push(event("hand-10", 2, 0)),
             Err(BehaviourSequenceError::UnexpectedSequenceIndex {
                 expected: 0,
                 actual: 2,
@@ -148,12 +151,12 @@ mod tests {
 
     #[test]
     fn rejects_event_from_another_hand() {
-        let mut seq = BehaviourSequence::new(10);
+        let mut seq = BehaviourSequence::new("hand-10");
         assert_eq!(
-            seq.push(event(11, 0, 0)),
+            seq.push(event("hand-11", 0, 0)),
             Err(BehaviourSequenceError::WrongHand {
-                expected: 10,
-                actual: 11,
+                expected: HandId::from("hand-10"),
+                actual: HandId::from("hand-11"),
             })
         );
     }

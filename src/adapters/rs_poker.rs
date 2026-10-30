@@ -11,7 +11,7 @@ use rs_poker::core::{Card, Suit as RsSuit, Value as RsValue};
 
 use crate::behavioural::{
     ActionKind, BehaviourEvent, BehaviourEventError, BehaviourSequence, BehaviourSequenceError,
-    DecisionContext, ObservedAction, PublicCard, Rank, Street, Suit,
+    DecisionContext, HandId, ObservedAction, PublicCard, Rank, Street, Suit,
 };
 
 type DecisionKey = (u128, usize);
@@ -159,11 +159,13 @@ fn record_played_action(
     let sequence = state
         .sequences
         .entry(hand_id)
-        .or_insert_with(|| BehaviourSequence::new(hand_id));
+        .or_insert_with(|| BehaviourSequence::new(rs_poker_hand_id(hand_id)));
 
+    let sequence_index = u32::try_from(sequence.len())
+        .map_err(|_| RsPokerAdapterError::SequenceTooLong { hand_id })?;
     let event = BehaviourEvent::new(
-        hand_id,
-        sequence.len() as u32,
+        rs_poker_hand_id(hand_id),
+        sequence_index,
         pending.context,
         observed_action(payload, pending.big_blind, pending.decision_time_ms),
     )?;
@@ -172,7 +174,7 @@ fn record_played_action(
     Ok(())
 }
 
-fn decision_context(game_state: &GameState) -> DecisionContext {
+pub(super) fn decision_context(game_state: &GameState) -> DecisionContext {
     let actor_seat = game_state.to_act_idx();
     let current_bet = game_state.current_round_bet();
     let actor_commitment = game_state.current_round_player_bet(actor_seat);
@@ -284,14 +286,19 @@ fn public_card(card: Card) -> PublicCard {
     }
 }
 
-fn to_bb(chips: rs_poker::arena::Chips, big_blind: rs_poker::arena::Chips) -> f32 {
+pub(super) fn to_bb(chips: rs_poker::arena::Chips, big_blind: rs_poker::arena::Chips) -> f32 {
     assert!(big_blind > 0, "big blind must be positive");
     chips as f32 / big_blind as f32
+}
+
+fn rs_poker_hand_id(hand_id: u128) -> HandId {
+    HandId::new(format!("rs-poker:{hand_id}"))
 }
 
 #[derive(Debug)]
 pub enum RsPokerAdapterError {
     StoragePoisoned,
+    SequenceTooLong { hand_id: u128 },
     MissingDecision { hand_id: u128, seat: usize },
     BehaviourEvent(BehaviourEventError),
     BehaviourSequence(BehaviourSequenceError),
@@ -301,6 +308,9 @@ impl fmt::Display for RsPokerAdapterError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::StoragePoisoned => write!(f, "behaviour adapter storage lock poisoned"),
+            Self::SequenceTooLong { hand_id } => {
+                write!(f, "hand {hand_id} has more than u32::MAX behavioural events")
+            }
             Self::MissingDecision { hand_id, seat } => {
                 write!(f, "missing decision snapshot for hand {hand_id}, seat {seat}")
             }
@@ -408,7 +418,7 @@ mod tests {
             sequence
                 .events()
                 .iter()
-                .all(|event| event.hand_id == hand_id)
+                .all(|event| event.hand_id == rs_poker_hand_id(hand_id))
         );
     }
 }

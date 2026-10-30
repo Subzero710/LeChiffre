@@ -5,8 +5,8 @@ mod profile;
 mod sequence;
 
 pub use event::{
-    ActionKind, BehaviourEvent, BehaviourEventError, DecisionContext, ObservedAction, PublicCard,
-    Rank, Street, Suit,
+    ActionKind, BehaviourEvent, BehaviourEventError, DecisionContext, HandId, ObservedAction,
+    PublicCard, Rank, Street, Suit,
 };
 pub use profile::{BehaviourProfile, BehaviourProfileError};
 pub use sequence::{BehaviourSequence, BehaviourSequenceError};
