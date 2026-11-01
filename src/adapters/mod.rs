@@ -3,6 +3,7 @@ use std::fmt;
 use crate::behavioural::{BehaviourSequence, Position, SubjectHand};
 
 pub mod hand_history;
+pub mod pokernow;
 pub mod rs_poker;
 
 /// Source-observed player identity used by ingestion adapters.

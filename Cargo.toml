@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 async-trait = "0.1.92"
 rs_poker = { path = "vendor/rs-poker" }
+serde_json = "1"
 tokio = "1.43.4"
 
 

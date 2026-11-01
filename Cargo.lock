@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "rs_poker",
+ "serde_json",
  "tokio",
 ]
 

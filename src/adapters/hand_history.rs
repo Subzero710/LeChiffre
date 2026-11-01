@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use rs_poker::arena::action::AgentAction;
@@ -20,6 +20,24 @@ impl HandHistoryAdapter {
         hand: &HandHistory,
         rake: RakeConfig,
     ) -> Result<AdaptedHand, HandHistoryAdapterError> {
+        Self::adapt_inner(hand, rake, None, None)
+    }
+
+    pub(crate) fn adapt_with_observations(
+        hand: &HandHistory,
+        rake: RakeConfig,
+        decision_times_ms: &[Option<u32>],
+        player_ids: &HashMap<u64, PlayerId>,
+    ) -> Result<AdaptedHand, HandHistoryAdapterError> {
+        Self::adapt_inner(hand, rake, Some(decision_times_ms), Some(player_ids))
+    }
+
+    fn adapt_inner(
+        hand: &HandHistory,
+        rake: RakeConfig,
+        decision_times_ms: Option<&[Option<u32>]>,
+        player_ids: Option<&HashMap<u64, PlayerId>>,
+    ) -> Result<AdaptedHand, HandHistoryAdapterError> {
         let replayed = replay_hand(hand, rake)?;
         let players_at_table = replayed.initial_state.num_players;
         if !(2..=6).contains(&players_at_table) {
@@ -28,18 +46,30 @@ impl HandHistoryAdapter {
             });
         }
 
+        if let Some(times) = decision_times_ms {
+            if times.len() != replayed.steps.len() {
+                return Err(HandHistoryAdapterError::TimingCountMismatch {
+                    expected: replayed.steps.len(),
+                    observed: times.len(),
+                });
+            }
+        }
+
         let hand_id = HandId::new(format!("{}:{}", hand.site_name, hand.game_number));
-        let players = observed_players(hand, &replayed)?;
+        let players = observed_players(hand, &replayed, player_ids)?;
         let mut sequence = BehaviourSequence::new(hand_id.clone());
 
-        for (sequence_index, step) in replayed.transitions().enumerate() {
-            let sequence_index = u32::try_from(sequence_index)
+        for (sequence_offset, step) in replayed.transitions().enumerate() {
+            let sequence_index = u32::try_from(sequence_offset)
                 .map_err(|_| HandHistoryAdapterError::SequenceTooLong)?;
             let event = BehaviourEvent::new(
                 hand_id.clone(),
                 sequence_index,
                 decision_context(&step.state_before),
-                observed_action(step),
+                observed_action(
+                    step,
+                    decision_times_ms.and_then(|times| times[sequence_offset]),
+                ),
             )?;
             sequence.push(event)?;
         }
@@ -63,6 +93,7 @@ impl HandHistoryAdapter {
 fn observed_players(
     hand: &HandHistory,
     replayed: &ReplayedHand,
+    supplied_player_ids: Option<&HashMap<u64, PlayerId>>,
 ) -> Result<Vec<ObservedPlayer>, HandHistoryAdapterError> {
     let mut identities = HashSet::new();
     let mut players = Vec::with_capacity(replayed.player_ids.len());
@@ -76,7 +107,15 @@ fn observed_players(
                 source_player_id,
             })?;
 
-        let player_id = PlayerId::from_source(&hand.site_name, &source_player.name);
+        let player_id = match supplied_player_ids {
+            Some(ids) => ids
+                .get(&source_player_id)
+                .cloned()
+                .ok_or(HandHistoryAdapterError::MissingPlayerIdentity {
+                    source_player_id,
+                })?,
+            None => PlayerId::from_source(&hand.site_name, &source_player.name),
+        };
         if !identities.insert(player_id.clone()) {
             return Err(HandHistoryAdapterError::DuplicatePlayerIdentity { player_id });
         }
@@ -94,7 +133,7 @@ fn observed_players(
     Ok(players)
 }
 
-fn observed_action(step: &ReplayStep) -> ObservedAction {
+fn observed_action(step: &ReplayStep, decision_time_ms: Option<u32>) -> ObservedAction {
     let actor_index = step.state_before.to_act_idx();
     let before_player_bet = step.state_before.current_round_player_bet(actor_index);
     let after_player_bet = step.state_after.current_round_player_bet(actor_index);
@@ -121,7 +160,7 @@ fn observed_action(step: &ReplayStep) -> ObservedAction {
         is_all_in: step.state_after.player_all_in.get(actor_index),
         amount_added_bb: to_bb(amount_added, step.state_before.big_blind),
         street_total_after_bb: to_bb(after_player_bet, step.state_before.big_blind),
-        decision_time_ms: None,
+        decision_time_ms,
     }
 }
 
@@ -130,7 +169,9 @@ pub enum HandHistoryAdapterError {
     UnsupportedPlayerCount { players: usize },
     SequenceTooLong,
     MissingSourcePlayer { source_player_id: u64 },
+    MissingPlayerIdentity { source_player_id: u64 },
     DuplicatePlayerIdentity { player_id: PlayerId },
+    TimingCountMismatch { expected: usize, observed: usize },
     Replay(ReplayError),
     BehaviourEvent(BehaviourEventError),
     BehaviourSequence(BehaviourSequenceError),
@@ -146,9 +187,16 @@ impl fmt::Display for HandHistoryAdapterError {
             Self::MissingSourcePlayer { source_player_id } => {
                 write!(f, "replay references unknown source player {source_player_id}")
             }
+            Self::MissingPlayerIdentity { source_player_id } => {
+                write!(f, "missing player identity for source player {source_player_id}")
+            }
             Self::DuplicatePlayerIdentity { player_id } => {
                 write!(f, "duplicate source player identity {player_id} in one hand")
             }
+            Self::TimingCountMismatch { expected, observed } => write!(
+                f,
+                "timing count does not match replay decisions: expected {expected}, got {observed}"
+            ),
             Self::Replay(error) => write!(f, "hand history replay failed: {error}"),
             Self::BehaviourEvent(error) => write!(f, "invalid behaviour event: {error}"),
             Self::BehaviourSequence(error) => write!(f, "invalid behaviour sequence: {error}"),
