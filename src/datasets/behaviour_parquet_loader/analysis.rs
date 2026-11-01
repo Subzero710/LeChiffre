@@ -619,8 +619,9 @@ mod tests {
 
     use super::super::{PersistedHand, SubjectMembership};
 
-    fn hand(
-        hand_id: &str,
+    #[derive(Clone, Copy)]
+    struct HandFixture<'a> {
+        hand_id: &'a str,
         hand_index: u64,
         players_at_table: u8,
         street: i64,
@@ -628,7 +629,19 @@ mod tests {
         action: i64,
         timing: u32,
         pot_bb: f32,
-    ) -> PersistedHand {
+    }
+
+    fn hand(fixture: HandFixture<'_>) -> PersistedHand {
+        let HandFixture {
+            hand_id,
+            hand_index,
+            players_at_table,
+            street,
+            position,
+            action,
+            timing,
+            pot_bb,
+        } = fixture;
         let mut continuous = [0.0_f32; crate::behavioural::EVENT_CONTINUOUS_WIDTH];
         continuous[ContinuousFeature::PotBb as usize] = pot_bb;
         continuous[ContinuousFeature::ActorStackBb as usize] = 100.0;
@@ -653,8 +666,26 @@ mod tests {
 
     fn dataset_for_stats() -> BehaviourParquetDataset {
         let hands = vec![
-            hand("h0", 0, 2, 0, 4, 2, 100, 1.5),
-            hand("h1", 1, 2, 1, 6, 1, 300, 4.0),
+            hand(HandFixture {
+                hand_id: "h0",
+                hand_index: 0,
+                players_at_table: 2,
+                street: 0,
+                position: 4,
+                action: 2,
+                timing: 100,
+                pot_bb: 1.5,
+            }),
+            hand(HandFixture {
+                hand_id: "h1",
+                hand_index: 1,
+                players_at_table: 2,
+                street: 1,
+                position: 6,
+                action: 1,
+                timing: 300,
+                pot_bb: 4.0,
+            }),
         ];
         let subjects = BTreeMap::from([
             (
@@ -726,10 +757,46 @@ mod tests {
 
     fn dataset_for_split() -> BehaviourParquetDataset {
         let hands = vec![
-            hand("h0", 0, 2, 0, 4, 2, 100, 1.5),
-            hand("h1", 1, 2, 0, 6, 1, 100, 1.5),
-            hand("h2", 2, 2, 0, 4, 2, 100, 1.5),
-            hand("h3", 3, 2, 0, 4, 2, 100, 1.5),
+            hand(HandFixture {
+                hand_id: "h0",
+                hand_index: 0,
+                players_at_table: 2,
+                street: 0,
+                position: 4,
+                action: 2,
+                timing: 100,
+                pot_bb: 1.5,
+            }),
+            hand(HandFixture {
+                hand_id: "h1",
+                hand_index: 1,
+                players_at_table: 2,
+                street: 0,
+                position: 6,
+                action: 1,
+                timing: 100,
+                pot_bb: 1.5,
+            }),
+            hand(HandFixture {
+                hand_id: "h2",
+                hand_index: 2,
+                players_at_table: 2,
+                street: 0,
+                position: 4,
+                action: 2,
+                timing: 100,
+                pot_bb: 1.5,
+            }),
+            hand(HandFixture {
+                hand_id: "h3",
+                hand_index: 3,
+                players_at_table: 2,
+                street: 0,
+                position: 4,
+                action: 2,
+                timing: 100,
+                pot_bb: 1.5,
+            }),
         ];
         let subjects = BTreeMap::from([
             (
