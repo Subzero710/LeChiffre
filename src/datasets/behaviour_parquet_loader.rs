@@ -40,6 +40,12 @@ pub use analysis::{
     SubjectSplitConfigError,
 };
 
+mod sampling;
+pub use sampling::{
+    SUPPORT_QUERY_SAMPLING_ALGORITHM_VERSION, SupportQueryConfig, SupportQueryConfigError,
+    SupportQuerySample, SupportQuerySampleError,
+};
+
 /// Fully validated in-memory view of a committed behavioural Parquet dataset.
 ///
 /// Event rows remain unique in memory. Subjects only store references to those
