@@ -24,7 +24,7 @@ pub use sequence::{BehaviourSequence, BehaviourSequenceError};
 pub trait BehaviourAnalyzer {
     type Error;
 
-    fn analyze(&self, history: &BehaviourHistory) -> Result<BehaviourProfile, Self::Error>;
+    fn analyze(&self, support: &[FeaturizedHand]) -> Result<BehaviourProfile, Self::Error>;
 }
 
 /// Generates behaviour for a supplied profile from the public history and current context.
