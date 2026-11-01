@@ -553,8 +553,6 @@ where
     let mut total_commitment: HashMap<u64, i64> = players.iter().map(|p| (p.id, 0)).collect();
     let mut ready_ms = raw["startedAt"].as_i64();
     let mut decision_times_ms = Vec::new();
-    let mut awards: Vec<(u64, i64)> = Vec::new();
-    let mut folded = HashSet::new();
     let mut observed_ante = 0;
 
     let entries = raw["final"]["entries"]
@@ -620,7 +618,6 @@ where
             }
             "fold" | "check" | "call" | "bet" | "raise" => {
                 let actor = actor.ok_or(PokerNowHandError::InvalidPokerLaterValue("entry.seat"))?;
-                if kind == "fold" { folded.insert(actor); }
                 let action = match kind {
                     "fold" => Action::Fold,
                     "check" => Action::Check,
@@ -658,13 +655,16 @@ where
             "uncalledReturn" => {
                 let actor = actor.ok_or(PokerNowHandError::InvalidPokerLaterValue("entry.seat"))?;
                 let amount = json_chips_hand(&entry["amount"], "entry.amount")?;
-                subtract_commitment(actor, amount, &mut street_commitment, &mut total_commitment)?;
+                subtract_observed_return(
+                    actor,
+                    amount,
+                    &mut street_commitment,
+                    &mut total_commitment,
+                )?;
             }
-            "potAward" => {
-                let actor = actor.ok_or(PokerNowHandError::InvalidPokerLaterValue("entry.seat"))?;
-                let amount = json_chips_hand(&entry["amount"], "entry.amount")?;
-                awards.push((actor, amount));
-            }
+            // PokerLater exposes exact pot indexes in final.awards; consume those
+            // after the action ledger is complete instead of re-inferring them.
+            "potAward" => {}
             "timeout" | "hostForceFold" | "showdownReveal" | "handComplete" => {}
             _ => {}
         }
@@ -704,7 +704,7 @@ where
             hero_player_id: None,
             players,
             rounds,
-            pots: build_pots(&total_commitment, &folded, &awards)?,
+            pots: build_pokerlater_pots(raw, &source_by_seat, &total_commitment)?,
             tournament_bounties: None,
         },
         decision_times_ms,
@@ -900,6 +900,30 @@ fn subtract_commitment(
     Ok(())
 }
 
+fn subtract_observed_return(
+    player: u64,
+    amount: i64,
+    street_commitment: &mut HashMap<u64, i64>,
+    total_commitment: &mut HashMap<u64, i64>,
+) -> Result<(), PokerNowHandError> {
+    let street = street_commitment
+        .get_mut(&player)
+        .ok_or(PokerNowHandError::UnknownPlayerId(player))?;
+    let total = total_commitment
+        .get_mut(&player)
+        .ok_or(PokerNowHandError::UnknownPlayerId(player))?;
+    if amount < 0 || amount > *total {
+        return Err(PokerNowHandError::InvalidUncalledReturn);
+    }
+    if amount <= *street {
+        *street -= amount;
+    } else if *street != 0 {
+        return Err(PokerNowHandError::InvalidUncalledReturn);
+    }
+    *total -= amount;
+    Ok(())
+}
+
 fn observed_latency(ready_ms: Option<i64>, action_ms: i64) -> Result<u32, PokerNowHandError> {
     let ready_ms = ready_ms.ok_or(PokerNowHandError::MissingDecisionStart)?;
     let delta = action_ms
@@ -933,8 +957,24 @@ fn build_pots(
             .map(|(id, _)| *id).collect();
         let amount = (level - prev).checked_mul(participants.len() as i64)
             .ok_or(PokerNowHandError::AmountOverflow)?;
-        let eligible = participants.into_iter().filter(|id| !folded.contains(id)).collect();
-        pots.push((amount, eligible));
+        let contributor_count = participants.len();
+        let eligible: HashSet<u64> = participants
+            .into_iter()
+            .filter(|id| !folded.contains(id))
+            .collect();
+        if contributor_count > 1
+            && pots
+                .last()
+                .is_some_and(|(_, previous_eligible)| previous_eligible == &eligible)
+        {
+            let previous = pots.last_mut().unwrap();
+            previous.0 = previous
+                .0
+                .checked_add(amount)
+                .ok_or(PokerNowHandError::AmountOverflow)?;
+        } else {
+            pots.push((amount, eligible));
+        }
         prev = level;
     }
     let contributed: i64 = commitments.values().copied().sum();
@@ -988,6 +1028,97 @@ fn build_pots(
         player_wins.sort_unstable_by_key(|win| win.player_id);
         output.push(PotObj { number: number as u64, amount: *amount, rake: Some(0),
             jackpot: None, player_wins });
+    }
+    Ok(output)
+}
+
+fn build_pokerlater_pots(
+    raw: &Value,
+    source_by_seat: &HashMap<u64, u64>,
+    commitments: &HashMap<u64, i64>,
+) -> Result<Vec<PotObj>, PokerNowHandError> {
+    let raw_pots = raw["final"]["pots"]
+        .as_array()
+        .ok_or(PokerNowHandError::InvalidPokerLaterValue("final.pots"))?;
+    let raw_awards = raw["final"]["awards"]
+        .as_array()
+        .ok_or(PokerNowHandError::InvalidPokerLaterValue("final.awards"))?;
+    if raw_pots.is_empty() || raw_awards.is_empty() {
+        return Err(PokerNowHandError::MissingPayout);
+    }
+
+    let mut wins_by_pot = (0..raw_pots.len())
+        .map(|_| HashMap::<u64, i64>::new())
+        .collect::<Vec<_>>();
+    for award in raw_awards {
+        let pot_index = award["potIndex"]
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|index| *index < raw_pots.len())
+            .ok_or(PokerNowHandError::InvalidPokerLaterValue("final.awards.potIndex"))?;
+        if award["boardIndex"].as_u64().unwrap_or(0) != 0 {
+            return Err(PokerNowHandError::InvalidPokerLaterValue("final.awards.boardIndex"));
+        }
+        let source_seat = award["seat"]
+            .as_u64()
+            .ok_or(PokerNowHandError::InvalidPokerLaterValue("final.awards.seat"))?;
+        let player_id = *source_by_seat
+            .get(&source_seat)
+            .ok_or(PokerNowHandError::InvalidPokerLaterValue("final.awards.seat"))?;
+        let amount = json_chips_hand(&award["amount"], "final.awards.amount")?;
+        if amount <= 0 {
+            return Err(PokerNowHandError::MissingPayout);
+        }
+        let current = wins_by_pot[pot_index].entry(player_id).or_insert(0);
+        *current = current
+            .checked_add(amount)
+            .ok_or(PokerNowHandError::AmountOverflow)?;
+    }
+
+    let contributed = commitments.values().try_fold(0_i64, |sum, value| {
+        sum.checked_add(*value)
+            .ok_or(PokerNowHandError::AmountOverflow)
+    })?;
+    let mut reported = 0_i64;
+    let mut output = Vec::with_capacity(raw_pots.len());
+    for (number, raw_pot) in raw_pots.iter().enumerate() {
+        let amount = json_chips_hand(&raw_pot["amount"], "final.pots.amount")?;
+        if amount <= 0 {
+            return Err(PokerNowHandError::MissingPayout);
+        }
+        reported = reported
+            .checked_add(amount)
+            .ok_or(PokerNowHandError::AmountOverflow)?;
+
+        let mut player_wins = wins_by_pot[number]
+            .iter()
+            .map(|(&player_id, &win_amount)| PlayerWinsObj {
+                player_id,
+                win_amount,
+                cashout_amount: None,
+                cashout_fee: None,
+                bonus_amount: None,
+                contributed_rake: None,
+            })
+            .collect::<Vec<_>>();
+        player_wins.sort_unstable_by_key(|win| win.player_id);
+        let paid = player_wins.iter().try_fold(0_i64, |sum, win| {
+            sum.checked_add(win.win_amount)
+                .ok_or(PokerNowHandError::AmountOverflow)
+        })?;
+        if paid != amount {
+            return Err(PokerNowHandError::PayoutMismatch);
+        }
+        output.push(PotObj {
+            number: number as u64,
+            amount,
+            rake: Some(0),
+            jackpot: None,
+            player_wins,
+        });
+    }
+    if reported != contributed {
+        return Err(PokerNowHandError::PayoutMismatch);
     }
     Ok(output)
 }
@@ -1268,5 +1399,47 @@ mod tests {
     }
 
 
+
+    #[test]
+    fn folded_contribution_slices_with_same_eligibility_are_merged() {
+        let contributions = HashMap::from([(1, 20), (2, 10), (3, 20)]);
+        let folded = HashSet::from([2]);
+        let pots = build_pots(&contributions, &folded, &[(1, 50)]).unwrap();
+        assert_eq!(pots.len(), 1);
+        assert_eq!(pots[0].amount, 50);
+    }
+
+    #[test]
+    fn late_uncalled_return_can_follow_street_reset() {
+        let mut street = HashMap::from([(1, 0)]);
+        let mut total = HashMap::from([(1, 100)]);
+        subtract_observed_return(1, 20, &mut street, &mut total).unwrap();
+        assert_eq!(street[&1], 0);
+        assert_eq!(total[&1], 80);
+    }
+
+    #[test]
+    fn pokerlater_uses_explicit_pot_indexes() {
+        let raw = serde_json::json!({
+            "final": {
+                "pots": [
+                    {"amount": 300, "eligible": [0, 1, 2]},
+                    {"amount": 200, "eligible": [1, 2]}
+                ],
+                "awards": [
+                    {"potIndex": 0, "boardIndex": 0, "seat": 0, "amount": 300},
+                    {"potIndex": 1, "boardIndex": 0, "seat": 1, "amount": 200}
+                ]
+            }
+        });
+        let seats = HashMap::from([(0, 1), (1, 2), (2, 3)]);
+        let commitments = HashMap::from([(1, 100), (2, 200), (3, 200)]);
+        let pots = build_pokerlater_pots(&raw, &seats, &commitments).unwrap();
+        assert_eq!(pots.len(), 2);
+        assert_eq!(pots[0].amount, 300);
+        assert_eq!(pots[0].player_wins[0].player_id, 1);
+        assert_eq!(pots[1].amount, 200);
+        assert_eq!(pots[1].player_wins[0].player_id, 2);
+    }
 
 }

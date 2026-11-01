@@ -8,9 +8,9 @@ use rs_poker::arena::{Agent, GameStateBuilder, HoldemSimulationBuilder, agent::R
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() > 1 && args[1] == "--import-pokernow" {
+    if args.len() > 1 && args[1] == "--import-poker-with-the-boys" {
         if args.len() != 5 {
-            eprintln!("usage: lechiffre --import-pokernow <file.csv|file.json> <session-id> <canonical-player>");
+            eprintln!("usage: lechiffre --import-poker-with-the-boys <file.csv|file.json> <session-id> <canonical-player>");
             std::process::exit(2);
         }
         let source = std::fs::read_to_string(&args[2]).expect("failed to read input file");
