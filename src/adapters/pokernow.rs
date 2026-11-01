@@ -1460,21 +1460,21 @@ mod tests {
     #[test]
     fn parses_real_heads_up_hand_with_observed_timing() {
         let csv = r#"entry,at,order
-""-- starting hand #128 (id: qgojco5mayy0)  No Limit Texas Hold'em (dealer: ""arash @ RYnRljE1SO"") --"",2026-10-08T02:29:50.786Z,179142659078600
-""Player stacks: #3 ""goergoe @ _sqcLETZ0C"" (2640) | #8 ""arash @ RYnRljE1SO"" (3390)"",2026-10-08T02:29:50.786Z,179142659078601
-""""arash @ RYnRljE1SO"" posts a small blind of 10"",2026-10-08T02:29:50.786Z,179142659078604
-""""goergoe @ _sqcLETZ0C"" posts a big blind of 20"",2026-10-08T02:29:50.786Z,179142659078605
-""""arash @ RYnRljE1SO"" calls 20"",2026-10-08T02:29:52.078Z,179142659207800
-""""goergoe @ _sqcLETZ0C"" checks"",2026-10-08T02:29:52.968Z,179142659296800
-""Flop:  [Q♦, 3♥, A♣]"",2026-10-08T02:29:53.790Z,179142659379000
-""""goergoe @ _sqcLETZ0C"" bets 20"",2026-10-08T02:29:55.034Z,179142659503400
-""""arash @ RYnRljE1SO"" calls 20"",2026-10-08T02:29:57.125Z,179142659712500
-""Turn: Q♦, 3♥, A♣ [8♦]"",2026-10-08T02:29:57.949Z,179142659794900
-""""goergoe @ _sqcLETZ0C"" bets 50"",2026-10-08T02:29:59.568Z,179142659956800
-""""arash @ RYnRljE1SO"" folds"",2026-10-08T02:30:01.306Z,179142660130600
-""Uncalled bet of 50 returned to ""goergoe @ _sqcLETZ0C"""",2026-10-08T02:30:02.180Z,179142660218000
-""""goergoe @ _sqcLETZ0C"" collected 80 from pot"",2026-10-08T02:30:02.180Z,179142660218001
-""-- ending hand #128 --"",2026-10-08T02:30:02.180Z,179142660218002
+"-- starting hand #128 (id: qgojco5mayy0)  No Limit Texas Hold'em (dealer: ""arash @ RYnRljE1SO"") --",2026-10-08T02:29:50.786Z,179142659078600
+"Player stacks: #3 ""goergoe @ _sqcLETZ0C"" (2640) | #8 ""arash @ RYnRljE1SO"" (3390)",2026-10-08T02:29:50.786Z,179142659078601
+"""arash @ RYnRljE1SO"" posts a small blind of 10",2026-10-08T02:29:50.786Z,179142659078604
+"""goergoe @ _sqcLETZ0C"" posts a big blind of 20",2026-10-08T02:29:50.786Z,179142659078605
+"""arash @ RYnRljE1SO"" calls 20",2026-10-08T02:29:52.078Z,179142659207800
+"""goergoe @ _sqcLETZ0C"" checks",2026-10-08T02:29:52.968Z,179142659296800
+"Flop:  [Q♦, 3♥, A♣]",2026-10-08T02:29:53.790Z,179142659379000
+"""goergoe @ _sqcLETZ0C"" bets 20",2026-10-08T02:29:55.034Z,179142659503400
+"""arash @ RYnRljE1SO"" calls 20",2026-10-08T02:29:57.125Z,179142659712500
+"Turn: Q♦, 3♥, A♣ [8♦]",2026-10-08T02:29:57.949Z,179142659794900
+"""goergoe @ _sqcLETZ0C"" bets 50",2026-10-08T02:29:59.568Z,179142659956800
+"""arash @ RYnRljE1SO"" folds",2026-10-08T02:30:01.306Z,179142660130600
+"Uncalled bet of 50 returned to ""goergoe @ _sqcLETZ0C""",2026-10-08T02:30:02.180Z,179142660218000
+"""goergoe @ _sqcLETZ0C"" collected 80 from pot",2026-10-08T02:30:02.180Z,179142660218001
+"-- ending hand #128 --",2026-10-08T02:30:02.180Z,179142660218002
 "#;
         let imported = PokerNowAdapter::adapt_csv("20261007", "test", csv, |name| match name {
             "arash" => Some("Arash".to_string()),
