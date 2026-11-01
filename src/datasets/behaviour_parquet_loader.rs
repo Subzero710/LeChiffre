@@ -309,10 +309,8 @@ struct EventRow {
 
 fn read_events(
     path: &Path,
-) -> Result<
-    (BehaviourParquetDatasetSummary, Vec<PersistedHand>, usize),
-    BehaviourParquetLoadError,
-> {
+) -> Result<(BehaviourParquetDatasetSummary, Vec<PersistedHand>, usize), BehaviourParquetLoadError>
+{
     let (mut reader, summary) = open_table_reader(path, "events", events_schema())?;
     let mut hands = Vec::new();
     let mut current: Option<HandBuilder> = None;
@@ -403,9 +401,9 @@ fn read_subjects(
         for row_index in 0..batch.num_rows() {
             let subject_id = columns.subject_id.value(row_index);
             let hand_index = columns.hand_index.value(row_index);
-            let hand_slot = *hand_by_index.get(&hand_index).ok_or(
-                BehaviourParquetLoadError::SubjectReferencesUnknownHand { hand_index },
-            )?;
+            let hand_slot = *hand_by_index
+                .get(&hand_index)
+                .ok_or(BehaviourParquetLoadError::SubjectReferencesUnknownHand { hand_index })?;
             let expected_hand_id = &hands[hand_slot].hand_id;
             let observed_hand_id = columns.hand_id.value(row_index);
             if expected_hand_id.as_str() != observed_hand_id {
@@ -416,13 +414,12 @@ fn read_subjects(
                 });
             }
             let position_code = columns.subject_position.value(row_index);
-            let subject_position = position_from_id(position_code).ok_or(
-                BehaviourParquetLoadError::InvalidCode {
+            let subject_position =
+                position_from_id(position_code).ok_or(BehaviourParquetLoadError::InvalidCode {
                     table: "subjects",
                     column: "subject_position",
                     value: position_code,
-                },
-            )?;
+                })?;
 
             let memberships = &mut memberships_by_hand[hand_slot];
             if memberships.iter().any(|(id, _)| *id == subject_id) {
@@ -441,10 +438,13 @@ fn read_subjects(
                 });
             }
             memberships.push((subject_id, subject_position));
-            subjects.entry(subject_id).or_default().push(SubjectMembership {
-                hand_slot,
-                subject_position,
-            });
+            subjects
+                .entry(subject_id)
+                .or_default()
+                .push(SubjectMembership {
+                    hand_slot,
+                    subject_position,
+                });
             subject_row_count = subject_row_count.checked_add(1).ok_or(
                 BehaviourParquetLoadError::CountOverflow {
                     field: "subject rows",
@@ -453,11 +453,10 @@ fn read_subjects(
         }
     }
 
-    let observed_subject_rows = u64::try_from(subject_row_count).map_err(|_| {
-        BehaviourParquetLoadError::CountOverflow {
+    let observed_subject_rows =
+        u64::try_from(subject_row_count).map_err(|_| BehaviourParquetLoadError::CountOverflow {
             field: "subject rows",
-        }
-    })?;
+        })?;
     if observed_subject_rows != summary.subject_hand_rows_written {
         return Err(BehaviourParquetLoadError::SummaryCountMismatch {
             field: "subject_hand_rows_written",
@@ -593,13 +592,12 @@ fn validate_metadata(
         })?;
     let mut values = HashMap::<String, String>::with_capacity(entries.len());
     for entry in entries {
-        let value = entry
-            .value
-            .as_ref()
-            .ok_or_else(|| BehaviourParquetLoadError::MissingMetadataValue {
+        let value = entry.value.as_ref().ok_or_else(|| {
+            BehaviourParquetLoadError::MissingMetadataValue {
                 path: path.to_path_buf(),
                 key: entry.key.clone(),
-            })?;
+            }
+        })?;
         if values.insert(entry.key.clone(), value.clone()).is_some() {
             return Err(BehaviourParquetLoadError::DuplicateMetadataKey {
                 path: path.to_path_buf(),
@@ -796,10 +794,7 @@ impl<'a> EventColumns<'a> {
                 bet_or_raise_count_this_street as &dyn Array,
             ),
             ("amount_added_bb", amount_added_bb as &dyn Array),
-            (
-                "street_total_after_bb",
-                street_total_after_bb as &dyn Array,
-            ),
+            ("street_total_after_bb", street_total_after_bb as &dyn Array),
             ("decision_time_ms", decision_time_ms as &dyn Array),
         ] {
             ensure_non_nullable("events", name, array)?;
@@ -886,27 +881,20 @@ impl<'a> EventColumns<'a> {
         continuous[ContinuousFeature::PlayersActive as usize] = f32::from(players_active);
         continuous[ContinuousFeature::PotBb as usize] =
             checked_non_negative_f32(&hand_id, "pot_bb", self.pot_bb.value(row))?;
-        continuous[ContinuousFeature::ActorStackBb as usize] = checked_non_negative_f32(
-            &hand_id,
-            "actor_stack_bb",
-            self.actor_stack_bb.value(row),
-        )?;
+        continuous[ContinuousFeature::ActorStackBb as usize] =
+            checked_non_negative_f32(&hand_id, "actor_stack_bb", self.actor_stack_bb.value(row))?;
         continuous[ContinuousFeature::EffectiveStackBb as usize] = checked_non_negative_f32(
             &hand_id,
             "effective_stack_bb",
             self.effective_stack_bb.value(row),
         )?;
-        continuous[ContinuousFeature::ActorStreetCommitmentBb as usize] =
-            checked_non_negative_f32(
-                &hand_id,
-                "actor_street_commitment_bb",
-                self.actor_street_commitment_bb.value(row),
-            )?;
-        continuous[ContinuousFeature::CurrentBetBb as usize] = checked_non_negative_f32(
+        continuous[ContinuousFeature::ActorStreetCommitmentBb as usize] = checked_non_negative_f32(
             &hand_id,
-            "current_bet_bb",
-            self.current_bet_bb.value(row),
+            "actor_street_commitment_bb",
+            self.actor_street_commitment_bb.value(row),
         )?;
+        continuous[ContinuousFeature::CurrentBetBb as usize] =
+            checked_non_negative_f32(&hand_id, "current_bet_bb", self.current_bet_bb.value(row))?;
         continuous[ContinuousFeature::ToCallBb as usize] =
             checked_non_negative_f32(&hand_id, "to_call_bb", self.to_call_bb.value(row))?;
         if self.min_raise_to_bb.is_null(row) {
@@ -920,11 +908,8 @@ impl<'a> EventColumns<'a> {
         }
         continuous[ContinuousFeature::BetOrRaiseCountThisStreet as usize] =
             f32::from(self.bet_or_raise_count_this_street.value(row));
-        continuous[ContinuousFeature::AmountAddedBb as usize] = checked_non_negative_f32(
-            &hand_id,
-            "amount_added_bb",
-            self.amount_added_bb.value(row),
-        )?;
+        continuous[ContinuousFeature::AmountAddedBb as usize] =
+            checked_non_negative_f32(&hand_id, "amount_added_bb", self.amount_added_bb.value(row))?;
         continuous[ContinuousFeature::StreetTotalAfterBb as usize] = checked_non_negative_f32(
             &hand_id,
             "street_total_after_bb",
@@ -1025,13 +1010,14 @@ fn typed_column<'a, T: Array + 'static>(
     table: &'static str,
     column: &str,
 ) -> Result<&'a T, BehaviourParquetLoadError> {
-    let index = batch
-        .schema()
-        .index_of(column)
-        .map_err(|_| BehaviourParquetLoadError::MissingColumn {
-            table,
-            column: column.to_string(),
-        })?;
+    let index =
+        batch
+            .schema()
+            .index_of(column)
+            .map_err(|_| BehaviourParquetLoadError::MissingColumn {
+                table,
+                column: column.to_string(),
+            })?;
     batch
         .column(index)
         .as_any()
@@ -1048,10 +1034,7 @@ fn ensure_non_nullable(
     array: &dyn Array,
 ) -> Result<(), BehaviourParquetLoadError> {
     if array.null_count() != 0 {
-        return Err(BehaviourParquetLoadError::UnexpectedNull {
-            table,
-            column,
-        });
+        return Err(BehaviourParquetLoadError::UnexpectedNull { table, column });
     }
     Ok(())
 }
@@ -1071,11 +1054,7 @@ fn checked_non_negative_f32(
     Ok(value)
 }
 
-fn invalid_code(
-    table: &'static str,
-    column: &'static str,
-    value: u8,
-) -> BehaviourParquetLoadError {
+fn invalid_code(table: &'static str, column: &'static str, value: u8) -> BehaviourParquetLoadError {
     BehaviourParquetLoadError::InvalidCode {
         table,
         column,
@@ -1252,10 +1231,18 @@ impl fmt::Display for BehaviourParquetLoadError {
             Self::Arrow(error) => write!(f, "Arrow decoding failed: {error}"),
             Self::Parquet(error) => write!(f, "Parquet decoding failed: {error}"),
             Self::MissingSuccessMarker { path } => {
-                write!(f, "behaviour dataset is not committed: missing {}", path.display())
+                write!(
+                    f,
+                    "behaviour dataset is not committed: missing {}",
+                    path.display()
+                )
             }
             Self::SchemaMismatch { table, path } => {
-                write!(f, "{table} schema does not match LeChiffre v1 at {}", path.display())
+                write!(
+                    f,
+                    "{table} schema does not match LeChiffre v1 at {}",
+                    path.display()
+                )
             }
             Self::MissingMetadata { path, key } => {
                 write!(f, "missing Parquet metadata {key} in {}", path.display())
@@ -1295,7 +1282,10 @@ impl fmt::Display for BehaviourParquetLoadError {
                  dropped_hands_missing_timing={dropped_hands_missing_timing}"
             ),
             Self::InvalidFileRowCount { table, rows } => {
-                write!(f, "{table} Parquet footer contains invalid row count {rows}")
+                write!(
+                    f,
+                    "{table} Parquet footer contains invalid row count {rows}"
+                )
             }
             Self::SummaryCountMismatch {
                 field,
@@ -1405,9 +1395,15 @@ impl fmt::Display for BehaviourParquetLoadError {
             Self::DuplicateSubjectInHand {
                 hand_id,
                 subject_id,
-            } => write!(f, "hand {hand_id} contains subject {subject_id} more than once"),
+            } => write!(
+                f,
+                "hand {hand_id} contains subject {subject_id} more than once"
+            ),
             Self::DuplicatePositionInHand { hand_id, position } => {
-                write!(f, "hand {hand_id} contains subject position {position:?} more than once")
+                write!(
+                    f,
+                    "hand {hand_id} contains subject position {position:?} more than once"
+                )
             }
             Self::SubjectCountMismatch {
                 hand_id,
@@ -1427,7 +1423,10 @@ impl fmt::Display for BehaviourParquetLoadError {
             ),
             Self::CountOverflow { field } => write!(f, "dataset {field} count overflow"),
             Self::InternalMissingCurrentHand => {
-                write!(f, "internal loader error: no current hand while decoding event")
+                write!(
+                    f,
+                    "internal loader error: no current hand while decoding event"
+                )
             }
             Self::InternalUnknownTable { table } => {
                 write!(f, "internal loader error: unknown table {table}")
