@@ -88,6 +88,9 @@ pub struct PublicCard {
     pub suit: Suit,
 }
 
+/// Maximum number of public community cards in NLHE.
+pub const MAX_BOARD_CARDS: usize = 5;
+
 /// Semantic action observed at the table, with check/call and bet/raise kept distinct.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActionKind {

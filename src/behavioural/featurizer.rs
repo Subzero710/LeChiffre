@@ -1,12 +1,9 @@
 use std::fmt;
 
+use super::codebook::{action_id, position_id, rank_id, street_id, suit_id};
 use super::{
-    ActionKind, BehaviourHistory, BehaviourSequence, HandId, Position, PublicCard, Rank, Street,
-    SubjectHand, Suit,
+    BehaviourHistory, BehaviourSequence, HandId, Position, PublicCard, SubjectHand, MAX_BOARD_CARDS,
 };
-
-/// Maximum number of public cards in NLHE.
-pub const MAX_BOARD_CARDS: usize = 5;
 
 /// Width of the categorical event matrix produced by [`BehaviourFeaturizer`].
 pub const EVENT_CATEGORICAL_WIDTH: usize = 5;
@@ -17,8 +14,8 @@ pub const EVENT_CONTINUOUS_WIDTH: usize = 13;
 /// Stable columns of [`FeaturizedHand::categorical`].
 ///
 /// Values are integer IDs intended to be embedded by the training model. The
-/// ID mappings are defined by the private encoding functions in this module and
-/// covered by tests so dataset writers can treat them as a versioned contract.
+/// ID mappings come from the shared behavioural codebook and are covered by
+/// tests so persisted datasets and runtime features cannot silently diverge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum CategoricalFeature {
@@ -64,6 +61,7 @@ pub struct FeaturizedHand {
     categorical: Vec<[i64; EVENT_CATEGORICAL_WIDTH]>,
     continuous: Vec<[f32; EVENT_CONTINUOUS_WIDTH]>,
     continuous_present: Vec<[u8; EVENT_CONTINUOUS_WIDTH]>,
+    decision_time_ms: Vec<u32>,
     board_rank: Vec<[i64; MAX_BOARD_CARDS]>,
     board_suit: Vec<[i64; MAX_BOARD_CARDS]>,
     board_present: Vec<[u8; MAX_BOARD_CARDS]>,
@@ -105,6 +103,11 @@ impl FeaturizedHand {
     /// whenever the corresponding mask value is `0`.
     pub fn continuous_present(&self) -> &[[u8; EVENT_CONTINUOUS_WIDTH]] {
         &self.continuous_present
+    }
+
+    /// Exact source timing retained separately from the model-ready f32 matrix.
+    pub fn decision_time_ms(&self) -> &[u32] {
+        &self.decision_time_ms
     }
 
     pub fn board_rank(&self) -> &[[i64; MAX_BOARD_CARDS]] {
@@ -218,6 +221,7 @@ impl BehaviourFeaturizer {
         let mut categorical = Vec::with_capacity(len);
         let mut continuous = Vec::with_capacity(len);
         let mut continuous_present = Vec::with_capacity(len);
+        let mut decision_time_ms = Vec::with_capacity(len);
         let mut board_rank = Vec::with_capacity(len);
         let mut board_suit = Vec::with_capacity(len);
         let mut board_present = Vec::with_capacity(len);
@@ -233,9 +237,9 @@ impl BehaviourFeaturizer {
 
             sequence_indexes.push(event.sequence_index);
             categorical.push([
-                street_id(event.context.street),
-                position_id(event.context.actor_position),
-                action_id(event.action.kind),
+                i64::from(street_id(event.context.street)),
+                i64::from(position_id(event.context.actor_position)),
+                i64::from(action_id(event.action.kind)),
                 if event.context.actor_position == subject_position { 1 } else { 0 },
                 if event.action.is_all_in { 1 } else { 0 },
             ]);
@@ -262,13 +266,14 @@ impl BehaviourFeaturizer {
                 None => present[ContinuousFeature::MinRaiseToBb as usize] = 0,
             }
 
-            values[ContinuousFeature::DecisionTimeMs as usize] = event
-                .action
-                .decision_time_ms
-                .expect("timing completeness checked before featurization") as f32;
+            let Some(exact_decision_time_ms) = event.action.decision_time_ms else {
+                return Ok(None);
+            };
+            values[ContinuousFeature::DecisionTimeMs as usize] = exact_decision_time_ms as f32;
 
             continuous.push(values);
             continuous_present.push(present);
+            decision_time_ms.push(exact_decision_time_ms);
 
             let (ranks, suits, cards_present) = encode_board(&event.context.board);
             board_rank.push(ranks);
@@ -283,6 +288,7 @@ impl BehaviourFeaturizer {
             categorical,
             continuous,
             continuous_present,
+            decision_time_ms,
             board_rank,
             board_suit,
             board_present,
@@ -302,70 +308,12 @@ fn encode_board(
     let mut present = [0; MAX_BOARD_CARDS];
 
     for (index, card) in board.iter().enumerate() {
-        ranks[index] = rank_id(card.rank);
-        suits[index] = suit_id(card.suit);
+        ranks[index] = i64::from(rank_id(card.rank));
+        suits[index] = i64::from(suit_id(card.suit));
         present[index] = 1;
     }
 
     (ranks, suits, present)
-}
-
-fn street_id(street: Street) -> i64 {
-    match street {
-        Street::Preflop => 0,
-        Street::Flop => 1,
-        Street::Turn => 2,
-        Street::River => 3,
-    }
-}
-
-fn position_id(position: Position) -> i64 {
-    match position {
-        Position::UnderTheGun => 0,
-        Position::Hijack => 1,
-        Position::Cutoff => 2,
-        Position::Button => 3,
-        Position::ButtonSmallBlind => 4,
-        Position::SmallBlind => 5,
-        Position::BigBlind => 6,
-    }
-}
-
-fn action_id(action: ActionKind) -> i64 {
-    match action {
-        ActionKind::Fold => 0,
-        ActionKind::Check => 1,
-        ActionKind::Call => 2,
-        ActionKind::Bet => 3,
-        ActionKind::Raise => 4,
-    }
-}
-
-fn rank_id(rank: Rank) -> i64 {
-    match rank {
-        Rank::Two => 2,
-        Rank::Three => 3,
-        Rank::Four => 4,
-        Rank::Five => 5,
-        Rank::Six => 6,
-        Rank::Seven => 7,
-        Rank::Eight => 8,
-        Rank::Nine => 9,
-        Rank::Ten => 10,
-        Rank::Jack => 11,
-        Rank::Queen => 12,
-        Rank::King => 13,
-        Rank::Ace => 14,
-    }
-}
-
-fn suit_id(suit: Suit) -> i64 {
-    match suit {
-        Suit::Clubs => 1,
-        Suit::Diamonds => 2,
-        Suit::Hearts => 3,
-        Suit::Spades => 4,
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -397,7 +345,9 @@ impl std::error::Error for BehaviourFeaturizerError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::behavioural::{BehaviourEvent, DecisionContext, ObservedAction};
+    use crate::behavioural::{
+        ActionKind, BehaviourEvent, DecisionContext, ObservedAction, Rank, Street, Suit,
+    };
 
     fn event(
         hand_id: &str,
@@ -472,6 +422,7 @@ mod tests {
         assert_eq!(values[ContinuousFeature::AmountAddedBb as usize], 2.5);
         assert_eq!(values[ContinuousFeature::StreetTotalAfterBb as usize], 4.0);
         assert_eq!(values[ContinuousFeature::DecisionTimeMs as usize], 18_400.0);
+        assert_eq!(encoded.decision_time_ms(), &[18_400]);
 
         assert_eq!(present[ContinuousFeature::MinRaiseToBb as usize], 0);
         assert_eq!(values[ContinuousFeature::MinRaiseToBb as usize], 0.0);
@@ -510,6 +461,30 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn retains_exact_integer_timing_beyond_f32_precision() {
+        let exact = 16_777_217u32;
+        let mut sequence = BehaviourSequence::new("hand-exact-timing");
+        sequence
+            .push(event(
+                "hand-exact-timing",
+                0,
+                Position::Button,
+                ActionKind::Call,
+                vec![],
+                Some(2.0),
+                Some(exact),
+            ))
+            .unwrap();
+
+        let encoded = BehaviourFeaturizer::new()
+            .featurize_sequence(&sequence, Position::Button)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(encoded.decision_time_ms(), &[exact]);
     }
 
     #[test]
