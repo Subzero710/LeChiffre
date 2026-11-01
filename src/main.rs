@@ -1,11 +1,38 @@
 mod adapters;
 mod behavioural;
+mod datasets;
 
 use adapters::rs_poker::RsPokerAdapter;
 use rs_poker::arena::{Agent, GameStateBuilder, HoldemSimulationBuilder, agent::RandomAgent};
 
 #[tokio::main]
 async fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 && args[1] == "--import-pokernow" {
+        if args.len() != 5 {
+            eprintln!("usage: lechiffre --import-pokernow <file.csv|file.json> <session-id> <canonical-player>");
+            std::process::exit(2);
+        }
+        let source = std::fs::read_to_string(&args[2]).expect("failed to read input file");
+        let normalizer = datasets::poker_with_the_boys::normalize_player_name;
+        let imported = if args[2].ends_with(".json") {
+            adapters::pokernow::PokerNowAdapter::adapt_pokerlater_json(&args[3], "poker-with-the-boys", &source, normalizer)
+        } else if args[2].ends_with(".csv") {
+            adapters::pokernow::PokerNowAdapter::adapt_csv(&args[3], "poker-with-the-boys", &source, normalizer)
+        } else {
+            eprintln!("unsupported extension: expected .csv or .json");
+            std::process::exit(2);
+        }.expect("invalid input session format");
+        let id = adapters::PlayerId::from_source("poker-with-the-boys", &args[4]);
+        let history = adapters::hand_history::HandHistoryAdapter::history_for(&id, &imported.hands);
+        println!("accepted_hands={} rejected_hands={} subject_hands={}", imported.hands.len(), imported.rejected.len(), history.len());
+        for rejection in &imported.rejected {
+            eprintln!("rejected hand {}: {}", rejection.source_hand_id, rejection.reason);
+        }
+        if !imported.rejected.is_empty() { std::process::exit(1); }
+        return;
+    }
+
     let game_state = GameStateBuilder::new()
         .num_players_with_stack(2, 100)
         .blinds(2, 1)
