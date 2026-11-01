@@ -65,7 +65,7 @@ fn export_poker_with_the_boys_parquet(args: &[String]) {
     let mut source_rejected_hands = 0usize;
     let mut timing_dropped_hands = 0usize;
 
-    for pair in args[3..].chunks_exact(2) {
+    for pair in args[3..].as_chunks::<2>().0 {
         let path = &pair[0];
         let session_id = &pair[1];
         let imported = import_poker_with_the_boys_session(path, session_id);
