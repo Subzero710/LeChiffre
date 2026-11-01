@@ -542,7 +542,7 @@ fn open_table_reader(
         source,
     })?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-    if builder.schema().as_ref() != expected_schema.as_ref() {
+    if !schema_structure_matches(builder.schema().as_ref(), expected_schema.as_ref()) {
         return Err(BehaviourParquetLoadError::SchemaMismatch {
             table,
             path: path.to_path_buf(),
@@ -576,6 +576,24 @@ fn open_table_reader(
 
     let reader = builder.with_batch_size(READ_BATCH_ROWS).build()?;
     Ok((reader, summary))
+}
+
+fn schema_structure_matches(
+    actual: &arrow_schema::Schema,
+    expected: &arrow_schema::Schema,
+) -> bool {
+    let actual_fields = actual.fields();
+    let expected_fields = expected.fields();
+
+    actual_fields.len() == expected_fields.len()
+        && actual_fields
+            .iter()
+            .zip(expected_fields.iter())
+            .all(|(actual, expected)| {
+                actual.name() == expected.name()
+                    && actual.data_type() == expected.data_type()
+                    && actual.is_nullable() == expected.is_nullable()
+            })
 }
 
 fn validate_metadata(
