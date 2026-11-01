@@ -32,6 +32,14 @@ const HAND_INDEX_SEMANTICS: &str =
     "monotonic_input_order_metadata_not_model_feature; gaps_correspond_to_dropped_hands";
 const SUBJECT_ID_SEMANTICS: &str = "pseudonymous_grouping_metadata_not_model_feature";
 
+mod analysis;
+pub use analysis::{
+    BehaviourDatasetAnalysisError, BehaviourDatasetStatistics, DatasetPartition,
+    FloatDistributionSummary, IntegerDistributionSummary, SPLIT_BASIS_POINTS,
+    SUBJECT_SPLIT_ALGORITHM_VERSION, SubjectDatasetSplit, SubjectSplitConfig,
+    SubjectSplitConfigError,
+};
+
 /// Fully validated in-memory view of a committed behavioural Parquet dataset.
 ///
 /// Event rows remain unique in memory. Subjects only store references to those
