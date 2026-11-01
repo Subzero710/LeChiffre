@@ -16,6 +16,16 @@ pub(crate) fn street_id(street: Street) -> u8 {
     }
 }
 
+pub(crate) fn street_from_id(id: u8) -> Option<Street> {
+    match id {
+        0 => Some(Street::Preflop),
+        1 => Some(Street::Flop),
+        2 => Some(Street::Turn),
+        3 => Some(Street::River),
+        _ => None,
+    }
+}
+
 pub(crate) fn position_id(position: Position) -> u8 {
     match position {
         Position::UnderTheGun => 0,
@@ -28,6 +38,19 @@ pub(crate) fn position_id(position: Position) -> u8 {
     }
 }
 
+pub(crate) fn position_from_id(id: u8) -> Option<Position> {
+    match id {
+        0 => Some(Position::UnderTheGun),
+        1 => Some(Position::Hijack),
+        2 => Some(Position::Cutoff),
+        3 => Some(Position::Button),
+        4 => Some(Position::ButtonSmallBlind),
+        5 => Some(Position::SmallBlind),
+        6 => Some(Position::BigBlind),
+        _ => None,
+    }
+}
+
 pub(crate) fn action_id(action: ActionKind) -> u8 {
     match action {
         ActionKind::Fold => 0,
@@ -35,6 +58,17 @@ pub(crate) fn action_id(action: ActionKind) -> u8 {
         ActionKind::Call => 2,
         ActionKind::Bet => 3,
         ActionKind::Raise => 4,
+    }
+}
+
+pub(crate) fn action_from_id(id: u8) -> Option<ActionKind> {
+    match id {
+        0 => Some(ActionKind::Fold),
+        1 => Some(ActionKind::Check),
+        2 => Some(ActionKind::Call),
+        3 => Some(ActionKind::Bet),
+        4 => Some(ActionKind::Raise),
+        _ => None,
     }
 }
 
@@ -56,11 +90,40 @@ pub(crate) fn rank_id(rank: Rank) -> u8 {
     }
 }
 
+pub(crate) fn rank_from_id(id: u8) -> Option<Rank> {
+    match id {
+        2 => Some(Rank::Two),
+        3 => Some(Rank::Three),
+        4 => Some(Rank::Four),
+        5 => Some(Rank::Five),
+        6 => Some(Rank::Six),
+        7 => Some(Rank::Seven),
+        8 => Some(Rank::Eight),
+        9 => Some(Rank::Nine),
+        10 => Some(Rank::Ten),
+        11 => Some(Rank::Jack),
+        12 => Some(Rank::Queen),
+        13 => Some(Rank::King),
+        14 => Some(Rank::Ace),
+        _ => None,
+    }
+}
+
 pub(crate) fn suit_id(suit: Suit) -> u8 {
     match suit {
         Suit::Clubs => 1,
         Suit::Diamonds => 2,
         Suit::Hearts => 3,
         Suit::Spades => 4,
+    }
+}
+
+pub(crate) fn suit_from_id(id: u8) -> Option<Suit> {
+    match id {
+        1 => Some(Suit::Clubs),
+        2 => Some(Suit::Diamonds),
+        3 => Some(Suit::Hearts),
+        4 => Some(Suit::Spades),
+        _ => None,
     }
 }

@@ -67,7 +67,36 @@ pub struct FeaturizedHand {
     board_present: Vec<[u8; MAX_BOARD_CARDS]>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct FeaturizedHandData {
+    pub(crate) hand_id: HandId,
+    pub(crate) subject_position: Position,
+    pub(crate) sequence_indexes: Vec<u32>,
+    pub(crate) categorical: Vec<[i64; EVENT_CATEGORICAL_WIDTH]>,
+    pub(crate) continuous: Vec<[f32; EVENT_CONTINUOUS_WIDTH]>,
+    pub(crate) continuous_present: Vec<[u8; EVENT_CONTINUOUS_WIDTH]>,
+    pub(crate) decision_time_ms: Vec<u32>,
+    pub(crate) board_rank: Vec<[i64; MAX_BOARD_CARDS]>,
+    pub(crate) board_suit: Vec<[i64; MAX_BOARD_CARDS]>,
+    pub(crate) board_present: Vec<[u8; MAX_BOARD_CARDS]>,
+}
+
 impl FeaturizedHand {
+    pub(crate) fn from_data(data: FeaturizedHandData) -> Self {
+        Self {
+            hand_id: data.hand_id,
+            subject_position: data.subject_position,
+            sequence_indexes: data.sequence_indexes,
+            categorical: data.categorical,
+            continuous: data.continuous,
+            continuous_present: data.continuous_present,
+            decision_time_ms: data.decision_time_ms,
+            board_rank: data.board_rank,
+            board_suit: data.board_suit,
+            board_present: data.board_present,
+        }
+    }
+
     pub fn hand_id(&self) -> &HandId {
         &self.hand_id
     }

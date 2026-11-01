@@ -15,6 +15,7 @@ pub use featurizer::{
     BehaviourFeaturizer, BehaviourFeaturizerError, CategoricalFeature, ContinuousFeature,
     EVENT_CATEGORICAL_WIDTH, EVENT_CONTINUOUS_WIDTH, FeaturizedHand, FeaturizedHistory,
 };
+pub(crate) use featurizer::FeaturizedHandData;
 pub use history::{BehaviourHistory, SubjectHand};
 pub use profile::{BehaviourProfile, BehaviourProfileError};
 pub use sequence::{BehaviourSequence, BehaviourSequenceError};

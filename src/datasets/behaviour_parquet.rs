@@ -539,7 +539,7 @@ fn append_final_metadata(writer: &mut ArrowWriter<File>, summary: BehaviourParqu
     }
 }
 
-fn events_schema() -> SchemaRef {
+pub(crate) fn events_schema() -> SchemaRef {
     let mut fields = vec![
         Field::new("hand_id", DataType::Utf8, false),
         Field::new("hand_index", DataType::UInt64, false),
@@ -579,7 +579,7 @@ fn events_schema() -> SchemaRef {
     Arc::new(Schema::new(fields))
 }
 
-fn subjects_schema() -> SchemaRef {
+pub(crate) fn subjects_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         Field::new("subject_id", DataType::UInt64, false),
         Field::new("hand_id", DataType::Utf8, false),
