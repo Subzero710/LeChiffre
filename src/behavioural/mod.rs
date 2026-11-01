@@ -1,6 +1,7 @@
 //! Behavioural Engine data contracts.
 
 mod event;
+mod featurizer;
 mod history;
 mod profile;
 mod sequence;
@@ -8,6 +9,11 @@ mod sequence;
 pub use event::{
     ActionKind, BehaviourEvent, BehaviourEventError, DecisionContext, HandId, ObservedAction,
     Position, PublicCard, Rank, Street, Suit,
+};
+pub use featurizer::{
+    BehaviourFeaturizer, BehaviourFeaturizerError, CategoricalFeature, ContinuousFeature,
+    FeaturizedHand, FeaturizedHistory, EVENT_CATEGORICAL_WIDTH, EVENT_CONTINUOUS_WIDTH,
+    MAX_BOARD_CARDS,
 };
 pub use history::{BehaviourHistory, SubjectHand};
 pub use profile::{BehaviourProfile, BehaviourProfileError};
