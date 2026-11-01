@@ -4,8 +4,7 @@ pub(crate) const STREET_CODEBOOK: &str = "0=preflop,1=flop,2=turn,3=river";
 pub(crate) const POSITION_CODEBOOK: &str =
     "0=utg,1=hijack,2=cutoff,3=button,4=button_small_blind,5=small_blind,6=big_blind";
 pub(crate) const ACTION_CODEBOOK: &str = "0=fold,1=check,2=call,3=bet,4=raise";
-pub(crate) const RANK_CODEBOOK: &str =
-    "2=two,3=three,4=four,5=five,6=six,7=seven,8=eight,9=nine,10=ten,11=jack,12=queen,13=king,14=ace";
+pub(crate) const RANK_CODEBOOK: &str = "2=two,3=three,4=four,5=five,6=six,7=seven,8=eight,9=nine,10=ten,11=jack,12=queen,13=king,14=ace";
 pub(crate) const SUIT_CODEBOOK: &str = "1=clubs,2=diamonds,3=hearts,4=spades";
 
 pub(crate) fn street_id(street: Street) -> u8 {

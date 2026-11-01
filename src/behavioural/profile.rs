@@ -43,7 +43,10 @@ impl fmt::Display for BehaviourProfileError {
         match self {
             Self::EmptyEmbedding => write!(f, "behaviour profile embedding cannot be empty"),
             Self::NonFiniteValue { index } => {
-                write!(f, "behaviour profile contains a non-finite value at {index}")
+                write!(
+                    f,
+                    "behaviour profile contains a non-finite value at {index}"
+                )
             }
         }
     }

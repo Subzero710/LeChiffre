@@ -8,12 +8,12 @@ mod profile;
 mod sequence;
 
 pub use event::{
-    ActionKind, BehaviourEvent, BehaviourEventError, DecisionContext, HandId, ObservedAction,
-    Position, PublicCard, Rank, Street, Suit, MAX_BOARD_CARDS,
+    ActionKind, BehaviourEvent, BehaviourEventError, DecisionContext, HandId, MAX_BOARD_CARDS,
+    ObservedAction, Position, PublicCard, Rank, Street, Suit,
 };
 pub use featurizer::{
     BehaviourFeaturizer, BehaviourFeaturizerError, CategoricalFeature, ContinuousFeature,
-    FeaturizedHand, FeaturizedHistory, EVENT_CATEGORICAL_WIDTH, EVENT_CONTINUOUS_WIDTH,
+    EVENT_CATEGORICAL_WIDTH, EVENT_CONTINUOUS_WIDTH, FeaturizedHand, FeaturizedHistory,
 };
 pub use history::{BehaviourHistory, SubjectHand};
 pub use profile::{BehaviourProfile, BehaviourProfileError};

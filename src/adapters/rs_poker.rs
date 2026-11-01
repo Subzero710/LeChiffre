@@ -61,7 +61,10 @@ impl RsPokerAdapter {
         })
     }
 
-    pub fn sequence(&self, hand_id: u128) -> Result<Option<BehaviourSequence>, RsPokerAdapterError> {
+    pub fn sequence(
+        &self,
+        hand_id: u128,
+    ) -> Result<Option<BehaviourSequence>, RsPokerAdapterError> {
         let state = self
             .state
             .lock()
@@ -153,13 +156,12 @@ fn record_played_action(
         .lock()
         .map_err(|_| RsPokerAdapterError::StoragePoisoned)?;
 
-    let pending = state
-        .pending
-        .remove(&(hand_id, payload.idx))
-        .ok_or(RsPokerAdapterError::MissingDecision {
+    let pending = state.pending.remove(&(hand_id, payload.idx)).ok_or(
+        RsPokerAdapterError::MissingDecision {
             hand_id,
             seat: payload.idx,
-        })?;
+        },
+    )?;
 
     let sequence = state
         .sequences
@@ -203,7 +205,10 @@ pub(super) fn decision_context(game_state: &GameState) -> DecisionContext {
         ),
         actor_street_commitment_bb: to_bb(actor_commitment, game_state.big_blind),
         current_bet_bb: to_bb(current_bet, game_state.big_blind),
-        to_call_bb: to_bb((current_bet - actor_commitment).max(0), game_state.big_blind),
+        to_call_bb: to_bb(
+            (current_bet - actor_commitment).max(0),
+            game_state.big_blind,
+        ),
         min_raise_to_bb: Some(
             to_bb(current_bet, game_state.big_blind)
                 + to_bb(game_state.current_round_min_raise(), game_state.big_blind),
@@ -229,7 +234,10 @@ pub(super) fn position_for_index(
         (2..=6).contains(&num_players),
         "LeChiffre supports only 2..=6-max"
     );
-    assert!(dealer_idx < num_players, "dealer index is outside the table");
+    assert!(
+        dealer_idx < num_players,
+        "dealer index is outside the table"
+    );
     assert!(actor_idx < num_players, "actor index is outside the table");
 
     let distance_from_button = (actor_idx + num_players - dealer_idx) % num_players;
@@ -278,7 +286,10 @@ fn observed_action(
     }
 }
 
-fn semantic_action(payload: &PlayedActionPayload, amount_added: rs_poker::arena::Chips) -> ActionKind {
+fn semantic_action(
+    payload: &PlayedActionPayload,
+    amount_added: rs_poker::arena::Chips,
+) -> ActionKind {
     if matches!(payload.action, AgentAction::Fold) {
         return ActionKind::Fold;
     }
@@ -356,13 +367,22 @@ impl fmt::Display for RsPokerAdapterError {
         match self {
             Self::StoragePoisoned => write!(f, "behaviour adapter storage lock poisoned"),
             Self::UnsupportedPlayerCount { players } => {
-                write!(f, "LeChiffre supports only 2..=6-max, got {players} players")
+                write!(
+                    f,
+                    "LeChiffre supports only 2..=6-max, got {players} players"
+                )
             }
             Self::SequenceTooLong { hand_id } => {
-                write!(f, "hand {hand_id} has more than u32::MAX behavioural events")
+                write!(
+                    f,
+                    "hand {hand_id} has more than u32::MAX behavioural events"
+                )
             }
             Self::MissingDecision { hand_id, seat } => {
-                write!(f, "missing decision snapshot for hand {hand_id}, seat {seat}")
+                write!(
+                    f,
+                    "missing decision snapshot for hand {hand_id}, seat {seat}"
+                )
             }
             Self::BehaviourEvent(error) => write!(f, "invalid behaviour event: {error}"),
             Self::BehaviourSequence(error) => write!(f, "invalid behaviour sequence: {error}"),

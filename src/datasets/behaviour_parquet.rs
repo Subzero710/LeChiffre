@@ -215,10 +215,16 @@ impl BehaviourParquetDatasetWriter {
 
         let events_written = events_batch.num_rows();
         let subject_hand_rows_written = subjects_batch.num_rows();
-        let hands_written_u64 = u64::try_from(retained.len())
-            .map_err(|_| BehaviourParquetDatasetError::CounterOverflow { field: "hands_written" })?;
-        let events_written_u64 = u64::try_from(events_written)
-            .map_err(|_| BehaviourParquetDatasetError::CounterOverflow { field: "events_written" })?;
+        let hands_written_u64 = u64::try_from(retained.len()).map_err(|_| {
+            BehaviourParquetDatasetError::CounterOverflow {
+                field: "hands_written",
+            }
+        })?;
+        let events_written_u64 = u64::try_from(events_written).map_err(|_| {
+            BehaviourParquetDatasetError::CounterOverflow {
+                field: "events_written",
+            }
+        })?;
         let subject_rows_u64 = u64::try_from(subject_hand_rows_written).map_err(|_| {
             BehaviourParquetDatasetError::CounterOverflow {
                 field: "subject_hand_rows_written",
@@ -253,7 +259,6 @@ impl BehaviourParquetDatasetWriter {
             )?,
         };
 
-
         if events_batch.num_rows() > 0 {
             if let Err(error) = self
                 .events_writer
@@ -276,7 +281,6 @@ impl BehaviourParquetDatasetWriter {
                 return Err(error.into());
             }
         }
-
 
         for hand_id in batch_hand_ids {
             self.seen_hand_ids.insert(hand_id);
@@ -462,9 +466,7 @@ pub struct BehaviourParquetWriteReport {
     pub dropped_hand_ids_missing_timing: Vec<HandId>,
 }
 
-fn finish_and_sync(
-    writer: &mut ArrowWriter<File>,
-) -> Result<(), BehaviourParquetDatasetError> {
+fn finish_and_sync(writer: &mut ArrowWriter<File>) -> Result<(), BehaviourParquetDatasetError> {
     writer.finish()?;
     writer.inner().sync_all()?;
     Ok(())
@@ -483,7 +485,8 @@ fn writer_properties(table: &str) -> WriterProperties {
         ),
         KeyValue::new(
             "lechiffre.hand_index_semantics".to_string(),
-            "monotonic_input_order_metadata_not_model_feature; gaps_correspond_to_dropped_hands".to_string(),
+            "monotonic_input_order_metadata_not_model_feature; gaps_correspond_to_dropped_hands"
+                .to_string(),
         ),
     ];
 
@@ -552,11 +555,7 @@ fn events_schema() -> SchemaRef {
         Field::new("pot_bb", DataType::Float32, false),
         Field::new("actor_stack_bb", DataType::Float32, false),
         Field::new("effective_stack_bb", DataType::Float32, false),
-        Field::new(
-            "actor_street_commitment_bb",
-            DataType::Float32,
-            false,
-        ),
+        Field::new("actor_street_commitment_bb", DataType::Float32, false),
         Field::new("current_bet_bb", DataType::Float32, false),
         Field::new("to_call_bb", DataType::Float32, false),
         Field::new("min_raise_to_bb", DataType::Float32, true),
@@ -660,9 +659,9 @@ fn events_record_batch(
         Arc::new(Float32Array::from_iter_values(
             event_rows(hands).map(|(event, _)| event.context.effective_stack_bb),
         )),
-        Arc::new(Float32Array::from_iter_values(event_rows(hands).map(
-            |(event, _)| event.context.actor_street_commitment_bb,
-        ))),
+        Arc::new(Float32Array::from_iter_values(
+            event_rows(hands).map(|(event, _)| event.context.actor_street_commitment_bb),
+        )),
         Arc::new(Float32Array::from_iter_values(
             event_rows(hands).map(|(event, _)| event.context.current_bet_bb),
         )),
@@ -674,15 +673,15 @@ fn events_record_batch(
                 .map(|(event, _)| event.context.min_raise_to_bb)
                 .collect::<Vec<_>>(),
         )),
-        Arc::new(UInt8Array::from_iter_values(event_rows(hands).map(
-            |(event, _)| event.context.bet_or_raise_count_this_street,
-        ))),
+        Arc::new(UInt8Array::from_iter_values(
+            event_rows(hands).map(|(event, _)| event.context.bet_or_raise_count_this_street),
+        )),
         Arc::new(Float32Array::from_iter_values(
             event_rows(hands).map(|(event, _)| event.action.amount_added_bb),
         )),
-        Arc::new(Float32Array::from_iter_values(event_rows(hands).map(
-            |(event, _)| event.action.street_total_after_bb,
-        ))),
+        Arc::new(Float32Array::from_iter_values(
+            event_rows(hands).map(|(event, _)| event.action.street_total_after_bb),
+        )),
         Arc::new(UInt32Array::from(decision_time_ms)),
     ];
 
@@ -754,7 +753,11 @@ fn subjects_record_batch(
             |(hand, hand_index)| std::iter::repeat(*hand_index).take(hand.players().len()),
         ))),
         Arc::new(UInt8Array::from_iter_values(hands.iter().flat_map(
-            |(hand, _)| hand.players().iter().map(|player| position_id(player.position)),
+            |(hand, _)| {
+                hand.players()
+                    .iter()
+                    .map(|player| position_id(player.position))
+            },
         ))),
     ];
 
@@ -947,9 +950,16 @@ impl fmt::Display for BehaviourParquetDatasetError {
             Self::Arrow(error) => write!(f, "Arrow record construction failed: {error}"),
             Self::Parquet(error) => write!(f, "Parquet writing failed: {error}"),
             Self::OutputAlreadyExists { path } => {
-                write!(f, "refusing to overwrite existing dataset path {}", path.display())
+                write!(
+                    f,
+                    "refusing to overwrite existing dataset path {}",
+                    path.display()
+                )
             }
-            Self::WriterPoisoned => write!(f, "Parquet dataset writer is poisoned after a write failure"),
+            Self::WriterPoisoned => write!(
+                f,
+                "Parquet dataset writer is poisoned after a write failure"
+            ),
             Self::WriterClosed => write!(f, "Parquet dataset writer is already closed"),
             Self::HandIndexOverflow => write!(f, "dataset hand index overflow"),
             Self::RowCountOverflow => write!(f, "dataset row count overflow"),
@@ -995,7 +1005,10 @@ impl fmt::Display for BehaviourParquetDatasetError {
                 "hand {hand_id} has {players} players; behavioural dataset supports only 2..=6-max"
             ),
             Self::DuplicatePlayerInHand { hand_id, player_id } => {
-                write!(f, "hand {hand_id} contains duplicate player identity {player_id}")
+                write!(
+                    f,
+                    "hand {hand_id} contains duplicate player identity {player_id}"
+                )
             }
             Self::DuplicatePositionInHand { hand_id, position } => {
                 write!(f, "hand {hand_id} contains duplicate position {position:?}")

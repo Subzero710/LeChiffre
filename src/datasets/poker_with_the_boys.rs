@@ -42,7 +42,9 @@ pub fn normalize_player_name(name: &str) -> Option<String> {
         "dave-eed" => Some("David".to_string()),
         "daveod" => Some("David".to_string()),
         "stevo-tesla" => Some("Stephen".to_string()),
-        _ if !lower.is_empty() && lower.chars().all(|c| "george".contains(c)) => Some("George".to_string()),
+        _ if !lower.is_empty() && lower.chars().all(|c| "george".contains(c)) => {
+            Some("George".to_string())
+        }
         _ => None,
     }
 }
@@ -53,7 +55,10 @@ mod tests {
     #[test]
     fn normalizes_known_aliases() {
         assert_eq!(normalize_player_name("goero"), Some("George".to_string()));
-        assert_eq!(normalize_player_name("STEVO-IPAD"), Some("Stephen".to_string()));
+        assert_eq!(
+            normalize_player_name("STEVO-IPAD"),
+            Some("Stephen".to_string())
+        );
         assert_eq!(normalize_player_name("peelic"), Some("Prilik".to_string()));
         assert_eq!(normalize_player_name("Xavier"), None);
     }

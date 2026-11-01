@@ -159,7 +159,8 @@ fn import_csv_hand<F>(
         .map(|start| start.source_hand_id)
         .unwrap_or_else(|| "unknown".to_string());
 
-    match build_csv_hand(session_id, identity_namespace, rows, normalize_name).and_then(adapt_parsed_hand)
+    match build_csv_hand(session_id, identity_namespace, rows, normalize_name)
+        .and_then(adapt_parsed_hand)
     {
         Ok(hand) => hands.push(hand),
         Err(error) => rejected.push(PokerNowRejectedHand {
@@ -189,17 +190,29 @@ fn parse_csv(text: &str) -> Result<Vec<CsvRow>, PokerNowAdapterError> {
         .has_headers(true)
         .flexible(false)
         .from_reader(text.as_bytes());
-    let headers = reader.headers().map_err(|error| PokerNowAdapterError::InvalidCsv(error.to_string()))?;
+    let headers = reader
+        .headers()
+        .map_err(|error| PokerNowAdapterError::InvalidCsv(error.to_string()))?;
     if headers.iter().collect::<Vec<_>>() != ["entry", "at", "order"] {
-        return Err(PokerNowAdapterError::InvalidCsv("expected entry,at,order columns".to_string()));
+        return Err(PokerNowAdapterError::InvalidCsv(
+            "expected entry,at,order columns".to_string(),
+        ));
     }
     let mut rows = Vec::new();
     for result in reader.records() {
         let record = result.map_err(|error| PokerNowAdapterError::InvalidCsv(error.to_string()))?;
-        let entry = record.get(0).ok_or_else(|| PokerNowAdapterError::InvalidCsv("missing entry".into()))?;
-        let order = record.get(2).ok_or_else(|| PokerNowAdapterError::InvalidCsv("missing order".into()))?
-            .parse::<i64>().map_err(|error| PokerNowAdapterError::InvalidCsv(error.to_string()))?;
-        rows.push(CsvRow { entry: entry.to_owned(), order });
+        let entry = record
+            .get(0)
+            .ok_or_else(|| PokerNowAdapterError::InvalidCsv("missing entry".into()))?;
+        let order = record
+            .get(2)
+            .ok_or_else(|| PokerNowAdapterError::InvalidCsv("missing order".into()))?
+            .parse::<i64>()
+            .map_err(|error| PokerNowAdapterError::InvalidCsv(error.to_string()))?;
+        rows.push(CsvRow {
+            entry: entry.to_owned(),
+            order,
+        });
     }
     Ok(rows)
 }
@@ -261,7 +274,9 @@ where
         .ok_or(PokerNowHandError::MissingStacks)?;
     let parsed_players = parse_stack_line(&stacks.entry)?;
     if !(2..=6).contains(&parsed_players.len()) {
-        return Err(PokerNowHandError::UnsupportedPlayerCount(parsed_players.len()));
+        return Err(PokerNowHandError::UnsupportedPlayerCount(
+            parsed_players.len(),
+        ));
     }
 
     let mut players = Vec::with_capacity(parsed_players.len());
@@ -277,7 +292,9 @@ where
             .ok_or_else(|| PokerNowHandError::UnknownPlayer(display_name.to_string()))?;
         let player_id = PlayerId::from_source(identity_namespace, &canonical);
         if !canonical_seen.insert(player_id.clone()) {
-            return Err(PokerNowHandError::DuplicatePlayerIdentity(player_id.to_string()));
+            return Err(PokerNowHandError::DuplicatePlayerIdentity(
+                player_id.to_string(),
+            ));
         }
         by_name.insert(parsed.name.clone(), source_id);
         player_ids.insert(source_id, player_id);
@@ -341,7 +358,12 @@ where
                     .get(name)
                     .copied()
                     .ok_or_else(|| PokerNowHandError::UnknownActor(name.to_string()))?;
-                subtract_commitment(player, amount, &mut street_commitment, &mut total_commitment)?;
+                subtract_commitment(
+                    player,
+                    amount,
+                    &mut street_commitment,
+                    &mut total_commitment,
+                )?;
             }
             continue;
         };
@@ -349,7 +371,10 @@ where
             .get(actor_name)
             .ok_or_else(|| PokerNowHandError::UnknownActor(actor_name.to_string()))?;
 
-        if let Some(amount) = rest.strip_prefix("posts a small blind of ").and_then(parse_i64_prefix) {
+        if let Some(amount) = rest
+            .strip_prefix("posts a small blind of ")
+            .and_then(parse_i64_prefix)
+        {
             small_blind.get_or_insert(amount);
             add_forced_action(
                 &mut rounds[0],
@@ -363,7 +388,10 @@ where
             ready_ms = Some(at_ms);
             continue;
         }
-        if let Some(amount) = rest.strip_prefix("posts a big blind of ").and_then(parse_i64_prefix) {
+        if let Some(amount) = rest
+            .strip_prefix("posts a big blind of ")
+            .and_then(parse_i64_prefix)
+        {
             big_blind.get_or_insert(amount);
             add_forced_action(
                 &mut rounds[0],
@@ -377,7 +405,10 @@ where
             ready_ms = Some(at_ms);
             continue;
         }
-        if let Some(amount) = rest.strip_prefix("posts an ante of ").and_then(parse_i64_prefix) {
+        if let Some(amount) = rest
+            .strip_prefix("posts an ante of ")
+            .and_then(parse_i64_prefix)
+        {
             if ante == 0 {
                 ante = amount;
             } else if ante != amount {
@@ -426,7 +457,9 @@ where
         };
 
         if let Some((kind, amount)) = action {
-            if kind == Action::Fold { folded.insert(actor); }
+            if kind == Action::Fold {
+                folded.insert(actor);
+            }
             let decision_time = observed_latency(ready_ms, at_ms)?;
             let all_in = add_voluntary_action(
                 &mut rounds[round_index],
@@ -522,7 +555,9 @@ where
             .ok_or_else(|| PokerNowHandError::UnknownPlayer(name.to_string()))?;
         let player_id = PlayerId::from_source(identity_namespace, &canonical);
         if !canonical_seen.insert(player_id.clone()) {
-            return Err(PokerNowHandError::DuplicatePlayerIdentity(player_id.to_string()));
+            return Err(PokerNowHandError::DuplicatePlayerIdentity(
+                player_id.to_string(),
+            ));
         }
         let ohh_seat = source_seat + 1;
         source_by_seat.insert(source_seat, source_id);
@@ -631,7 +666,9 @@ where
                 } else {
                     let target = json_chips_hand(&entry["to"], "entry.to")?;
                     let own = *street_commitment.get(&actor).unwrap_or(&0);
-                    if target < own || (matches!(action, Action::Bet | Action::Raise) && target == own) {
+                    if target < own
+                        || (matches!(action, Action::Bet | Action::Raise) && target == own)
+                    {
                         return Err(PokerNowHandError::InvalidRaiseTarget);
                     }
                     target - own
@@ -725,8 +762,12 @@ fn parse_stack_line(entry: &str) -> Result<Vec<ParsedPlayer>, PokerNowHandError>
         .ok_or(PokerNowHandError::MissingStacks)?;
     let mut players = Vec::new();
     for part in body.split(" | ") {
-        let after_hash = part.strip_prefix('#').ok_or(PokerNowHandError::InvalidStacks)?;
-        let seat_end = after_hash.find(' ').ok_or(PokerNowHandError::InvalidStacks)?;
+        let after_hash = part
+            .strip_prefix('#')
+            .ok_or(PokerNowHandError::InvalidStacks)?;
+        let seat_end = after_hash
+            .find(' ')
+            .ok_or(PokerNowHandError::InvalidStacks)?;
         let seat = after_hash[..seat_end]
             .parse::<u64>()
             .map_err(|_| PokerNowHandError::InvalidStacks)?;
@@ -810,7 +851,13 @@ fn add_forced_action(
     if action == Action::PostAnte {
         add_total_commitment(player, amount, starting_stacks, total_commitment)?;
     } else {
-        add_commitment(player, amount, starting_stacks, street_commitment, total_commitment)?;
+        add_commitment(
+            player,
+            amount,
+            starting_stacks,
+            street_commitment,
+            total_commitment,
+        )?;
     }
     let is_allin = total_commitment[&player] == starting_stacks[&player];
     push_action(round, player, action, amount, is_allin);
@@ -848,7 +895,13 @@ fn add_voluntary_action(
     total_commitment: &mut HashMap<u64, i64>,
 ) -> Result<bool, PokerNowHandError> {
     if amount > 0 {
-        add_commitment(player, amount, starting_stacks, street_commitment, total_commitment)?;
+        add_commitment(
+            player,
+            amount,
+            starting_stacks,
+            street_commitment,
+            total_commitment,
+        )?;
     }
     let is_allin = total_commitment[&player] == starting_stacks[&player];
     push_action(round, player, action, amount, is_allin);
@@ -952,10 +1005,13 @@ fn build_pots(
     let mut pots: Vec<(i64, HashSet<u64>)> = Vec::new();
     let mut prev = 0_i64;
     for level in levels {
-        let participants: Vec<u64> = commitments.iter()
+        let participants: Vec<u64> = commitments
+            .iter()
             .filter(|(_, total)| **total >= level)
-            .map(|(id, _)| *id).collect();
-        let amount = (level - prev).checked_mul(participants.len() as i64)
+            .map(|(id, _)| *id)
+            .collect();
+        let amount = (level - prev)
+            .checked_mul(participants.len() as i64)
             .ok_or(PokerNowHandError::AmountOverflow)?;
         let contributor_count = participants.len();
         let eligible: HashSet<u64> = participants
@@ -979,8 +1035,12 @@ fn build_pots(
     }
     let contributed: i64 = commitments.values().copied().sum();
     let paid: i64 = awards.iter().map(|(_, amount)| *amount).sum();
-    if contributed != paid { return Err(PokerNowHandError::PayoutMismatch); }
-    if awards.len() > 64 { return Err(PokerNowHandError::AmbiguousPotAwards); }
+    if contributed != paid {
+        return Err(PokerNowHandError::PayoutMismatch);
+    }
+    if awards.len() > 64 {
+        return Err(PokerNowHandError::AmbiguousPotAwards);
+    }
 
     // For each payout, enumerate eligible pots. Recurse only until the second
     // complete solution: zero = inconsistent; more than one = ambiguous.
@@ -989,45 +1049,83 @@ fn build_pots(
     let mut answer: Option<Vec<usize>> = None;
     let mut solutions = 0u8;
     fn assign(
-        at: usize, awards: &[(u64, i64)], pots: &[(i64, HashSet<u64>)],
-        remaining: &mut [i64], current: &mut [usize],
-        answer: &mut Option<Vec<usize>>, solutions: &mut u8,
+        at: usize,
+        awards: &[(u64, i64)],
+        pots: &[(i64, HashSet<u64>)],
+        remaining: &mut [i64],
+        current: &mut [usize],
+        answer: &mut Option<Vec<usize>>,
+        solutions: &mut u8,
     ) {
-        if *solutions > 1 { return; }
+        if *solutions > 1 {
+            return;
+        }
         if at == awards.len() {
             if remaining.iter().all(|n| *n == 0) {
                 *solutions += 1;
-                if answer.is_none() { *answer = Some(current.to_vec()); }
+                if answer.is_none() {
+                    *answer = Some(current.to_vec());
+                }
             }
             return;
         }
         let (player, amount) = awards[at];
         for i in 0..pots.len() {
-            if remaining[i] < amount || !pots[i].1.contains(&player) { continue; }
+            if remaining[i] < amount || !pots[i].1.contains(&player) {
+                continue;
+            }
             remaining[i] -= amount;
             current[at] = i;
-            assign(at+1, awards, pots, remaining, current, answer, solutions);
+            assign(at + 1, awards, pots, remaining, current, answer, solutions);
             remaining[i] += amount;
-            if *solutions > 1 { return; }
+            if *solutions > 1 {
+                return;
+            }
         }
     }
-    assign(0, awards, &pots, &mut remaining, &mut current, &mut answer, &mut solutions);
-    if solutions == 0 { return Err(PokerNowHandError::PayoutMismatch); }
-    if solutions != 1 { return Err(PokerNowHandError::AmbiguousPotAwards); }
+    assign(
+        0,
+        awards,
+        &pots,
+        &mut remaining,
+        &mut current,
+        &mut answer,
+        &mut solutions,
+    );
+    if solutions == 0 {
+        return Err(PokerNowHandError::PayoutMismatch);
+    }
+    if solutions != 1 {
+        return Err(PokerNowHandError::AmbiguousPotAwards);
+    }
     let allocation = answer.ok_or(PokerNowHandError::PayoutMismatch)?;
     let mut output = Vec::new();
     for (number, (amount, _)) in pots.iter().enumerate() {
         let mut by_player = HashMap::<u64, i64>::new();
         for (index, &(player, share)) in awards.iter().enumerate() {
-            if allocation[index] == number { *by_player.entry(player).or_insert(0) += share; }
+            if allocation[index] == number {
+                *by_player.entry(player).or_insert(0) += share;
+            }
         }
-        let mut player_wins: Vec<_> = by_player.into_iter().map(|(player_id, win_amount)| PlayerWinsObj {
-            player_id, win_amount, cashout_amount: None, cashout_fee: None,
-            bonus_amount: None, contributed_rake: None,
-        }).collect();
+        let mut player_wins: Vec<_> = by_player
+            .into_iter()
+            .map(|(player_id, win_amount)| PlayerWinsObj {
+                player_id,
+                win_amount,
+                cashout_amount: None,
+                cashout_fee: None,
+                bonus_amount: None,
+                contributed_rake: None,
+            })
+            .collect();
         player_wins.sort_unstable_by_key(|win| win.player_id);
-        output.push(PotObj { number: number as u64, amount: *amount, rake: Some(0),
-            jackpot: None, player_wins });
+        output.push(PotObj {
+            number: number as u64,
+            amount: *amount,
+            rake: Some(0),
+            jackpot: None,
+            player_wins,
+        });
     }
     Ok(output)
 }
@@ -1055,16 +1153,26 @@ fn build_pokerlater_pots(
             .as_u64()
             .and_then(|value| usize::try_from(value).ok())
             .filter(|index| *index < raw_pots.len())
-            .ok_or(PokerNowHandError::InvalidPokerLaterValue("final.awards.potIndex"))?;
+            .ok_or(PokerNowHandError::InvalidPokerLaterValue(
+                "final.awards.potIndex",
+            ))?;
         if award["boardIndex"].as_u64().unwrap_or(0) != 0 {
-            return Err(PokerNowHandError::InvalidPokerLaterValue("final.awards.boardIndex"));
+            return Err(PokerNowHandError::InvalidPokerLaterValue(
+                "final.awards.boardIndex",
+            ));
         }
-        let source_seat = award["seat"]
-            .as_u64()
-            .ok_or(PokerNowHandError::InvalidPokerLaterValue("final.awards.seat"))?;
-        let player_id = *source_by_seat
-            .get(&source_seat)
-            .ok_or(PokerNowHandError::InvalidPokerLaterValue("final.awards.seat"))?;
+        let source_seat =
+            award["seat"]
+                .as_u64()
+                .ok_or(PokerNowHandError::InvalidPokerLaterValue(
+                    "final.awards.seat",
+                ))?;
+        let player_id =
+            *source_by_seat
+                .get(&source_seat)
+                .ok_or(PokerNowHandError::InvalidPokerLaterValue(
+                    "final.awards.seat",
+                ))?;
         let amount = json_chips_hand(&award["amount"], "final.awards.amount")?;
         if amount <= 0 {
             return Err(PokerNowHandError::MissingPayout);
@@ -1291,16 +1399,24 @@ impl fmt::Display for PokerNowHandError {
             Self::MissingDealer => write!(f, "missing or invalid dealer"),
             Self::MissingStacks => write!(f, "missing player stacks"),
             Self::InvalidStacks => write!(f, "invalid player stacks line"),
-            Self::UnsupportedPlayerCount(players) => write!(f, "unsupported player count {players}"),
+            Self::UnsupportedPlayerCount(players) => {
+                write!(f, "unsupported player count {players}")
+            }
             Self::UnknownPlayer(name) => write!(f, "no canonical identity for player {name}"),
             Self::UnknownActor(name) => write!(f, "action references unknown player {name}"),
             Self::UnknownPlayerId(id) => write!(f, "unknown internal player id {id}"),
-            Self::DuplicatePlayerIdentity(id) => write!(f, "duplicate canonical player identity {id}"),
+            Self::DuplicatePlayerIdentity(id) => {
+                write!(f, "duplicate canonical player identity {id}")
+            }
             Self::MissingSmallBlind => write!(f, "missing small blind posting"),
             Self::MissingBigBlind => write!(f, "missing big blind posting"),
             Self::InconsistentAnte => write!(f, "inconsistent ante amount"),
-            Self::UnsupportedStraddle => write!(f, "straddled hand is outside the current adapter scope"),
-            Self::UnsupportedDeadBlind => write!(f, "dead-blind hand is outside the current adapter scope"),
+            Self::UnsupportedStraddle => {
+                write!(f, "straddled hand is outside the current adapter scope")
+            }
+            Self::UnsupportedDeadBlind => {
+                write!(f, "dead-blind hand is outside the current adapter scope")
+            }
             Self::UnsupportedForcedBet => write!(f, "unsupported forced bet"),
             Self::InvalidRaiseTarget => write!(f, "invalid bet/raise target"),
             Self::InvalidCallTarget => write!(f, "invalid call target"),
@@ -1311,12 +1427,20 @@ impl fmt::Display for PokerNowHandError {
             Self::MissingDecisionStart => write!(f, "decision has no observed start timestamp"),
             Self::NegativeTiming => write!(f, "action timestamp precedes decision start"),
             Self::TimingOverflow => write!(f, "decision timing does not fit u32 milliseconds"),
-            Self::InconsistentAllIn => write!(f, "all-in marker disagrees with observed stack ledger"),
+            Self::InconsistentAllIn => {
+                write!(f, "all-in marker disagrees with observed stack ledger")
+            }
             Self::InvalidBoard => write!(f, "invalid board line"),
             Self::InvalidCard(card) => write!(f, "invalid card {card}"),
             Self::MissingPayout => write!(f, "hand has no valid observed pot award"),
-            Self::PayoutMismatch => write!(f, "observed awards cannot reconcile against contributions and eligible pots"),
-            Self::AmbiguousPotAwards => write!(f, "multiple valid pot allocations; cannot identify actual awards"),
+            Self::PayoutMismatch => write!(
+                f,
+                "observed awards cannot reconcile against contributions and eligible pots"
+            ),
+            Self::AmbiguousPotAwards => write!(
+                f,
+                "multiple valid pot allocations; cannot identify actual awards"
+            ),
             Self::InvalidPokerLaterValue(field) => write!(f, "invalid PokerLater field {field}"),
             Self::HandHistory(error) => write!(f, "rs-poker replay rejected hand: {error}"),
         }
@@ -1352,12 +1476,10 @@ mod tests {
 """"goergoe @ _sqcLETZ0C"" collected 80 from pot"",2026-10-08T02:30:02.180Z,179142660218001
 ""-- ending hand #128 --"",2026-10-08T02:30:02.180Z,179142660218002
 "#;
-        let imported = PokerNowAdapter::adapt_csv("20261007", "test", csv, |name| {
-            match name {
-                "arash" => Some("Arash".to_string()),
-                "goergoe" => Some("George".to_string()),
-                _ => None,
-            }
+        let imported = PokerNowAdapter::adapt_csv("20261007", "test", csv, |name| match name {
+            "arash" => Some("Arash".to_string()),
+            "goergoe" => Some("George".to_string()),
+            _ => None,
         })
         .unwrap();
         assert_eq!(imported.rejected.len(), 0);
@@ -1365,7 +1487,11 @@ mod tests {
         let events = imported.hands[0].sequence().events();
         assert_eq!(events[0].action.decision_time_ms, Some(1292));
         assert_eq!(events[1].action.decision_time_ms, Some(890));
-        assert!(events.iter().all(|event| event.action.decision_time_ms.is_some()));
+        assert!(
+            events
+                .iter()
+                .all(|event| event.action.decision_time_ms.is_some())
+        );
     }
 
     #[test]
@@ -1378,7 +1504,10 @@ mod tests {
 "#;
         let rows = parse_csv(csv).unwrap();
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].entry, "Game Config Changes:\n* Allow Straddle: off\n* Decision Limit Time: 20");
+        assert_eq!(
+            rows[0].entry,
+            "Game Config Changes:\n* Allow Straddle: off\n* Decision Limit Time: 20"
+        );
     }
 
     #[test]
@@ -1397,8 +1526,6 @@ mod tests {
         let contributions = HashMap::from([(1, 100), (2, 200), (3, 200)]);
         assert!(build_pots(&contributions, &HashSet::new(), &[(1, 500)]).is_err());
     }
-
-
 
     #[test]
     fn folded_contribution_slices_with_same_eligibility_are_merged() {
@@ -1441,5 +1568,4 @@ mod tests {
         assert_eq!(pots[1].amount, 200);
         assert_eq!(pots[1].player_wins[0].player_id, 2);
     }
-
 }

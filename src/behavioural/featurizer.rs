@@ -2,7 +2,7 @@ use std::fmt;
 
 use super::codebook::{action_id, position_id, rank_id, street_id, suit_id};
 use super::{
-    BehaviourHistory, BehaviourSequence, HandId, Position, PublicCard, SubjectHand, MAX_BOARD_CARDS,
+    BehaviourHistory, BehaviourSequence, HandId, MAX_BOARD_CARDS, Position, PublicCard, SubjectHand,
 };
 
 /// Width of the categorical event matrix produced by [`BehaviourFeaturizer`].
@@ -240,14 +240,19 @@ impl BehaviourFeaturizer {
                 i64::from(street_id(event.context.street)),
                 i64::from(position_id(event.context.actor_position)),
                 i64::from(action_id(event.action.kind)),
-                if event.context.actor_position == subject_position { 1 } else { 0 },
+                if event.context.actor_position == subject_position {
+                    1
+                } else {
+                    0
+                },
                 if event.action.is_all_in { 1 } else { 0 },
             ]);
 
             let mut values = [0.0; EVENT_CONTINUOUS_WIDTH];
             let mut present = [1; EVENT_CONTINUOUS_WIDTH];
 
-            values[ContinuousFeature::PlayersAtTable as usize] = event.context.players_at_table as f32;
+            values[ContinuousFeature::PlayersAtTable as usize] =
+                event.context.players_at_table as f32;
             values[ContinuousFeature::PlayersActive as usize] = event.context.players_active as f32;
             values[ContinuousFeature::PotBb as usize] = event.context.pot_bb;
             values[ContinuousFeature::ActorStackBb as usize] = event.context.actor_stack_bb;
@@ -259,7 +264,8 @@ impl BehaviourFeaturizer {
             values[ContinuousFeature::BetOrRaiseCountThisStreet as usize] =
                 f32::from(event.context.bet_or_raise_count_this_street);
             values[ContinuousFeature::AmountAddedBb as usize] = event.action.amount_added_bb;
-            values[ContinuousFeature::StreetTotalAfterBb as usize] = event.action.street_total_after_bb;
+            values[ContinuousFeature::StreetTotalAfterBb as usize] =
+                event.action.street_total_after_bb;
 
             match event.context.min_raise_to_bb {
                 Some(value) => values[ContinuousFeature::MinRaiseToBb as usize] = value,
@@ -362,7 +368,11 @@ mod tests {
             hand_id,
             sequence_index,
             DecisionContext {
-                street: if board.is_empty() { Street::Preflop } else { Street::Flop },
+                street: if board.is_empty() {
+                    Street::Preflop
+                } else {
+                    Street::Flop
+                },
                 board,
                 actor_position: position,
                 players_at_table: 6,
@@ -561,9 +571,18 @@ mod tests {
     #[test]
     fn board_uses_fixed_slots_with_explicit_presence_mask() {
         let flop = vec![
-            PublicCard { rank: Rank::King, suit: Suit::Spades },
-            PublicCard { rank: Rank::Eight, suit: Suit::Hearts },
-            PublicCard { rank: Rank::Three, suit: Suit::Clubs },
+            PublicCard {
+                rank: Rank::King,
+                suit: Suit::Spades,
+            },
+            PublicCard {
+                rank: Rank::Eight,
+                suit: Suit::Hearts,
+            },
+            PublicCard {
+                rank: Rank::Three,
+                suit: Suit::Clubs,
+            },
         ];
         let mut sequence = BehaviourSequence::new("hand-4");
         sequence
@@ -631,7 +650,9 @@ mod tests {
         history.push(SubjectHand::new(complete, Position::UnderTheGun));
         history.push(SubjectHand::new(incomplete, Position::Button));
 
-        let encoded = BehaviourFeaturizer::new().featurize_history(&history).unwrap();
+        let encoded = BehaviourFeaturizer::new()
+            .featurize_history(&history)
+            .unwrap();
 
         assert_eq!(encoded.len(), 1);
         assert_eq!(encoded.total_events(), 1);
@@ -683,7 +704,9 @@ mod tests {
         history.push(SubjectHand::new(first, Position::UnderTheGun));
         history.push(SubjectHand::new(second, Position::Button));
 
-        let encoded = BehaviourFeaturizer::new().featurize_history(&history).unwrap();
+        let encoded = BehaviourFeaturizer::new()
+            .featurize_history(&history)
+            .unwrap();
 
         assert_eq!(encoded.len(), 2);
         assert_eq!(encoded.total_events(), 3);
@@ -695,12 +718,30 @@ mod tests {
     #[test]
     fn rejects_more_than_five_public_cards_instead_of_truncating() {
         let board = vec![
-            PublicCard { rank: Rank::Two, suit: Suit::Clubs },
-            PublicCard { rank: Rank::Three, suit: Suit::Clubs },
-            PublicCard { rank: Rank::Four, suit: Suit::Clubs },
-            PublicCard { rank: Rank::Five, suit: Suit::Clubs },
-            PublicCard { rank: Rank::Six, suit: Suit::Clubs },
-            PublicCard { rank: Rank::Seven, suit: Suit::Clubs },
+            PublicCard {
+                rank: Rank::Two,
+                suit: Suit::Clubs,
+            },
+            PublicCard {
+                rank: Rank::Three,
+                suit: Suit::Clubs,
+            },
+            PublicCard {
+                rank: Rank::Four,
+                suit: Suit::Clubs,
+            },
+            PublicCard {
+                rank: Rank::Five,
+                suit: Suit::Clubs,
+            },
+            PublicCard {
+                rank: Rank::Six,
+                suit: Suit::Clubs,
+            },
+            PublicCard {
+                rank: Rank::Seven,
+                suit: Suit::Clubs,
+            },
         ];
         let mut sequence = BehaviourSequence::new("bad-hand");
         sequence

@@ -29,10 +29,7 @@ impl BehaviourSequence {
         &self.events
     }
 
-    pub fn events_for_position(
-        &self,
-        position: Position,
-    ) -> impl Iterator<Item = &BehaviourEvent> {
+    pub fn events_for_position(&self, position: Position) -> impl Iterator<Item = &BehaviourEvent> {
         self.events
             .iter()
             .filter(move |event| event.actor_position() == position)
@@ -94,9 +91,7 @@ impl std::error::Error for BehaviourSequenceError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::behavioural::{
-        ActionKind, BehaviourEvent, DecisionContext, ObservedAction, Street,
-    };
+    use crate::behavioural::{ActionKind, BehaviourEvent, DecisionContext, ObservedAction, Street};
 
     fn event(hand_id: &str, sequence_index: u32, position: Position) -> BehaviourEvent {
         BehaviourEvent::new(

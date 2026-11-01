@@ -1,17 +1,19 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use rs_poker::arena::action::AgentAction;
 use rs_poker::arena::RakeConfig;
-use rs_poker::open_hand_history::{replay_hand, HandHistory, ReplayError, ReplayStep, ReplayedHand};
+use rs_poker::arena::action::AgentAction;
+use rs_poker::open_hand_history::{
+    HandHistory, ReplayError, ReplayStep, ReplayedHand, replay_hand,
+};
 
 use crate::behavioural::{
     ActionKind, BehaviourEvent, BehaviourEventError, BehaviourHistory, BehaviourSequence,
     BehaviourSequenceError, HandId, ObservedAction, Position,
 };
 
-use super::{AdaptedHand, ObservedPlayer, PlayerId};
 use super::rs_poker::{decision_context, position_for_index, to_bb};
+use super::{AdaptedHand, ObservedPlayer, PlayerId};
 
 pub struct HandHistoryAdapter;
 
@@ -103,17 +105,13 @@ fn observed_players(
             .players
             .iter()
             .find(|player| player.id == source_player_id)
-            .ok_or(HandHistoryAdapterError::MissingSourcePlayer {
-                source_player_id,
-            })?;
+            .ok_or(HandHistoryAdapterError::MissingSourcePlayer { source_player_id })?;
 
         let player_id = match supplied_player_ids {
             Some(ids) => ids
                 .get(&source_player_id)
                 .cloned()
-                .ok_or(HandHistoryAdapterError::MissingPlayerIdentity {
-                    source_player_id,
-                })?,
+                .ok_or(HandHistoryAdapterError::MissingPlayerIdentity { source_player_id })?,
             None => PlayerId::from_source(&hand.site_name, &source_player.name),
         };
         if !identities.insert(player_id.clone()) {
@@ -181,17 +179,29 @@ impl fmt::Display for HandHistoryAdapterError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnsupportedPlayerCount { players } => {
-                write!(f, "LeChiffre supports only 2..=6-max, got {players} players")
+                write!(
+                    f,
+                    "LeChiffre supports only 2..=6-max, got {players} players"
+                )
             }
             Self::SequenceTooLong => write!(f, "hand history has more than u32::MAX decisions"),
             Self::MissingSourcePlayer { source_player_id } => {
-                write!(f, "replay references unknown source player {source_player_id}")
+                write!(
+                    f,
+                    "replay references unknown source player {source_player_id}"
+                )
             }
             Self::MissingPlayerIdentity { source_player_id } => {
-                write!(f, "missing player identity for source player {source_player_id}")
+                write!(
+                    f,
+                    "missing player identity for source player {source_player_id}"
+                )
             }
             Self::DuplicatePlayerIdentity { player_id } => {
-                write!(f, "duplicate source player identity {player_id} in one hand")
+                write!(
+                    f,
+                    "duplicate source player identity {player_id} in one hand"
+                )
             }
             Self::TimingCountMismatch { expected, observed } => write!(
                 f,
@@ -289,17 +299,12 @@ mod tests {
         let adapted = HandHistoryAdapter::adapt(&hand, RakeConfig::none()).unwrap();
         let hands = vec![adapted];
 
-        let history = HandHistoryAdapter::history_for(
-            &PlayerId::new("PokerStars:yakka34"),
-            &hands,
-        );
+        let history = HandHistoryAdapter::history_for(&PlayerId::new("PokerStars:yakka34"), &hands);
         assert_eq!(history.len(), 1);
         assert_eq!(history.hands()[0].subject_position(), Position::Button);
 
-        let absent = HandHistoryAdapter::history_for(
-            &PlayerId::new("PokerStars:not-present"),
-            &hands,
-        );
+        let absent =
+            HandHistoryAdapter::history_for(&PlayerId::new("PokerStars:not-present"), &hands);
         assert!(absent.is_empty());
     }
 }
