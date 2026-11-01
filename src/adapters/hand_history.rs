@@ -9,7 +9,7 @@ use rs_poker::open_hand_history::{
 
 use crate::behavioural::{
     ActionKind, BehaviourEvent, BehaviourEventError, BehaviourHistory, BehaviourSequence,
-    BehaviourSequenceError, HandId, ObservedAction, Position,
+    BehaviourSequenceError, HandId, ObservedAction,
 };
 
 use super::rs_poker::{decision_context, position_for_index, to_bb};
@@ -48,13 +48,13 @@ impl HandHistoryAdapter {
             });
         }
 
-        if let Some(times) = decision_times_ms {
-            if times.len() != replayed.steps.len() {
-                return Err(HandHistoryAdapterError::TimingCountMismatch {
-                    expected: replayed.steps.len(),
-                    observed: times.len(),
-                });
-            }
+        if let Some(times) = decision_times_ms
+            && times.len() != replayed.steps.len()
+        {
+            return Err(HandHistoryAdapterError::TimingCountMismatch {
+                expected: replayed.steps.len(),
+                observed: times.len(),
+            });
         }
 
         let hand_id = HandId::new(format!("{}:{}", hand.site_name, hand.game_number));
@@ -237,6 +237,7 @@ impl From<BehaviourSequenceError> for HandHistoryAdapterError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::behavioural::Position;
     use rs_poker::open_hand_history::{HandHistoryParser, PokerStarsParser};
 
     #[test]

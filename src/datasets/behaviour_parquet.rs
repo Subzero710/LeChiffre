@@ -259,27 +259,25 @@ impl BehaviourParquetDatasetWriter {
             )?,
         };
 
-        if events_batch.num_rows() > 0 {
-            if let Err(error) = self
+        if events_batch.num_rows() > 0
+            && let Err(error) = self
                 .events_writer
                 .as_mut()
                 .ok_or(BehaviourParquetDatasetError::WriterClosed)?
                 .write(&events_batch)
-            {
-                self.poisoned = true;
-                return Err(error.into());
-            }
+        {
+            self.poisoned = true;
+            return Err(error.into());
         }
-        if subjects_batch.num_rows() > 0 {
-            if let Err(error) = self
+        if subjects_batch.num_rows() > 0
+            && let Err(error) = self
                 .subjects_writer
                 .as_mut()
                 .ok_or(BehaviourParquetDatasetError::WriterClosed)?
                 .write(&subjects_batch)
-            {
-                self.poisoned = true;
-                return Err(error.into());
-            }
+        {
+            self.poisoned = true;
+            return Err(error.into());
         }
 
         for hand_id in batch_hand_ids {
@@ -382,14 +380,14 @@ impl BehaviourParquetDatasetWriter {
     ) -> Result<(), BehaviourParquetDatasetError> {
         let mut reverse = HashMap::<u64, &PlayerId>::with_capacity(subject_ids.len());
         for (player_id, &subject_id) in subject_ids {
-            if let Some(existing) = reverse.insert(subject_id, player_id) {
-                if existing != player_id {
-                    return Err(BehaviourParquetDatasetError::DuplicateSubjectId {
-                        subject_id,
-                        first_player_id: (*existing).clone(),
-                        second_player_id: player_id.clone(),
-                    });
-                }
+            if let Some(existing) = reverse.insert(subject_id, player_id)
+                && existing != player_id
+            {
+                return Err(BehaviourParquetDatasetError::DuplicateSubjectId {
+                    subject_id,
+                    first_player_id: (*existing).clone(),
+                    second_player_id: player_id.clone(),
+                });
             }
             self.validate_registered_subject(player_id, subject_id)?;
         }
@@ -401,23 +399,23 @@ impl BehaviourParquetDatasetWriter {
         player_id: &PlayerId,
         subject_id: u64,
     ) -> Result<(), BehaviourParquetDatasetError> {
-        if let Some(&registered) = self.player_to_subject.get(player_id) {
-            if registered != subject_id {
-                return Err(BehaviourParquetDatasetError::PlayerRemapped {
-                    player_id: player_id.clone(),
-                    registered_subject_id: registered,
-                    supplied_subject_id: subject_id,
-                });
-            }
+        if let Some(&registered) = self.player_to_subject.get(player_id)
+            && registered != subject_id
+        {
+            return Err(BehaviourParquetDatasetError::PlayerRemapped {
+                player_id: player_id.clone(),
+                registered_subject_id: registered,
+                supplied_subject_id: subject_id,
+            });
         }
-        if let Some(registered_player) = self.subject_to_player.get(&subject_id) {
-            if registered_player != player_id {
-                return Err(BehaviourParquetDatasetError::DuplicateSubjectId {
-                    subject_id,
-                    first_player_id: (*registered_player).clone(),
-                    second_player_id: player_id.clone(),
-                });
-            }
+        if let Some(registered_player) = self.subject_to_player.get(&subject_id)
+            && registered_player != player_id
+        {
+            return Err(BehaviourParquetDatasetError::DuplicateSubjectId {
+                subject_id,
+                first_player_id: (*registered_player).clone(),
+                second_player_id: player_id.clone(),
+            });
         }
         Ok(())
     }
@@ -746,11 +744,11 @@ fn subjects_record_batch(
         Arc::new(UInt64Array::from(ids)),
         Arc::new(StringArray::from_iter_values(hands.iter().flat_map(
             |(hand, _)| {
-                std::iter::repeat(hand.sequence().hand_id().as_str()).take(hand.players().len())
+                std::iter::repeat_n(hand.sequence().hand_id().as_str(), hand.players().len())
             },
         ))),
         Arc::new(UInt64Array::from_iter_values(hands.iter().flat_map(
-            |(hand, hand_index)| std::iter::repeat(*hand_index).take(hand.players().len()),
+            |(hand, hand_index)| std::iter::repeat_n(*hand_index, hand.players().len()),
         ))),
         Arc::new(UInt8Array::from_iter_values(hands.iter().flat_map(
             |(hand, _)| {

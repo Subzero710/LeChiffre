@@ -1,8 +1,6 @@
-mod adapters;
-mod behavioural;
-mod datasets;
-
-use adapters::rs_poker::RsPokerAdapter;
+use lechiffre::adapters;
+use lechiffre::adapters::rs_poker::RsPokerAdapter;
+use lechiffre::datasets;
 use rs_poker::arena::{Agent, GameStateBuilder, HoldemSimulationBuilder, agent::RandomAgent};
 
 #[tokio::main]
