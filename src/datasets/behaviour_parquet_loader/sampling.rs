@@ -88,9 +88,9 @@ impl std::error::Error for SupportQueryConfigError {}
 /// distinct retained hands sampled without replacement.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SupportQuerySample {
-    subject_id: u64,
-    support: Vec<FeaturizedHand>,
-    query: Vec<FeaturizedHand>,
+    pub(super) subject_id: u64,
+    pub(super) support: Vec<FeaturizedHand>,
+    pub(super) query: Vec<FeaturizedHand>,
 }
 
 impl SupportQuerySample {
