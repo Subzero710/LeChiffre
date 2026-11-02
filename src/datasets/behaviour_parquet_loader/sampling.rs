@@ -6,7 +6,7 @@ use super::BehaviourParquetDataset;
 
 /// Version of the deterministic support/query hand sampling algorithm.
 /// Persist this alongside training configuration when reproducibility matters.
-pub const SUPPORT_QUERY_SAMPLING_ALGORITHM_VERSION: u16 = 1;
+pub const SUPPORT_QUERY_SAMPLING_ALGORITHM_VERSION: u16 = 2;
 
 /// Exact support/query hand counts for one behavioural training episode.
 ///
@@ -84,8 +84,8 @@ impl std::error::Error for SupportQueryConfigError {}
 /// One subject-conditioned training episode.
 ///
 /// `subject_id` remains metadata used for grouping and sampling. It is not
-/// copied into any [`FeaturizedHand`] feature. Support and query contain
-/// distinct retained hands sampled without replacement.
+/// copied into any [`FeaturizedHand`] feature. Support and query are contiguous,
+/// non-overlapping slices from one deterministic window in persisted hand order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SupportQuerySample {
     pub(super) subject_id: u64,
@@ -140,12 +140,13 @@ impl fmt::Display for SupportQuerySampleError {
 impl std::error::Error for SupportQuerySampleError {}
 
 impl BehaviourParquetDataset {
-    /// Deterministically samples disjoint support and query hands for one subject.
+    /// Deterministically samples one contiguous support/query window for one subject.
     ///
-    /// Selection is without replacement and keyed only by persisted metadata:
-    /// `(seed, subject_id, hand_index)`. Selected hands are returned in their
-    /// original dataset order inside each set so hand order is never randomized
-    /// after membership has been chosen.
+    /// The seed chooses only the start of the window. Within that window, the
+    /// first `support_hands` are the evidence available to the Analyzer and the
+    /// immediately following `query_hands` are held-out future observations.
+    /// Membership order is the persisted `hand_index` order; individual hands are
+    /// never shuffled between support and query.
     pub fn sample_support_query(
         &self,
         subject_id: u64,
@@ -165,42 +166,22 @@ impl BehaviourParquetDataset {
             });
         }
 
-        let mut ranked = memberships
+        let window_count = memberships.len() - required + 1;
+        let window_start = splitmix64(config.seed ^ splitmix64(subject_id)) as usize % window_count;
+        let window = &memberships[window_start..window_start + required];
+
+        let support = window[..config.support_hands]
             .iter()
-            .enumerate()
-            .map(|(membership_index, membership)| {
-                let hand_index = self.hands[membership.hand_slot].hand_index;
-                (
-                    sampling_key(config.seed, subject_id, hand_index),
-                    hand_index,
-                    membership_index,
-                )
+            .map(|membership| {
+                self.hands[membership.hand_slot].materialize(membership.subject_position)
             })
-            .collect::<Vec<_>>();
-        ranked.sort_unstable();
-
-        let mut support_indexes = ranked[..config.support_hands]
+            .collect();
+        let query = window[config.support_hands..]
             .iter()
-            .map(|entry| entry.2)
-            .collect::<Vec<_>>();
-        let mut query_indexes = ranked[config.support_hands..required]
-            .iter()
-            .map(|entry| entry.2)
-            .collect::<Vec<_>>();
-
-        // Membership rows are already sorted by persisted hand_index. Sorting
-        // these indexes therefore restores the original dataset order within
-        // support and query after deterministic membership selection.
-        support_indexes.sort_unstable();
-        query_indexes.sort_unstable();
-
-        let materialize = |membership_index: usize| {
-            let membership = memberships[membership_index];
-            self.hands[membership.hand_slot].materialize(membership.subject_position)
-        };
-
-        let support = support_indexes.into_iter().map(materialize).collect();
-        let query = query_indexes.into_iter().map(materialize).collect();
+            .map(|membership| {
+                self.hands[membership.hand_slot].materialize(membership.subject_position)
+            })
+            .collect();
 
         Ok(SupportQuerySample {
             subject_id,
@@ -208,10 +189,6 @@ impl BehaviourParquetDataset {
             query,
         })
     }
-}
-
-fn sampling_key(seed: u64, subject_id: u64, hand_index: u64) -> u64 {
-    splitmix64(seed ^ splitmix64(subject_id) ^ splitmix64(hand_index))
 }
 
 fn splitmix64(mut value: u64) -> u64 {
@@ -310,25 +287,49 @@ mod tests {
     }
 
     #[test]
-    fn sampled_sets_preserve_original_hand_order() {
+    fn support_precedes_query_in_one_contiguous_window() {
         let dataset = dataset(12);
         let config = SupportQueryConfig::new(5, 4, 99).unwrap();
         let sample = dataset.sample_support_query(42, config).unwrap();
 
-        for hands in [sample.support(), sample.query()] {
-            let indexes = hands
-                .iter()
-                .map(|hand| {
-                    hand.hand_id()
-                        .as_str()
-                        .strip_prefix('h')
-                        .unwrap()
-                        .parse::<u64>()
-                        .unwrap()
-                })
-                .collect::<Vec<_>>();
-            assert!(indexes.windows(2).all(|pair| pair[0] < pair[1]));
-        }
+        let indexes = sample
+            .support()
+            .iter()
+            .chain(sample.query())
+            .map(|hand| {
+                hand.hand_id()
+                    .as_str()
+                    .strip_prefix('h')
+                    .unwrap()
+                    .parse::<u64>()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(indexes.len(), config.total_hands());
+        assert!(indexes.windows(2).all(|pair| pair[1] == pair[0] + 1));
+
+        let last_support = sample
+            .support()
+            .last()
+            .unwrap()
+            .hand_id()
+            .as_str()
+            .strip_prefix('h')
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        let first_query = sample
+            .query()
+            .first()
+            .unwrap()
+            .hand_id()
+            .as_str()
+            .strip_prefix('h')
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        assert_eq!(first_query, last_support + 1);
     }
 
     #[test]
