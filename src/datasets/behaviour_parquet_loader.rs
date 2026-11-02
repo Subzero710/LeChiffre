@@ -49,9 +49,8 @@ pub use sampling::{
 mod training_episode;
 pub use training_episode::{
     BehaviourQueryContext, BehaviourQueryDecision, BehaviourQueryTarget, BehaviourTrainingEpisode,
-    BehaviourTrainingEpisodeError, QUERY_CONTEXT_CATEGORICAL_WIDTH,
-    QUERY_CONTEXT_CONTINUOUS_WIDTH, QueryContextCategoricalFeature,
-    QueryContextContinuousFeature,
+    BehaviourTrainingEpisodeError, QUERY_CONTEXT_CATEGORICAL_WIDTH, QUERY_CONTEXT_CONTINUOUS_WIDTH,
+    QueryContextCategoricalFeature, QueryContextContinuousFeature,
 };
 
 /// Fully validated in-memory view of a committed behavioural Parquet dataset.

@@ -640,10 +640,7 @@ mod tests {
         assert_eq!(target.action(), ActionKind::Raise);
         assert!(target.is_all_in());
         assert_eq!(target.decision_time_ms(), 16_777_217);
-        assert_eq!(
-            second.prefix_decision_time_ms(),
-            &[900, 1_830, 600]
-        );
+        assert_eq!(second.prefix_decision_time_ms(), &[900, 1_830, 600]);
     }
 
     #[test]
