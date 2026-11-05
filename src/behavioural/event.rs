@@ -56,41 +56,6 @@ pub enum Street {
     River,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Rank {
-    Two,
-    Three,
-    Four,
-    Five,
-    Six,
-    Seven,
-    Eight,
-    Nine,
-    Ten,
-    Jack,
-    Queen,
-    King,
-    Ace,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Suit {
-    Clubs,
-    Diamonds,
-    Hearts,
-    Spades,
-}
-
-/// A community card visible to every player.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PublicCard {
-    pub rank: Rank,
-    pub suit: Suit,
-}
-
-/// Maximum number of public community cards in NLHE.
-pub const MAX_BOARD_CARDS: usize = 5;
-
 /// Semantic action observed at the table, with check/call and bet/raise kept distinct.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActionKind {
@@ -101,12 +66,11 @@ pub enum ActionKind {
     Raise,
 }
 
-/// Public poker state immediately before a player makes a decision.
+/// Card-free betting state immediately before a player makes a decision.
 /// Monetary values are expressed in big blinds.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecisionContext {
     pub street: Street,
-    pub board: Vec<PublicCard>,
 
     pub actor_position: Position,
     pub players_at_table: usize,
@@ -171,7 +135,7 @@ impl ObservedAction {
     }
 }
 
-/// One behavioural observation: public state before the decision and the observed response.
+/// One behavioural observation: card-free betting state and the observed response.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BehaviourEvent {
     pub hand_id: HandId,
@@ -237,7 +201,7 @@ mod tests {
     fn context() -> DecisionContext {
         DecisionContext {
             street: Street::Preflop,
-            board: vec![],
+
             actor_position: Position::Cutoff,
             players_at_table: 6,
             players_active: 6,
@@ -298,7 +262,7 @@ mod tests {
             0,
             DecisionContext {
                 street: Street::River,
-                board: vec![],
+
                 actor_position: Position::UnderTheGun,
                 players_at_table: 1,
                 players_active: 0,

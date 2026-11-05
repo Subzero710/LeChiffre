@@ -658,9 +658,6 @@ mod tests {
             continuous: vec![continuous],
             continuous_present: vec![[1; crate::behavioural::EVENT_CONTINUOUS_WIDTH]],
             decision_time_ms: vec![timing],
-            board_rank: vec![[0; crate::behavioural::MAX_BOARD_CARDS]],
-            board_suit: vec![[0; crate::behavioural::MAX_BOARD_CARDS]],
-            board_present: vec![[0; crate::behavioural::MAX_BOARD_CARDS]],
         }
     }
 

@@ -19,12 +19,11 @@ use parquet::file::properties::WriterProperties;
 
 use crate::adapters::{AdaptedHand, PlayerId};
 use crate::behavioural::codebook::{
-    ACTION_CODEBOOK, POSITION_CODEBOOK, RANK_CODEBOOK, STREET_CODEBOOK, SUIT_CODEBOOK, action_id,
-    position_id, rank_id, street_id, suit_id,
+    ACTION_CODEBOOK, POSITION_CODEBOOK, STREET_CODEBOOK, action_id, position_id, street_id,
 };
-use crate::behavioural::{BehaviourEvent, HandId, MAX_BOARD_CARDS};
+use crate::behavioural::{BehaviourEvent, HandId};
 
-pub const BEHAVIOUR_PARQUET_SCHEMA_VERSION: u16 = 1;
+pub const BEHAVIOUR_PARQUET_SCHEMA_VERSION: u16 = 2;
 pub const EVENTS_FILE_NAME: &str = "events.parquet";
 pub const SUBJECTS_FILE_NAME: &str = "subjects.parquet";
 pub const SUCCESS_FILE_NAME: &str = "_SUCCESS";
@@ -498,14 +497,6 @@ fn writer_properties(table: &str) -> WriterProperties {
                 "lechiffre.action_codebook".to_string(),
                 ACTION_CODEBOOK.to_string(),
             ),
-            KeyValue::new(
-                "lechiffre.rank_codebook".to_string(),
-                RANK_CODEBOOK.to_string(),
-            ),
-            KeyValue::new(
-                "lechiffre.suit_codebook".to_string(),
-                SUIT_CODEBOOK.to_string(),
-            ),
         ]);
     } else {
         metadata.push(KeyValue::new(
@@ -540,7 +531,7 @@ fn append_final_metadata(writer: &mut ArrowWriter<File>, summary: BehaviourParqu
 }
 
 pub(crate) fn events_schema() -> SchemaRef {
-    let mut fields = vec![
+    let fields = vec![
         Field::new("hand_id", DataType::Utf8, false),
         Field::new("hand_index", DataType::UInt64, false),
         Field::new("sequence_index", DataType::UInt32, false),
@@ -562,19 +553,6 @@ pub(crate) fn events_schema() -> SchemaRef {
         Field::new("street_total_after_bb", DataType::Float32, false),
         Field::new("decision_time_ms", DataType::UInt32, false),
     ];
-
-    for index in 0..MAX_BOARD_CARDS {
-        fields.push(Field::new(
-            format!("board_{index}_rank"),
-            DataType::UInt8,
-            true,
-        ));
-        fields.push(Field::new(
-            format!("board_{index}_suit"),
-            DataType::UInt8,
-            true,
-        ));
-    }
 
     Arc::new(Schema::new(fields))
 }
@@ -622,7 +600,7 @@ fn events_record_batch(
         .collect::<Option<Vec<_>>>()
         .ok_or(BehaviourParquetDatasetError::InternalMissingTiming)?;
 
-    let mut columns: Vec<ArrayRef> = vec![
+    let columns: Vec<ArrayRef> = vec![
         Arc::new(StringArray::from_iter_values(
             event_rows(hands).map(|(event, _)| event.hand_id.as_str()),
         )),
@@ -682,31 +660,6 @@ fn events_record_batch(
         )),
         Arc::new(UInt32Array::from(decision_time_ms)),
     ];
-
-    for card_index in 0..MAX_BOARD_CARDS {
-        columns.push(Arc::new(UInt8Array::from(
-            event_rows(hands)
-                .map(|(event, _)| {
-                    event
-                        .context
-                        .board
-                        .get(card_index)
-                        .map(|card| rank_id(card.rank))
-                })
-                .collect::<Vec<_>>(),
-        )));
-        columns.push(Arc::new(UInt8Array::from(
-            event_rows(hands)
-                .map(|(event, _)| {
-                    event
-                        .context
-                        .board
-                        .get(card_index)
-                        .map(|card| suit_id(card.suit))
-                })
-                .collect::<Vec<_>>(),
-        )));
-    }
 
     let batch = RecordBatch::try_new(events_schema(), columns)?;
     if batch.num_rows() != row_count {
@@ -796,13 +749,6 @@ fn validate_hand_structure(hand: &AdaptedHand) -> Result<(), BehaviourParquetDat
     }
 
     for event in hand.sequence().events() {
-        if event.context.board.len() > MAX_BOARD_CARDS {
-            return Err(BehaviourParquetDatasetError::TooManyPublicCards {
-                hand_id: hand.sequence().hand_id().clone(),
-                sequence_index: event.sequence_index,
-                cards: event.context.board.len(),
-            });
-        }
         if event.context.players_at_table != hand.players().len() {
             return Err(BehaviourParquetDatasetError::PlayerCountMismatch {
                 hand_id: hand.sequence().hand_id().clone(),
@@ -911,11 +857,6 @@ pub enum BehaviourParquetDatasetError {
         hand_id: HandId,
         position: crate::behavioural::Position,
     },
-    TooManyPublicCards {
-        hand_id: HandId,
-        sequence_index: u32,
-        cards: usize,
-    },
     PlayerCountMismatch {
         hand_id: HandId,
         sequence_index: u32,
@@ -1011,14 +952,6 @@ impl fmt::Display for BehaviourParquetDatasetError {
             Self::DuplicatePositionInHand { hand_id, position } => {
                 write!(f, "hand {hand_id} contains duplicate position {position:?}")
             }
-            Self::TooManyPublicCards {
-                hand_id,
-                sequence_index,
-                cards,
-            } => write!(
-                f,
-                "hand {hand_id} event {sequence_index} has {cards} public cards; NLHE allows at most {MAX_BOARD_CARDS}"
-            ),
             Self::PlayerCountMismatch {
                 hand_id,
                 sequence_index,
@@ -1090,14 +1023,14 @@ impl From<ParquetError> for BehaviourParquetDatasetError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_array::{Array, StringArray, UInt8Array, UInt32Array, UInt64Array};
+    use arrow_array::{Array, StringArray, UInt32Array, UInt64Array};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use parquet::file::metadata::ParquetMetaData;
 
     use crate::adapters::ObservedPlayer;
     use crate::behavioural::{
         ActionKind, BehaviourEvent, BehaviourSequence, DecisionContext, ObservedAction, Position,
-        PublicCard, Rank, Street, Suit,
+        Street,
     };
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1121,7 +1054,6 @@ mod tests {
                     0,
                     DecisionContext {
                         street: Street::Preflop,
-                        board: vec![],
                         actor_position: Position::ButtonSmallBlind,
                         players_at_table: 2,
                         players_active: 2,
@@ -1152,20 +1084,6 @@ mod tests {
                     1,
                     DecisionContext {
                         street: Street::Flop,
-                        board: vec![
-                            PublicCard {
-                                rank: Rank::King,
-                                suit: Suit::Spades,
-                            },
-                            PublicCard {
-                                rank: Rank::Eight,
-                                suit: Suit::Hearts,
-                            },
-                            PublicCard {
-                                rank: Rank::Three,
-                                suit: Suit::Clubs,
-                            },
-                        ],
                         actor_position: Position::BigBlind,
                         players_at_table: 2,
                         players_active: 2,
@@ -1278,6 +1196,14 @@ mod tests {
             &DataType::UInt8
         );
 
+        assert_eq!(event_batch.schema().fields().len(), 20);
+        assert!(
+            event_batch
+                .schema()
+                .fields()
+                .iter()
+                .all(|field| !field.name().starts_with("board_"))
+        );
         let timing_index = event_batch.schema().index_of("decision_time_ms").unwrap();
         let timings = event_batch
             .column(timing_index)
@@ -1285,15 +1211,6 @@ mod tests {
             .downcast_ref::<UInt32Array>()
             .unwrap();
         assert_eq!(timings.value(0), exact_timing);
-
-        let board_rank_index = event_batch.schema().index_of("board_0_rank").unwrap();
-        let board_rank = event_batch
-            .column(board_rank_index)
-            .as_any()
-            .downcast_ref::<UInt8Array>()
-            .unwrap();
-        assert!(board_rank.is_null(0));
-        assert_eq!(board_rank.value(1), 13);
 
         let subject_batches = read_all(&dir.join(SUBJECTS_FILE_NAME));
         let subject_batch = &subject_batches[0];
@@ -1336,7 +1253,7 @@ mod tests {
         assert_eq!(builder.metadata().file_metadata().num_rows(), 2);
         assert_eq!(
             metadata_value(builder.metadata(), "lechiffre.behaviour_schema_version"),
-            Some("1")
+            Some("2")
         );
         assert_eq!(
             metadata_value(builder.metadata(), "lechiffre.events_written"),

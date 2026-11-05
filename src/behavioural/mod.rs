@@ -9,8 +9,8 @@ mod profile;
 mod sequence;
 
 pub use event::{
-    ActionKind, BehaviourEvent, BehaviourEventError, DecisionContext, HandId, MAX_BOARD_CARDS,
-    ObservedAction, Position, PublicCard, Rank, Street, Suit,
+    ActionKind, BehaviourEvent, BehaviourEventError, DecisionContext, HandId, ObservedAction,
+    Position, Street,
 };
 pub(crate) use featurizer::FeaturizedHandData;
 pub use featurizer::{

@@ -14,12 +14,12 @@ use parquet::errors::ParquetError;
 use parquet::file::metadata::ParquetMetaData;
 
 use crate::behavioural::codebook::{
-    ACTION_CODEBOOK, POSITION_CODEBOOK, RANK_CODEBOOK, STREET_CODEBOOK, SUIT_CODEBOOK,
-    action_from_id, position_from_id, position_id, rank_from_id, street_from_id, suit_from_id,
+    ACTION_CODEBOOK, POSITION_CODEBOOK, STREET_CODEBOOK, action_from_id, position_from_id,
+    position_id, street_from_id,
 };
 use crate::behavioural::{
     CategoricalFeature, ContinuousFeature, EVENT_CATEGORICAL_WIDTH, EVENT_CONTINUOUS_WIDTH,
-    FeaturizedHand, FeaturizedHandData, HandId, MAX_BOARD_CARDS, Position,
+    FeaturizedHand, FeaturizedHandData, HandId, Position,
 };
 
 use super::behaviour_parquet::{
@@ -182,9 +182,6 @@ struct PersistedHand {
     continuous: Vec<[f32; EVENT_CONTINUOUS_WIDTH]>,
     continuous_present: Vec<[u8; EVENT_CONTINUOUS_WIDTH]>,
     decision_time_ms: Vec<u32>,
-    board_rank: Vec<[i64; MAX_BOARD_CARDS]>,
-    board_suit: Vec<[i64; MAX_BOARD_CARDS]>,
-    board_present: Vec<[u8; MAX_BOARD_CARDS]>,
 }
 
 impl PersistedHand {
@@ -213,9 +210,6 @@ impl PersistedHand {
             continuous: self.continuous.clone(),
             continuous_present: self.continuous_present.clone(),
             decision_time_ms: self.decision_time_ms.clone(),
-            board_rank: self.board_rank.clone(),
-            board_suit: self.board_suit.clone(),
-            board_present: self.board_present.clone(),
         })
     }
 }
@@ -236,9 +230,6 @@ struct HandBuilder {
     continuous: Vec<[f32; EVENT_CONTINUOUS_WIDTH]>,
     continuous_present: Vec<[u8; EVENT_CONTINUOUS_WIDTH]>,
     decision_time_ms: Vec<u32>,
-    board_rank: Vec<[i64; MAX_BOARD_CARDS]>,
-    board_suit: Vec<[i64; MAX_BOARD_CARDS]>,
-    board_present: Vec<[u8; MAX_BOARD_CARDS]>,
 }
 
 impl HandBuilder {
@@ -252,9 +243,6 @@ impl HandBuilder {
             continuous: Vec::new(),
             continuous_present: Vec::new(),
             decision_time_ms: Vec::new(),
-            board_rank: Vec::new(),
-            board_suit: Vec::new(),
-            board_present: Vec::new(),
         }
     }
 
@@ -292,9 +280,6 @@ impl HandBuilder {
         self.continuous.push(row.continuous);
         self.continuous_present.push(row.continuous_present);
         self.decision_time_ms.push(row.decision_time_ms);
-        self.board_rank.push(row.board_rank);
-        self.board_suit.push(row.board_suit);
-        self.board_present.push(row.board_present);
         Ok(())
     }
 
@@ -308,9 +293,6 @@ impl HandBuilder {
             continuous: self.continuous,
             continuous_present: self.continuous_present,
             decision_time_ms: self.decision_time_ms,
-            board_rank: self.board_rank,
-            board_suit: self.board_suit,
-            board_present: self.board_present,
         }
     }
 }
@@ -323,9 +305,6 @@ struct EventRow {
     continuous: [f32; EVENT_CONTINUOUS_WIDTH],
     continuous_present: [u8; EVENT_CONTINUOUS_WIDTH],
     decision_time_ms: u32,
-    board_rank: [i64; MAX_BOARD_CARDS],
-    board_suit: [i64; MAX_BOARD_CARDS],
-    board_present: [u8; MAX_BOARD_CARDS],
 }
 
 fn read_events(
@@ -669,8 +648,6 @@ fn validate_metadata(
         "events" => {
             require_metadata(path, &values, "lechiffre.street_codebook", STREET_CODEBOOK)?;
             require_metadata(path, &values, "lechiffre.action_codebook", ACTION_CODEBOOK)?;
-            require_metadata(path, &values, "lechiffre.rank_codebook", RANK_CODEBOOK)?;
-            require_metadata(path, &values, "lechiffre.suit_codebook", SUIT_CODEBOOK)?;
         }
         "subjects" => {
             require_metadata(
@@ -778,8 +755,6 @@ struct EventColumns<'a> {
     amount_added_bb: &'a Float32Array,
     street_total_after_bb: &'a Float32Array,
     decision_time_ms: &'a UInt32Array,
-    board_rank: Vec<&'a UInt8Array>,
-    board_suit: Vec<&'a UInt8Array>,
 }
 
 impl<'a> EventColumns<'a> {
@@ -839,21 +814,6 @@ impl<'a> EventColumns<'a> {
             ensure_non_nullable("events", name, array)?;
         }
 
-        let mut board_rank = Vec::with_capacity(MAX_BOARD_CARDS);
-        let mut board_suit = Vec::with_capacity(MAX_BOARD_CARDS);
-        for index in 0..MAX_BOARD_CARDS {
-            board_rank.push(typed_column::<UInt8Array>(
-                batch,
-                "events",
-                &format!("board_{index}_rank"),
-            )?);
-            board_suit.push(typed_column::<UInt8Array>(
-                batch,
-                "events",
-                &format!("board_{index}_suit"),
-            )?);
-        }
-
         Ok(Self {
             hand_id,
             hand_index,
@@ -875,8 +835,6 @@ impl<'a> EventColumns<'a> {
             amount_added_bb,
             street_total_after_bb,
             decision_time_ms,
-            board_rank,
-            board_suit,
         })
     }
 
@@ -957,43 +915,6 @@ impl<'a> EventColumns<'a> {
         let decision_time_ms = self.decision_time_ms.value(row);
         continuous[ContinuousFeature::DecisionTimeMs as usize] = decision_time_ms as f32;
 
-        let mut board_rank = [0_i64; MAX_BOARD_CARDS];
-        let mut board_suit = [0_i64; MAX_BOARD_CARDS];
-        let mut board_present = [0_u8; MAX_BOARD_CARDS];
-        let mut encountered_absent_slot = false;
-        for index in 0..MAX_BOARD_CARDS {
-            let rank = self.board_rank[index];
-            let suit = self.board_suit[index];
-            match (rank.is_null(row), suit.is_null(row)) {
-                (true, true) => encountered_absent_slot = true,
-                (false, false) => {
-                    if encountered_absent_slot {
-                        return Err(BehaviourParquetLoadError::NonContiguousBoard {
-                            hand_id: hand_id.clone(),
-                            slot: index,
-                        });
-                    }
-                    let rank_value = rank.value(row);
-                    if rank_from_id(rank_value).is_none() {
-                        return Err(invalid_code("events", "board_rank", rank_value));
-                    }
-                    let suit_value = suit.value(row);
-                    if suit_from_id(suit_value).is_none() {
-                        return Err(invalid_code("events", "board_suit", suit_value));
-                    }
-                    board_rank[index] = i64::from(rank_value);
-                    board_suit[index] = i64::from(suit_value);
-                    board_present[index] = 1;
-                }
-                _ => {
-                    return Err(BehaviourParquetLoadError::BoardRankSuitNullMismatch {
-                        hand_id: hand_id.clone(),
-                        slot: index,
-                    });
-                }
-            }
-        }
-
         Ok(EventRow {
             hand_id,
             sequence_index: self.sequence_index.value(row),
@@ -1007,9 +928,6 @@ impl<'a> EventColumns<'a> {
             continuous,
             continuous_present,
             decision_time_ms,
-            board_rank,
-            board_suit,
-            board_present,
         })
     }
 }
@@ -1188,14 +1106,6 @@ pub enum BehaviourParquetLoadError {
         active: u8,
         table: u8,
     },
-    BoardRankSuitNullMismatch {
-        hand_id: HandId,
-        slot: usize,
-    },
-    NonContiguousBoard {
-        hand_id: HandId,
-        slot: usize,
-    },
     HandIndexOutsideSeenRange {
         hand_index: u64,
         hands_seen: u64,
@@ -1368,14 +1278,6 @@ impl fmt::Display for BehaviourParquetLoadError {
                 f,
                 "hand {hand_id} has {active} active players with only {table} at the table"
             ),
-            Self::BoardRankSuitNullMismatch { hand_id, slot } => write!(
-                f,
-                "hand {hand_id} board slot {slot} has rank/suit NULL mismatch"
-            ),
-            Self::NonContiguousBoard { hand_id, slot } => write!(
-                f,
-                "hand {hand_id} board slot {slot} is present after an absent slot"
-            ),
             Self::HandIndexOutsideSeenRange {
                 hand_index,
                 hands_seen,
@@ -1505,8 +1407,7 @@ mod tests {
     use super::*;
     use crate::adapters::{AdaptedHand, ObservedPlayer, PlayerId};
     use crate::behavioural::{
-        ActionKind, BehaviourEvent, BehaviourSequence, DecisionContext, ObservedAction, PublicCard,
-        Rank, Street, Suit,
+        ActionKind, BehaviourEvent, BehaviourSequence, DecisionContext, ObservedAction, Street,
     };
     use crate::datasets::behaviour_parquet::BehaviourParquetDatasetWriter;
 
@@ -1536,7 +1437,6 @@ mod tests {
                     0,
                     DecisionContext {
                         street: Street::Preflop,
-                        board: vec![],
                         actor_position: Position::ButtonSmallBlind,
                         players_at_table: 2,
                         players_active: 2,
@@ -1567,20 +1467,6 @@ mod tests {
                     1,
                     DecisionContext {
                         street: Street::Flop,
-                        board: vec![
-                            PublicCard {
-                                rank: Rank::King,
-                                suit: Suit::Spades,
-                            },
-                            PublicCard {
-                                rank: Rank::Eight,
-                                suit: Suit::Hearts,
-                            },
-                            PublicCard {
-                                rank: Rank::Three,
-                                suit: Suit::Clubs,
-                            },
-                        ],
                         actor_position: Position::BigBlind,
                         players_at_table: 2,
                         players_active: 2,
@@ -1668,9 +1554,9 @@ mod tests {
             alice.hands()[0].continuous_present()[1][ContinuousFeature::MinRaiseToBb as usize],
             0
         );
-        assert_eq!(alice.hands()[0].board_rank()[1], [13, 8, 3, 0, 0]);
-        assert_eq!(alice.hands()[0].board_present()[1], [1, 1, 1, 0, 0]);
         assert!(dataset.subject_history(999).is_none());
+        assert_eq!(alice.hands()[0].categorical().len(), 2);
+        assert_eq!(alice.hands()[0].continuous().len(), 2);
 
         fs::remove_dir_all(dir).unwrap();
     }

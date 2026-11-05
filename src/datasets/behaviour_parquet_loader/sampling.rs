@@ -202,7 +202,7 @@ fn splitmix64(mut value: u64) -> u64 {
 mod tests {
     use std::collections::{BTreeMap, HashSet};
 
-    use crate::behavioural::{EVENT_CONTINUOUS_WIDTH, HandId, MAX_BOARD_CARDS, Position};
+    use crate::behavioural::{EVENT_CONTINUOUS_WIDTH, HandId, Position};
     use crate::datasets::behaviour_parquet::BehaviourParquetDatasetSummary;
 
     use super::super::{PersistedHand, SubjectMembership};
@@ -218,9 +218,6 @@ mod tests {
             continuous: vec![[0.0; EVENT_CONTINUOUS_WIDTH]],
             continuous_present: vec![[1; EVENT_CONTINUOUS_WIDTH]],
             decision_time_ms: vec![100],
-            board_rank: vec![[0; MAX_BOARD_CARDS]],
-            board_suit: vec![[0; MAX_BOARD_CARDS]],
-            board_present: vec![[0; MAX_BOARD_CARDS]],
         }
     }
 

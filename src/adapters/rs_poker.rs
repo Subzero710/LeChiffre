@@ -7,11 +7,10 @@ use async_trait::async_trait;
 use rs_poker::arena::action::{Action, AgentAction, PlayedActionPayload};
 use rs_poker::arena::game_state::Round;
 use rs_poker::arena::{Agent, GameState, Historian, HistorianError};
-use rs_poker::core::{Card, Suit as RsSuit, Value as RsValue};
 
 use crate::behavioural::{
     ActionKind, BehaviourEvent, BehaviourEventError, BehaviourSequence, BehaviourSequenceError,
-    DecisionContext, HandId, ObservedAction, Position, PublicCard, Rank, Street, Suit,
+    DecisionContext, HandId, ObservedAction, Position, Street,
 };
 
 type DecisionKey = (u128, usize);
@@ -189,7 +188,6 @@ pub(super) fn decision_context(game_state: &GameState) -> DecisionContext {
 
     DecisionContext {
         street: street(game_state.round),
-        board: game_state.board.iter().copied().map(public_card).collect(),
         actor_position: position_for_index(
             game_state.num_players,
             game_state.dealer_idx,
@@ -314,32 +312,6 @@ fn street(round: Round) -> Street {
         Round::Turn => Street::Turn,
         Round::River => Street::River,
         other => panic!("agent decision occurred outside a betting street: {other:?}"),
-    }
-}
-
-fn public_card(card: Card) -> PublicCard {
-    PublicCard {
-        rank: match card.value {
-            RsValue::Two => Rank::Two,
-            RsValue::Three => Rank::Three,
-            RsValue::Four => Rank::Four,
-            RsValue::Five => Rank::Five,
-            RsValue::Six => Rank::Six,
-            RsValue::Seven => Rank::Seven,
-            RsValue::Eight => Rank::Eight,
-            RsValue::Nine => Rank::Nine,
-            RsValue::Ten => Rank::Ten,
-            RsValue::Jack => Rank::Jack,
-            RsValue::Queen => Rank::Queen,
-            RsValue::King => Rank::King,
-            RsValue::Ace => Rank::Ace,
-        },
-        suit: match card.suit {
-            RsSuit::Club => Suit::Clubs,
-            RsSuit::Diamond => Suit::Diamonds,
-            RsSuit::Heart => Suit::Hearts,
-            RsSuit::Spade => Suit::Spades,
-        },
     }
 }
 

@@ -6,22 +6,20 @@
 use std::f32::consts::PI;
 use std::fmt;
 
-use super::codebook::{position_id, rank_id, street_id, suit_id};
+use super::codebook::{position_id, street_id};
 use super::{
     ActionKind, BehaviourEventError, BehaviourLatentConfig, BehaviourLatentModel, BehaviourProfile,
-    DecisionContext, MAX_BOARD_CARDS, ObservedAction,
+    DecisionContext, ObservedAction,
 };
 
 const STREET_COUNT: usize = 4;
 const POSITION_COUNT: usize = 7;
 const NUMERIC_COUNT: usize = 11;
-const BOARD_FEATURES_PER_CARD: usize = 3;
 const ACTION_COUNT: usize = 5;
 const MOVE_EXTRA_FEATURES: usize = 4;
 
 /// Deterministic input encoding width, without the latent vector.
-pub const GENERATOR_CONTEXT_WIDTH: usize =
-    STREET_COUNT + POSITION_COUNT + NUMERIC_COUNT + MAX_BOARD_CARDS * BOARD_FEATURES_PER_CARD;
+pub const GENERATOR_CONTEXT_WIDTH: usize = STREET_COUNT + POSITION_COUNT + NUMERIC_COUNT;
 /// Action kind, amount, commitment, relative size, and all-in flag.
 pub const GENERATOR_MOVE_WIDTH: usize = ACTION_COUNT + MOVE_EXTRA_FEATURES;
 
@@ -265,9 +263,6 @@ impl NeuralBehaviourGenerator {
             });
         }
         context.validate().map_err(GeneratorError::InvalidContext)?;
-        if context.board.len() > MAX_BOARD_CARDS {
-            return Err(GeneratorError::TooManyBoardCards);
-        }
         if legal_moves.is_empty() {
             return Err(GeneratorError::NoLegalMoves);
         }
@@ -371,12 +366,6 @@ fn context_features(c: &DecisionContext) -> Vec<f32> {
         f32::from(c.bet_or_raise_count_this_street) / 8.0,
     ];
     values[start..start + NUMERIC_COUNT].copy_from_slice(&continuous);
-    let board_start = start + NUMERIC_COUNT;
-    for (index, card) in c.board.iter().enumerate() {
-        values[board_start + index * 3] = f32::from(rank_id(card.rank)) / 14.0;
-        values[board_start + index * 3 + 1] = f32::from(suit_id(card.suit)) / 4.0;
-        values[board_start + index * 3 + 2] = 1.0;
-    }
     values
 }
 
@@ -404,7 +393,6 @@ pub enum GeneratorError {
     NonFiniteParameter,
     NonFiniteOutput,
     InvalidContext(BehaviourEventError),
-    TooManyBoardCards,
     NoLegalMoves,
     TooManyLegalMoves,
     DuplicateLegalMove,
@@ -430,7 +418,7 @@ mod tests {
     fn context() -> DecisionContext {
         DecisionContext {
             street: Street::Flop,
-            board: vec![],
+
             actor_position: Position::Button,
             players_at_table: 2,
             players_active: 2,
@@ -486,6 +474,7 @@ mod tests {
 
     #[test]
     fn probabilities_are_finite_and_normalized() {
+        assert_eq!(GENERATOR_CONTEXT_WIDTH, 22);
         let g = generator(2);
         let z = g.latent.profile(vec![0.0, 0.0]).unwrap();
         let p = g.predict(&z, &context(), &moves()).unwrap();

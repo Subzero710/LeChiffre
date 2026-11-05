@@ -99,7 +99,6 @@ mod tests {
             sequence_index,
             DecisionContext {
                 street: Street::Preflop,
-                board: vec![],
                 actor_position: position,
                 players_at_table: 6,
                 players_active: 6,

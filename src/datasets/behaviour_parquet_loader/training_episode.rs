@@ -4,7 +4,7 @@ use std::fmt;
 use crate::behavioural::codebook::action_from_id;
 use crate::behavioural::{
     ActionKind, CategoricalFeature, ContinuousFeature, EVENT_CATEGORICAL_WIDTH,
-    EVENT_CONTINUOUS_WIDTH, FeaturizedHand, HandId, MAX_BOARD_CARDS, Position,
+    EVENT_CONTINUOUS_WIDTH, FeaturizedHand, HandId, Position,
 };
 
 use super::sampling::SupportQuerySample;
@@ -53,9 +53,6 @@ pub struct BehaviourQueryContext {
     categorical: [i64; QUERY_CONTEXT_CATEGORICAL_WIDTH],
     continuous: [f32; QUERY_CONTEXT_CONTINUOUS_WIDTH],
     continuous_present: [u8; QUERY_CONTEXT_CONTINUOUS_WIDTH],
-    board_rank: [i64; MAX_BOARD_CARDS],
-    board_suit: [i64; MAX_BOARD_CARDS],
-    board_present: [u8; MAX_BOARD_CARDS],
 }
 
 impl BehaviourQueryContext {
@@ -69,18 +66,6 @@ impl BehaviourQueryContext {
 
     pub fn continuous_present(&self) -> &[u8; QUERY_CONTEXT_CONTINUOUS_WIDTH] {
         &self.continuous_present
-    }
-
-    pub fn board_rank(&self) -> &[i64; MAX_BOARD_CARDS] {
-        &self.board_rank
-    }
-
-    pub fn board_suit(&self) -> &[i64; MAX_BOARD_CARDS] {
-        &self.board_suit
-    }
-
-    pub fn board_present(&self) -> &[u8; MAX_BOARD_CARDS] {
-        &self.board_present
     }
 }
 
@@ -172,18 +157,6 @@ impl<'a> BehaviourQueryDecision<'a> {
         &self.hand.decision_time_ms()[..self.index.row]
     }
 
-    pub fn prefix_board_rank(&self) -> &[[i64; MAX_BOARD_CARDS]] {
-        &self.hand.board_rank()[..self.index.row]
-    }
-
-    pub fn prefix_board_suit(&self) -> &[[i64; MAX_BOARD_CARDS]] {
-        &self.hand.board_suit()[..self.index.row]
-    }
-
-    pub fn prefix_board_present(&self) -> &[[u8; MAX_BOARD_CARDS]] {
-        &self.hand.board_present()[..self.index.row]
-    }
-
     pub fn context(&self) -> BehaviourQueryContext {
         let categorical = self.hand.categorical()[self.index.row];
         let continuous = self.hand.continuous()[self.index.row];
@@ -218,9 +191,6 @@ impl<'a> BehaviourQueryDecision<'a> {
                 continuous_present[ContinuousFeature::MinRaiseToBb as usize],
                 continuous_present[ContinuousFeature::BetOrRaiseCountThisStreet as usize],
             ],
-            board_rank: self.hand.board_rank()[self.index.row],
-            board_suit: self.hand.board_suit()[self.index.row],
-            board_present: self.hand.board_present()[self.index.row],
         }
     }
 
@@ -463,9 +433,6 @@ fn validate_hand_shape(hand: &FeaturizedHand) -> Result<(), BehaviourTrainingEpi
         ("continuous", hand.continuous().len()),
         ("continuous_present", hand.continuous_present().len()),
         ("decision_time_ms", hand.decision_time_ms().len()),
-        ("board_rank", hand.board_rank().len()),
-        ("board_suit", hand.board_suit().len()),
-        ("board_present", hand.board_present().len()),
     ] {
         if observed != expected {
             return Err(BehaviourTrainingEpisodeError::InconsistentHandShape {
@@ -501,9 +468,6 @@ mod tests {
             continuous,
             continuous_present: vec![[1; EVENT_CONTINUOUS_WIDTH]; len],
             decision_time_ms: exact_timing,
-            board_rank: vec![[0; MAX_BOARD_CARDS]; len],
-            board_suit: vec![[0; MAX_BOARD_CARDS]; len],
-            board_present: vec![[0; MAX_BOARD_CARDS]; len],
         })
     }
 

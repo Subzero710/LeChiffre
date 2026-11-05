@@ -1,9 +1,5 @@
-use std::fmt;
-
-use super::codebook::{action_id, position_id, rank_id, street_id, suit_id};
-use super::{
-    BehaviourHistory, BehaviourSequence, HandId, MAX_BOARD_CARDS, Position, PublicCard, SubjectHand,
-};
+use super::codebook::{action_id, position_id, street_id};
+use super::{BehaviourHistory, BehaviourSequence, HandId, Position, SubjectHand};
 
 /// Width of the categorical event matrix produced by [`BehaviourFeaturizer`].
 pub const EVENT_CATEGORICAL_WIDTH: usize = 5;
@@ -62,9 +58,6 @@ pub struct FeaturizedHand {
     continuous: Vec<[f32; EVENT_CONTINUOUS_WIDTH]>,
     continuous_present: Vec<[u8; EVENT_CONTINUOUS_WIDTH]>,
     decision_time_ms: Vec<u32>,
-    board_rank: Vec<[i64; MAX_BOARD_CARDS]>,
-    board_suit: Vec<[i64; MAX_BOARD_CARDS]>,
-    board_present: Vec<[u8; MAX_BOARD_CARDS]>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -76,9 +69,6 @@ pub(crate) struct FeaturizedHandData {
     pub(crate) continuous: Vec<[f32; EVENT_CONTINUOUS_WIDTH]>,
     pub(crate) continuous_present: Vec<[u8; EVENT_CONTINUOUS_WIDTH]>,
     pub(crate) decision_time_ms: Vec<u32>,
-    pub(crate) board_rank: Vec<[i64; MAX_BOARD_CARDS]>,
-    pub(crate) board_suit: Vec<[i64; MAX_BOARD_CARDS]>,
-    pub(crate) board_present: Vec<[u8; MAX_BOARD_CARDS]>,
 }
 
 impl FeaturizedHand {
@@ -91,9 +81,6 @@ impl FeaturizedHand {
             continuous: data.continuous,
             continuous_present: data.continuous_present,
             decision_time_ms: data.decision_time_ms,
-            board_rank: data.board_rank,
-            board_suit: data.board_suit,
-            board_present: data.board_present,
         }
     }
 
@@ -137,19 +124,6 @@ impl FeaturizedHand {
     /// Exact source timing retained separately from the model-ready f32 matrix.
     pub fn decision_time_ms(&self) -> &[u32] {
         &self.decision_time_ms
-    }
-
-    pub fn board_rank(&self) -> &[[i64; MAX_BOARD_CARDS]] {
-        &self.board_rank
-    }
-
-    pub fn board_suit(&self) -> &[[i64; MAX_BOARD_CARDS]] {
-        &self.board_suit
-    }
-
-    /// Presence mask for the five public-card slots (`1` = card present).
-    pub fn board_present(&self) -> &[[u8; MAX_BOARD_CARDS]] {
-        &self.board_present
     }
 }
 
@@ -251,19 +225,8 @@ impl BehaviourFeaturizer {
         let mut continuous = Vec::with_capacity(len);
         let mut continuous_present = Vec::with_capacity(len);
         let mut decision_time_ms = Vec::with_capacity(len);
-        let mut board_rank = Vec::with_capacity(len);
-        let mut board_suit = Vec::with_capacity(len);
-        let mut board_present = Vec::with_capacity(len);
 
         for event in sequence.events() {
-            if event.context.board.len() > MAX_BOARD_CARDS {
-                return Err(BehaviourFeaturizerError::TooManyPublicCards {
-                    hand_id: event.hand_id.clone(),
-                    sequence_index: event.sequence_index,
-                    cards: event.context.board.len(),
-                });
-            }
-
             sequence_indexes.push(event.sequence_index);
             categorical.push([
                 i64::from(street_id(event.context.street)),
@@ -309,11 +272,6 @@ impl BehaviourFeaturizer {
             continuous.push(values);
             continuous_present.push(present);
             decision_time_ms.push(exact_decision_time_ms);
-
-            let (ranks, suits, cards_present) = encode_board(&event.context.board);
-            board_rank.push(ranks);
-            board_suit.push(suits);
-            board_present.push(cards_present);
         }
 
         Ok(Some(FeaturizedHand {
@@ -324,72 +282,25 @@ impl BehaviourFeaturizer {
             continuous,
             continuous_present,
             decision_time_ms,
-            board_rank,
-            board_suit,
-            board_present,
         }))
     }
 }
 
-fn encode_board(
-    board: &[PublicCard],
-) -> (
-    [i64; MAX_BOARD_CARDS],
-    [i64; MAX_BOARD_CARDS],
-    [u8; MAX_BOARD_CARDS],
-) {
-    let mut ranks = [0; MAX_BOARD_CARDS];
-    let mut suits = [0; MAX_BOARD_CARDS];
-    let mut present = [0; MAX_BOARD_CARDS];
-
-    for (index, card) in board.iter().enumerate() {
-        ranks[index] = i64::from(rank_id(card.rank));
-        suits[index] = i64::from(suit_id(card.suit));
-        present[index] = 1;
-    }
-
-    (ranks, suits, present)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BehaviourFeaturizerError {
-    TooManyPublicCards {
-        hand_id: HandId,
-        sequence_index: u32,
-        cards: usize,
-    },
-}
-
-impl fmt::Display for BehaviourFeaturizerError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::TooManyPublicCards {
-                hand_id,
-                sequence_index,
-                cards,
-            } => write!(
-                f,
-                "hand {hand_id} event {sequence_index} has {cards} public cards; NLHE allows at most {MAX_BOARD_CARDS}"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for BehaviourFeaturizerError {}
+/// Feature encoding has no recoverable error after context validation.
+/// Missing timing remains represented as `Ok(None)`.
+pub type BehaviourFeaturizerError = std::convert::Infallible;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::behavioural::{
-        ActionKind, BehaviourEvent, DecisionContext, ObservedAction, Rank, Street, Suit,
-    };
+    use crate::behavioural::{ActionKind, BehaviourEvent, DecisionContext, ObservedAction, Street};
 
     fn event(
         hand_id: &str,
         sequence_index: u32,
         position: Position,
         action: ActionKind,
-        board: Vec<PublicCard>,
+        street: Street,
         min_raise_to_bb: Option<f32>,
         decision_time_ms: Option<u32>,
     ) -> BehaviourEvent {
@@ -397,12 +308,7 @@ mod tests {
             hand_id,
             sequence_index,
             DecisionContext {
-                street: if board.is_empty() {
-                    Street::Preflop
-                } else {
-                    Street::Flop
-                },
-                board,
+                street,
                 actor_position: position,
                 players_at_table: 6,
                 players_active: 4,
@@ -435,7 +341,7 @@ mod tests {
                 0,
                 Position::Cutoff,
                 ActionKind::Call,
-                vec![],
+                Street::Preflop,
                 None,
                 Some(18_400),
             ))
@@ -477,7 +383,7 @@ mod tests {
                 0,
                 Position::Hijack,
                 ActionKind::Raise,
-                vec![],
+                Street::Preflop,
                 Some(5.0),
                 Some(900),
             ))
@@ -488,7 +394,7 @@ mod tests {
                 1,
                 Position::Button,
                 ActionKind::Call,
-                vec![],
+                Street::Preflop,
                 Some(5.0),
                 None,
             ))
@@ -512,7 +418,7 @@ mod tests {
                 0,
                 Position::Button,
                 ActionKind::Call,
-                vec![],
+                Street::Preflop,
                 Some(2.0),
                 Some(exact),
             ))
@@ -535,7 +441,7 @@ mod tests {
                 0,
                 Position::Button,
                 ActionKind::Raise,
-                vec![],
+                Street::Preflop,
                 Some(9.0),
                 Some(18_400),
             ))
@@ -563,7 +469,7 @@ mod tests {
                 0,
                 Position::Hijack,
                 ActionKind::Raise,
-                vec![],
+                Street::Preflop,
                 Some(5.0),
                 Some(900),
             ))
@@ -574,7 +480,7 @@ mod tests {
                 1,
                 Position::Button,
                 ActionKind::Call,
-                vec![],
+                Street::Preflop,
                 Some(5.0),
                 Some(2_100),
             ))
@@ -598,42 +504,31 @@ mod tests {
     }
 
     #[test]
-    fn board_uses_fixed_slots_with_explicit_presence_mask() {
-        let flop = vec![
-            PublicCard {
-                rank: Rank::King,
-                suit: Suit::Spades,
-            },
-            PublicCard {
-                rank: Rank::Eight,
-                suit: Suit::Hearts,
-            },
-            PublicCard {
-                rank: Rank::Three,
-                suit: Suit::Clubs,
-            },
-        ];
-        let mut sequence = BehaviourSequence::new("hand-4");
+    fn encodes_street_without_card_inputs() {
+        let mut sequence = BehaviourSequence::new("hand-flop");
         sequence
             .push(event(
-                "hand-4",
+                "hand-flop",
                 0,
                 Position::BigBlind,
                 ActionKind::Check,
-                flop,
+                Street::Flop,
                 Some(2.0),
                 Some(320),
             ))
             .unwrap();
-
         let encoded = BehaviourFeaturizer::new()
-            .featurize_sequence(&sequence, Position::Button)
+            .featurize_sequence(&sequence, Position::BigBlind)
             .unwrap()
             .unwrap();
-
-        assert_eq!(encoded.board_rank()[0], [13, 8, 3, 0, 0]);
-        assert_eq!(encoded.board_suit()[0], [4, 3, 1, 0, 0]);
-        assert_eq!(encoded.board_present()[0], [1, 1, 1, 0, 0]);
+        assert_eq!(
+            encoded.categorical()[0][CategoricalFeature::Street as usize],
+            1
+        );
+        assert_eq!(
+            encoded.continuous()[0][ContinuousFeature::DecisionTimeMs as usize],
+            320.0
+        );
     }
 
     #[test]
@@ -645,7 +540,7 @@ mod tests {
                 0,
                 Position::UnderTheGun,
                 ActionKind::Fold,
-                vec![],
+                Street::Preflop,
                 Some(2.0),
                 Some(700),
             ))
@@ -658,7 +553,7 @@ mod tests {
                 0,
                 Position::Button,
                 ActionKind::Call,
-                vec![],
+                Street::Preflop,
                 Some(3.0),
                 Some(1_000),
             ))
@@ -669,7 +564,7 @@ mod tests {
                 1,
                 Position::BigBlind,
                 ActionKind::Check,
-                vec![],
+                Street::Preflop,
                 Some(3.0),
                 None,
             ))
@@ -699,7 +594,7 @@ mod tests {
                 0,
                 Position::UnderTheGun,
                 ActionKind::Fold,
-                vec![],
+                Street::Preflop,
                 Some(2.0),
                 Some(700),
             ))
@@ -712,7 +607,7 @@ mod tests {
                 0,
                 Position::Button,
                 ActionKind::Call,
-                vec![],
+                Street::Preflop,
                 Some(3.0),
                 Some(1_000),
             ))
@@ -723,7 +618,7 @@ mod tests {
                 1,
                 Position::BigBlind,
                 ActionKind::Check,
-                vec![],
+                Street::Preflop,
                 Some(3.0),
                 Some(400),
             ))
@@ -745,57 +640,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_more_than_five_public_cards_instead_of_truncating() {
-        let board = vec![
-            PublicCard {
-                rank: Rank::Two,
-                suit: Suit::Clubs,
-            },
-            PublicCard {
-                rank: Rank::Three,
-                suit: Suit::Clubs,
-            },
-            PublicCard {
-                rank: Rank::Four,
-                suit: Suit::Clubs,
-            },
-            PublicCard {
-                rank: Rank::Five,
-                suit: Suit::Clubs,
-            },
-            PublicCard {
-                rank: Rank::Six,
-                suit: Suit::Clubs,
-            },
-            PublicCard {
-                rank: Rank::Seven,
-                suit: Suit::Clubs,
-            },
-        ];
-        let mut sequence = BehaviourSequence::new("bad-hand");
-        sequence
-            .push(event(
-                "bad-hand",
-                0,
-                Position::Button,
-                ActionKind::Check,
-                board,
-                Some(2.0),
-                Some(10),
-            ))
-            .unwrap();
-
-        assert_eq!(
-            BehaviourFeaturizer::new().featurize_sequence(&sequence, Position::Button),
-            Err(BehaviourFeaturizerError::TooManyPublicCards {
-                hand_id: HandId::from("bad-hand"),
-                sequence_index: 0,
-                cards: 6,
-            })
-        );
-    }
-
-    #[test]
     fn categorical_codebook_is_stable() {
         assert_eq!(street_id(Street::Preflop), 0);
         assert_eq!(street_id(Street::River), 3);
@@ -803,9 +647,5 @@ mod tests {
         assert_eq!(position_id(Position::BigBlind), 6);
         assert_eq!(action_id(ActionKind::Fold), 0);
         assert_eq!(action_id(ActionKind::Raise), 4);
-        assert_eq!(rank_id(Rank::Two), 2);
-        assert_eq!(rank_id(Rank::Ace), 14);
-        assert_eq!(suit_id(Suit::Clubs), 1);
-        assert_eq!(suit_id(Suit::Spades), 4);
     }
 }

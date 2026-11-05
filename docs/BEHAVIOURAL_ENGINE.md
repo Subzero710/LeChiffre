@@ -6,11 +6,27 @@ Statut : **conception et noyau d'inférence non entraîné**. Aucun blueprint de
 
 Le Behavioral Engine apprend un **espace latent comportemental continu** `Z`, **sans labels de joueurs** et sans profils discrets prédéfinis (TAG, LAG, etc.).
 
-- **Generator G** : `G(contexte public C, z) -> distribution de comportements observables`. Génère les probabilités d'actions, de tailles de mises et de temps de décision. Tirer une `ObservedAction` de cette distribution est une opération distincte.
+- **Generator G** : `G(contexte comportemental C, z) -> distribution de comportements observables`. Génère les probabilités d'actions, de tailles de mises et de temps de décision. Tirer une `ObservedAction` de cette distribution est une opération distincte.
 - **Analyzer A** (à développer) : `A(C, ObservedAction) -> distribution de probabilité sur Z`. Une observation isolée ne doit pas être traitée comme l'identification certaine d'un Z unique.
 - **Blueprint** (futur composant externe) : stratégie de référence entraînée séparément, qui pourra ultérieurement être injectée dans le système. **G ne suppose pas qu'il existe actuellement.**
 
 A et G décrivent et génèrent des comportements. La recherche d'un profil contre-stratégique et le mélange final avec la stratégie GTO sont explicitement **hors périmètre** de ce module.
+
+## Frontière stricte : aucune carte dans le Behavioral Engine
+
+Le contexte `DecisionContext` ne contient que les informations situationnelles
+et financières observables nécessaires au comportement : street, position,
+participants, pot, stacks, engagements, mise à payer, minimum de relance et
+nombre de bets/raises précédents. La street n'est **pas** une information de
+carte. `ObservedAction` ne contient que le type d'action, ses montants, le
+statut all-in et le temps de décision. Aucun rang, aucune couleur, aucune
+carte privée et aucune carte publique ne fait partie du contrat.
+
+Les adaptateurs du moteur de jeu peuvent lire les cartes pour rejouer une main
+à leur niveau, mais ne les transmettent **jamais** au pipeline comportemental.
+Les tenseurs et fichiers Parquet du Behavioral Engine n'ont aucun champ de carte.
+Le Parquet passe de **v1 à v2** : les fichiers v1 doivent être régénérés depuis
+la source avant utilisation avec le loader v2. Pas de conversion silencieuse.
 
 ## Quatre propriétés de référence
 
@@ -48,7 +64,7 @@ Les cartes de densité, d'incertitude et de comportement sont distinctes des car
 
 `src/behavioural/generator.rs` est un **noyau d'inférence avec poids explicites** :
 
-1. Encode `DecisionContext` (street, position, valeurs en BB, cartes publiques, masque des valeurs absentes) et `BehaviourProfile` (latent Z).
+1. Encode `DecisionContext` (street, position, valeurs en BB, masque des valeurs absentes), **sans cartes**, et `BehaviourProfile` (latent Z).
 2. Évalue par un petit MLP chaque **mouvement légal candidat** fourni par le moteur de jeu.
 3. Renvoie une distribution normalisée sur ces mouvements, plus les paramètres d'une distribution log-normale de timing.
 4. Échantillonne un `ObservedAction` uniquement parmi les mouvements fournis, avec des valeurs uniformes explicites, reproductibles.
