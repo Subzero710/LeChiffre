@@ -1,8 +1,9 @@
-//! Behavioural Engine data contracts.
+//! Behavioural Engine data contracts and untrained conditional generator.
 
 pub(crate) mod codebook;
 mod event;
 mod featurizer;
+mod generator;
 mod history;
 mod profile;
 mod sequence;
@@ -15,6 +16,10 @@ pub(crate) use featurizer::FeaturizedHandData;
 pub use featurizer::{
     BehaviourFeaturizer, BehaviourFeaturizerError, CategoricalFeature, ContinuousFeature,
     EVENT_CATEGORICAL_WIDTH, EVENT_CONTINUOUS_WIDTH, FeaturizedHand, FeaturizedHistory,
+};
+pub use generator::{
+    BehaviourPolicy, DenseLayer, GENERATOR_CONTEXT_WIDTH, GENERATOR_MOVE_WIDTH, GeneratorDraws,
+    GeneratorError, GeneratorParameters, LegalMove, NeuralBehaviourGenerator, TimingDistribution,
 };
 pub use history::{BehaviourHistory, SubjectHand};
 pub use profile::{
@@ -34,16 +39,30 @@ pub trait BehaviourAnalyzer: BehaviourLatentModel {
     fn analyze(&self, support: &[FeaturizedHand]) -> Result<BehaviourProfile, Self::Error>;
 }
 
-/// Generates behaviour for a supplied profile from the public history and current context.
+/// Predicts a distribution over externally provided legal moves from (context, Z).
+/// A separately supplied random draw produces one observed action from this policy.
 pub trait BehaviourGenerator: BehaviourLatentModel {
     type Error;
 
-    fn generate(
+    fn predict(
         &self,
         profile: &BehaviourProfile,
-        sequence: &BehaviourSequence,
         context: &DecisionContext,
-    ) -> Result<ObservedAction, Self::Error>;
+        legal_moves: &[LegalMove],
+    ) -> Result<BehaviourPolicy, Self::Error>;
+}
+
+impl BehaviourGenerator for NeuralBehaviourGenerator {
+    type Error = GeneratorError;
+
+    fn predict(
+        &self,
+        profile: &BehaviourProfile,
+        context: &DecisionContext,
+        legal_moves: &[LegalMove],
+    ) -> Result<BehaviourPolicy, Self::Error> {
+        NeuralBehaviourGenerator::predict(self, profile, context, legal_moves)
+    }
 }
 
 /// Rejects Analyzer/Generator pairs trained with different latent dimensions.
@@ -129,13 +148,13 @@ mod tests {
     impl BehaviourGenerator for StubGenerator {
         type Error = std::convert::Infallible;
 
-        fn generate(
+        fn predict(
             &self,
             _profile: &BehaviourProfile,
-            _sequence: &BehaviourSequence,
             _context: &DecisionContext,
-        ) -> Result<ObservedAction, Self::Error> {
-            unreachable!("latent contract test does not generate poker actions")
+            _legal_moves: &[LegalMove],
+        ) -> Result<BehaviourPolicy, Self::Error> {
+            unreachable!("latent contract test does not predict poker actions")
         }
     }
 
