@@ -1,0 +1,139 @@
+{
+  "players": 6,
+  "stack": 20,
+  "big_blind": 2,
+  "hands": 6000,
+  "cycles": 1000,
+  "seed": 123,
+  "seats": [
+    {
+      "seat": 1,
+      "agent": "noregrets",
+      "config": {
+        "metadata": {
+          "big_blind": 2,
+          "blueprint_sha256": "263928f216707efd518e53ae975d62e92d4480695c4b9b32f245c8b449679b2c",
+          "format": "noregrets-rs-agent-unlimited-v2",
+          "iterations": 10000,
+          "num_players": 6,
+          "seed": 42,
+          "small_blind": 1,
+          "source": "757f7692738069522195d2b486eec60a8b010c0c",
+          "stack": 20
+        },
+        "reference": "references/noregrets-6max-10bb-agent-10000-seed42",
+        "type": "noregrets"
+      },
+      "total_bb": 690.0,
+      "bb_per_100": 11.499999999999968,
+      "ci95": [
+        -24.15917568763346,
+        47.15917568763339
+      ],
+      "noregrets": {
+        "decisions": 7435,
+        "unseen": 2257,
+        "decisions_after_off_tree_bet": 636,
+        "errors": []
+      }
+    },
+    {
+      "seat": 2,
+      "agent": "random",
+      "config": {
+        "percent_call": [
+          0.5,
+          0.6,
+          0.45
+        ],
+        "percent_fold": [
+          0.25,
+          0.3,
+          0.5
+        ],
+        "type": "random"
+      },
+      "total_bb": -3450.0,
+      "bb_per_100": -57.50000000000003,
+      "ci95": [
+        -90.65719660732226,
+        -24.342803392677794
+      ],
+      "noregrets": null
+    },
+    {
+      "seat": 3,
+      "agent": "calling",
+      "config": {
+        "type": "calling"
+      },
+      "total_bb": -105.5,
+      "bb_per_100": -1.758333333333355,
+      "ci95": [
+        -42.75746620285731,
+        39.2407995361906
+      ],
+      "noregrets": null
+    },
+    {
+      "seat": 4,
+      "agent": "all_in",
+      "config": {
+        "type": "all_in"
+      },
+      "total_bb": -1769.5,
+      "bb_per_100": -29.491666666666678,
+      "ci95": [
+        -69.05969737430031,
+        10.076364040966954
+      ],
+      "noregrets": null
+    },
+    {
+      "seat": 5,
+      "agent": "cfr_basic",
+      "config": {
+        "exploration": {
+          "budget": [
+            {
+              "millis": 50,
+              "type": "deadline"
+            },
+            {
+              "recursive_widths": [],
+              "type": "max_width"
+            }
+          ]
+        },
+        "hand_estimator": "uniform",
+        "type": "cfr_basic"
+      },
+      "total_bb": 4939.5,
+      "bb_per_100": 82.32500000000005,
+      "ci95": [
+        50.233832403068185,
+        114.4161675969319
+      ],
+      "noregrets": null
+    },
+    {
+      "seat": 6,
+      "agent": "random_pot_control",
+      "config": {
+        "percent_call": [
+          0.5,
+          0.3
+        ],
+        "type": "random_pot_control"
+      },
+      "total_bb": -304.5,
+      "bb_per_100": -5.075000000000003,
+      "ci95": [
+        -15.072695027939119,
+        4.922695027939113
+      ],
+      "noregrets": null
+    }
+  ],
+  "exact_exploitability": null
+}

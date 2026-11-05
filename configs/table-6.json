@@ -1,0 +1,11 @@
+{
+  "stack": 20,
+  "players": [
+    {"type": "noregrets", "runs": "runs/noregrets-100bb"},
+    {"type": "random"},
+    {"type": "calling"},
+    {"type": "all_in"},
+    {"type": "cfr_basic", "hand_estimator": "uniform"},
+    {"type": "random_pot_control", "percent_call": [0.5, 0.3]}
+  ]
+}

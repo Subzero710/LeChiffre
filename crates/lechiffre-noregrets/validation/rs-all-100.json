@@ -1,0 +1,197 @@
+{
+  "cfr_reproducibility": "CFR agents use internal thread RNG; seed alone does not guarantee identical CFR results",
+  "engine": "rs_poker HoldemSimulation",
+  "exact_exploitability": null,
+  "reference": {
+    "big_blind": 2,
+    "blueprint_sha256": "e54eb25a0571d2ca5b64bc4cbb290fb9c502d12fc81af03dabe688226bd96bea",
+    "format": "noregrets-rs-agent-hu-unlimited-v1",
+    "iterations": 10000,
+    "seed": 42,
+    "small_blind": 1,
+    "source": "757f7692738069522195d2b486eec60a8b010c0c",
+    "stack": 20
+  },
+  "reports": [
+    {
+      "bb_per_100": 13.499999999999998,
+      "ci95": [
+        -61.63324256100172,
+        88.63324256100172
+      ],
+      "hands": 100,
+      "noregrets": {
+        "decisions": 167,
+        "decisions_after_off_tree_bet": 56,
+        "errors": [],
+        "unseen": 11
+      },
+      "opponent": "random",
+      "opponent_config": {
+        "percent_call": [
+          0.5,
+          0.6,
+          0.45
+        ],
+        "percent_fold": [
+          0.25,
+          0.3,
+          0.5
+        ],
+        "type": "random"
+      },
+      "seed": 123,
+      "total_bb": 13.5
+    },
+    {
+      "bb_per_100": -13.500000000000007,
+      "ci95": [
+        -91.91368264502051,
+        64.91368264502049
+      ],
+      "hands": 100,
+      "noregrets": {
+        "decisions": 248,
+        "decisions_after_off_tree_bet": 0,
+        "errors": [],
+        "unseen": 0
+      },
+      "opponent": "calling",
+      "opponent_config": {
+        "type": "calling"
+      },
+      "seed": 123,
+      "total_bb": -13.5
+    },
+    {
+      "bb_per_100": -39.99999999999999,
+      "ci95": [
+        -131.24567943450032,
+        51.245679434500325
+      ],
+      "hands": 100,
+      "noregrets": {
+        "decisions": 128,
+        "decisions_after_off_tree_bet": 0,
+        "errors": [],
+        "unseen": 1
+      },
+      "opponent": "all_in",
+      "opponent_config": {
+        "type": "all_in"
+      },
+      "seed": 123,
+      "total_bb": -40.0
+    },
+    {
+      "bb_per_100": 50.99999999999998,
+      "ci95": [
+        41.20418082044365,
+        60.795819179556304
+      ],
+      "hands": 100,
+      "noregrets": {
+        "decisions": 66,
+        "decisions_after_off_tree_bet": 0,
+        "errors": [],
+        "unseen": 0
+      },
+      "opponent": "folding",
+      "opponent_config": {
+        "type": "folding"
+      },
+      "seed": 123,
+      "total_bb": 51.0
+    },
+    {
+      "bb_per_100": -33.5,
+      "ci95": [
+        -123.12689538338283,
+        56.12689538338283
+      ],
+      "hands": 100,
+      "noregrets": {
+        "decisions": 235,
+        "decisions_after_off_tree_bet": 66,
+        "errors": [],
+        "unseen": 12
+      },
+      "opponent": "random_pot_control",
+      "opponent_config": {
+        "percent_call": [
+          0.5,
+          0.3
+        ],
+        "type": "random_pot_control"
+      },
+      "seed": 123,
+      "total_bb": -33.5
+    },
+    {
+      "bb_per_100": -14.999999999999996,
+      "ci95": [
+        -87.97344923866997,
+        57.97344923866997
+      ],
+      "hands": 100,
+      "noregrets": {
+        "decisions": 138,
+        "decisions_after_off_tree_bet": 0,
+        "errors": [],
+        "unseen": 0
+      },
+      "opponent": "cfr_basic",
+      "opponent_config": {
+        "exploration": {
+          "budget": [
+            {
+              "millis": 50,
+              "type": "deadline"
+            },
+            {
+              "recursive_widths": [],
+              "type": "max_width"
+            }
+          ]
+        },
+        "hand_estimator": "uniform",
+        "type": "cfr_basic"
+      },
+      "seed": 123,
+      "total_bb": -15.0
+    },
+    {
+      "bb_per_100": -72.5,
+      "ci95": [
+        -158.6894250318114,
+        13.689425031811396
+      ],
+      "hands": 100,
+      "noregrets": {
+        "decisions": 147,
+        "decisions_after_off_tree_bet": 20,
+        "errors": [],
+        "unseen": 2
+      },
+      "opponent": "cfr_simple",
+      "opponent_config": {
+        "exploration": {
+          "budget": [
+            {
+              "millis": 50,
+              "type": "deadline"
+            },
+            {
+              "recursive_widths": [],
+              "type": "max_width"
+            }
+          ]
+        },
+        "hand_estimator": "uniform",
+        "type": "cfr_simple"
+      },
+      "seed": 123,
+      "total_bb": -72.5
+    }
+  ]
+}

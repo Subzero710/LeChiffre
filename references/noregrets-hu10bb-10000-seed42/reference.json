@@ -1,0 +1,11 @@
+{
+  "format": 1,
+  "game_id": "nlhe-hu-v1:52:stack20-blinds2-1:button0:cap1:history3x4:inputs312-actions6",
+  "upstream_commit": "757f7692738069522195d2b486eec60a8b010c0c",
+  "mode": "blueprint-only-reduced-no-pruning",
+  "iterations": 10000,
+  "seed": 42,
+  "threads": 1,
+  "centroid_samples": 0,
+  "blueprint_sha256": "7f7d20ab486f38878457b64cbb9e3d0c3b2c0ab97458ad373230e415a7754ae2"
+}
