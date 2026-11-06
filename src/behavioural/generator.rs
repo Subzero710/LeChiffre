@@ -7,20 +7,21 @@ use std::f32::consts::PI;
 use std::fmt;
 
 use super::codebook::{position_id, street_id};
+use super::featurizer::encode_context;
 use super::{
     ActionKind, BehaviourEventError, BehaviourLatentConfig, BehaviourLatentModel, BehaviourProfile,
-    DecisionContext, ObservedAction,
+    DecisionContext, ExactAction, ObservedAction, PRE_ACTION_CONTEXT_WIDTH,
 };
 
 const STREET_COUNT: usize = 4;
 const POSITION_COUNT: usize = 7;
-const NUMERIC_COUNT: usize = 11;
+const NUMERIC_COUNT: usize = 2 * PRE_ACTION_CONTEXT_WIDTH;
 const ACTION_COUNT: usize = 5;
 const MOVE_EXTRA_FEATURES: usize = 4;
 
 /// Deterministic input encoding width, without the latent vector.
 pub const GENERATOR_CONTEXT_WIDTH: usize = STREET_COUNT + POSITION_COUNT + NUMERIC_COUNT;
-/// Action kind, amount, commitment, relative size, and all-in flag.
+/// Action kind, pot/stack sizing ratios, raise increment and all-in flag.
 pub const GENERATOR_MOVE_WIDTH: usize = ACTION_COUNT + MOVE_EXTRA_FEATURES;
 
 /// A complete legal *candidate* as provided by the game's rules engine.
@@ -50,12 +51,22 @@ impl LegalMove {
                 "passive action amount/all-in",
             ));
         }
-        if self.amount_added_bb > context.actor_stack_bb + 1e-4 {
+        if self.amount_added_bb
+            > context
+                .actor()
+                .map_err(GeneratorError::InvalidContext)?
+                .stack_remaining_bb
+                + 1e-4
+        {
             return Err(GeneratorError::InvalidLegalMove(
                 "amount exceeds actor stack",
             ));
         }
-        let total = context.actor_street_commitment_bb + self.amount_added_bb;
+        let total = context
+            .actor()
+            .map_err(GeneratorError::InvalidContext)?
+            .committed_this_street_bb
+            + self.amount_added_bb;
         if !total.is_finite() || (self.street_total_after_bb - total).abs() > 1e-4 * total.max(1.0)
         {
             return Err(GeneratorError::InvalidLegalMove(
@@ -63,13 +74,34 @@ impl LegalMove {
             ));
         }
         if self.is_all_in
-            && (context.actor_stack_bb - self.amount_added_bb).abs()
-                > 1e-4 * context.actor_stack_bb.max(1.0)
+            && (context
+                .actor()
+                .map_err(GeneratorError::InvalidContext)?
+                .stack_remaining_bb
+                - self.amount_added_bb)
+                .abs()
+                > 1e-4
+                    * context
+                        .actor()
+                        .map_err(GeneratorError::InvalidContext)?
+                        .stack_remaining_bb
+                        .max(1.0)
         {
             return Err(GeneratorError::InvalidLegalMove(
                 "all-in amount inconsistent",
             ));
         }
+        ObservedAction::from_exact(
+            context,
+            ExactAction {
+                kind: self.kind,
+                is_all_in: self.is_all_in,
+                amount_added_bb: self.amount_added_bb,
+                highest_bet_after_bb: context.current_bet_bb.max(self.street_total_after_bb),
+                decision_time_ms: None,
+            },
+        )
+        .map_err(GeneratorError::InvalidContext)?;
         Ok(())
     }
 }
@@ -143,6 +175,7 @@ pub struct GeneratorParameters {
 pub struct BehaviourPolicy {
     moves: Vec<(LegalMove, f32)>,
     timing: TimingDistribution,
+    context: DecisionContext,
 }
 
 impl BehaviourPolicy {
@@ -186,13 +219,20 @@ impl BehaviourPolicy {
 
         let ms = self.timing.sample_ms(draws.timing_1, draws.timing_2)?;
         let (chosen, _) = selected;
-        Ok(ObservedAction {
-            kind: chosen.kind,
-            is_all_in: chosen.is_all_in,
-            amount_added_bb: chosen.amount_added_bb,
-            street_total_after_bb: chosen.street_total_after_bb,
-            decision_time_ms: Some(ms),
-        })
+        ObservedAction::from_exact(
+            &self.context,
+            ExactAction {
+                kind: chosen.kind,
+                is_all_in: chosen.is_all_in,
+                amount_added_bb: chosen.amount_added_bb,
+                highest_bet_after_bb: self
+                    .context
+                    .current_bet_bb
+                    .max(chosen.street_total_after_bb),
+                decision_time_ms: Some(ms),
+            },
+        )
+        .map_err(GeneratorError::InvalidContext)
     }
 }
 
@@ -302,6 +342,7 @@ impl NeuralBehaviourGenerator {
         Ok(BehaviourPolicy {
             moves: legal_moves.iter().copied().zip(probabilities).collect(),
             timing,
+            context: context.clone(),
         })
     }
 }
@@ -347,41 +388,28 @@ fn context_features(c: &DecisionContext) -> Vec<f32> {
     values[usize::from(street_id(c.street))] = 1.0;
     values[STREET_COUNT + usize::from(position_id(c.actor_position))] = 1.0;
     let start = STREET_COUNT + POSITION_COUNT;
-    let positive_log = |x: f32| x.ln_1p();
-    let continuous = [
-        c.players_at_table as f32 / 6.0,
-        c.players_active as f32 / 6.0,
-        positive_log(c.pot_bb),
-        positive_log(c.actor_stack_bb),
-        positive_log(c.effective_stack_bb),
-        positive_log(c.actor_street_commitment_bb),
-        positive_log(c.current_bet_bb),
-        positive_log(c.to_call_bb),
-        c.min_raise_to_bb.map(positive_log).unwrap_or(0.0),
-        if c.min_raise_to_bb.is_some() {
-            1.0
-        } else {
-            0.0
-        },
-        f32::from(c.bet_or_raise_count_this_street) / 8.0,
-    ];
-    values[start..start + NUMERIC_COUNT].copy_from_slice(&continuous);
+    let (numeric, presence) = encode_context(c);
+    for i in 0..PRE_ACTION_CONTEXT_WIDTH {
+        values[start + i] = numeric[i];
+        values[start + PRE_ACTION_CONTEXT_WIDTH + i] = f32::from(presence[i]);
+    }
     values
 }
 
 fn move_features(m: LegalMove, c: &DecisionContext) -> [f32; GENERATOR_MOVE_WIDTH] {
     let mut values = [0.0; GENERATOR_MOVE_WIDTH];
-    let id = match m.kind {
-        ActionKind::Fold => 0,
-        ActionKind::Check => 1,
-        ActionKind::Call => 2,
-        ActionKind::Bet => 3,
-        ActionKind::Raise => 4,
-    };
+    let id = usize::from(super::codebook::action_id(m.kind));
     values[id] = 1.0;
-    values[ACTION_COUNT] = m.amount_added_bb.ln_1p();
-    values[ACTION_COUNT + 1] = m.street_total_after_bb.ln_1p();
-    values[ACTION_COUNT + 2] = m.amount_added_bb / (c.actor_stack_bb + 1.0);
+    let remaining = c.actor().expect("validated context").stack_remaining_bb;
+    if !matches!(m.kind, ActionKind::Fold) {
+        values[ACTION_COUNT] = m.amount_added_bb / c.pot_bb;
+        values[ACTION_COUNT + 1] = m.amount_added_bb / remaining;
+        values[ACTION_COUNT + 2] = if m.kind == ActionKind::Raise {
+            (m.street_total_after_bb - c.current_bet_bb) / c.pot_bb
+        } else {
+            0.0
+        };
+    }
     values[ACTION_COUNT + 3] = if m.is_all_in { 1.0 } else { 0.0 };
     values
 }
@@ -418,18 +446,36 @@ mod tests {
     fn context() -> DecisionContext {
         DecisionContext {
             street: Street::Flop,
-
             actor_position: Position::Button,
-            players_at_table: 2,
-            players_active: 2,
             pot_bb: 10.0,
-            actor_stack_bb: 80.0,
-            effective_stack_bb: 80.0,
-            actor_street_commitment_bb: 0.0,
+            players: vec![
+                super::super::PlayerState {
+                    position: Position::Button,
+                    status: super::super::PlayerStatus::Active,
+                    stack_remaining_bb: 80.0,
+                    committed_this_street_bb: 0.0,
+                    committed_this_hand_bb: 5.0,
+                },
+                super::super::PlayerState {
+                    position: Position::BigBlind,
+                    status: super::super::PlayerStatus::Active,
+                    stack_remaining_bb: 80.0,
+                    committed_this_street_bb: 0.0,
+                    committed_this_hand_bb: 5.0,
+                },
+            ],
             current_bet_bb: 0.0,
             to_call_bb: 0.0,
             min_raise_to_bb: Some(1.0),
-            bet_or_raise_count_this_street: 0,
+            players_yet_to_act: 1,
+            bets_and_raises_this_street: 0,
+            calls_this_street: 0,
+            folds_this_street: 0,
+            actor_has_acted_this_street: false,
+            actor_aggression_streak_before: 0,
+            table_aggression_streak_before: 0,
+            last_aggressor: None,
+            preflop_last_aggressor_position: None,
         }
     }
 
@@ -474,7 +520,7 @@ mod tests {
 
     #[test]
     fn probabilities_are_finite_and_normalized() {
-        assert_eq!(GENERATOR_CONTEXT_WIDTH, 22);
+        assert_eq!(GENERATOR_CONTEXT_WIDTH, 113);
         let g = generator(2);
         let z = g.latent.profile(vec![0.0, 0.0]).unwrap();
         let p = g.predict(&z, &context(), &moves()).unwrap();
@@ -496,9 +542,10 @@ mod tests {
         };
         let action = p.sample(draws).unwrap();
         assert_eq!(action, p.sample(draws).unwrap());
-        assert!(moves().iter().any(|candidate| candidate.kind == action.kind
-            && candidate.amount_added_bb == action.amount_added_bb
-            && candidate.is_all_in == action.is_all_in));
+        assert!(
+            moves().iter().any(|candidate| candidate.kind == action.kind
+                && candidate.is_all_in == action.is_all_in)
+        );
     }
 
     #[test]

@@ -21,9 +21,9 @@ use crate::adapters::{AdaptedHand, PlayerId};
 use crate::behavioural::codebook::{
     ACTION_CODEBOOK, POSITION_CODEBOOK, STREET_CODEBOOK, action_id, position_id, street_id,
 };
-use crate::behavioural::{BehaviourEvent, HandId};
+use crate::behavioural::{BehaviourEvent, EVENT_CONTINUOUS_WIDTH, HandId};
+use crate::behavioural::{continuous_feature_name, encode_continuous};
 
-pub const BEHAVIOUR_PARQUET_SCHEMA_VERSION: u16 = 2;
 pub const EVENTS_FILE_NAME: &str = "events.parquet";
 pub const SUBJECTS_FILE_NAME: &str = "subjects.parquet";
 pub const SUCCESS_FILE_NAME: &str = "_SUCCESS";
@@ -471,10 +471,6 @@ fn finish_and_sync(writer: &mut ArrowWriter<File>) -> Result<(), BehaviourParque
 
 fn writer_properties(table: &str) -> WriterProperties {
     let mut metadata = vec![
-        KeyValue::new(
-            "lechiffre.behaviour_schema_version".to_string(),
-            BEHAVIOUR_PARQUET_SCHEMA_VERSION.to_string(),
-        ),
         KeyValue::new("lechiffre.table".to_string(), table.to_string()),
         KeyValue::new(
             "lechiffre.position_codebook".to_string(),
@@ -531,7 +527,7 @@ fn append_final_metadata(writer: &mut ArrowWriter<File>, summary: BehaviourParqu
 }
 
 pub(crate) fn events_schema() -> SchemaRef {
-    let fields = vec![
+    let mut fields = vec![
         Field::new("hand_id", DataType::Utf8, false),
         Field::new("hand_index", DataType::UInt64, false),
         Field::new("sequence_index", DataType::UInt32, false),
@@ -540,20 +536,15 @@ pub(crate) fn events_schema() -> SchemaRef {
         Field::new("action", DataType::UInt8, false),
         Field::new("is_all_in", DataType::Boolean, false),
         Field::new("players_at_table", DataType::UInt8, false),
-        Field::new("players_active", DataType::UInt8, false),
-        Field::new("pot_bb", DataType::Float32, false),
-        Field::new("actor_stack_bb", DataType::Float32, false),
-        Field::new("effective_stack_bb", DataType::Float32, false),
-        Field::new("actor_street_commitment_bb", DataType::Float32, false),
-        Field::new("current_bet_bb", DataType::Float32, false),
-        Field::new("to_call_bb", DataType::Float32, false),
-        Field::new("min_raise_to_bb", DataType::Float32, true),
-        Field::new("bet_or_raise_count_this_street", DataType::UInt8, false),
-        Field::new("amount_added_bb", DataType::Float32, false),
-        Field::new("street_total_after_bb", DataType::Float32, false),
         Field::new("decision_time_ms", DataType::UInt32, false),
     ];
-
+    for index in 0..EVENT_CONTINUOUS_WIDTH {
+        fields.push(Field::new(
+            continuous_feature_name(index),
+            DataType::Float32,
+            true,
+        ));
+    }
     Arc::new(Schema::new(fields))
 }
 
@@ -588,79 +579,56 @@ fn events_record_batch(
             .checked_add(hand.sequence().len())
             .ok_or(BehaviourParquetDatasetError::RowCountOverflow)
     })?;
-
     let players_at_table = event_rows(hands)
-        .map(|(event, _)| checked_u8("players_at_table", event.context.players_at_table, event))
-        .collect::<Result<Vec<_>, _>>()?;
-    let players_active = event_rows(hands)
-        .map(|(event, _)| checked_u8("players_active", event.context.players_active, event))
+        .map(|(event, _)| checked_u8("players_at_table", event.context.players.len(), event))
         .collect::<Result<Vec<_>, _>>()?;
     let decision_time_ms = event_rows(hands)
         .map(|(event, _)| event.action.decision_time_ms)
         .collect::<Option<Vec<_>>>()
         .ok_or(BehaviourParquetDatasetError::InternalMissingTiming)?;
-
-    let columns: Vec<ArrayRef> = vec![
+    let mut columns: Vec<ArrayRef> = vec![
         Arc::new(StringArray::from_iter_values(
-            event_rows(hands).map(|(event, _)| event.hand_id.as_str()),
+            event_rows(hands).map(|(e, _)| e.hand_id.as_str()),
         )),
         Arc::new(UInt64Array::from_iter_values(
-            event_rows(hands).map(|(_, hand_index)| hand_index),
+            event_rows(hands).map(|(_, i)| i),
         )),
         Arc::new(UInt32Array::from_iter_values(
-            event_rows(hands).map(|(event, _)| event.sequence_index),
+            event_rows(hands).map(|(e, _)| e.sequence_index),
         )),
         Arc::new(UInt8Array::from_iter_values(
-            event_rows(hands).map(|(event, _)| street_id(event.context.street)),
+            event_rows(hands).map(|(e, _)| street_id(e.context.street)),
         )),
         Arc::new(UInt8Array::from_iter_values(
-            event_rows(hands).map(|(event, _)| position_id(event.context.actor_position)),
+            event_rows(hands).map(|(e, _)| position_id(e.context.actor_position)),
         )),
         Arc::new(UInt8Array::from_iter_values(
-            event_rows(hands).map(|(event, _)| action_id(event.action.kind)),
+            event_rows(hands).map(|(e, _)| action_id(e.action.kind)),
         )),
         Arc::new(BooleanArray::from(
             event_rows(hands)
-                .map(|(event, _)| event.action.is_all_in)
+                .map(|(e, _)| e.action.is_all_in)
                 .collect::<Vec<_>>(),
         )),
         Arc::new(UInt8Array::from(players_at_table)),
-        Arc::new(UInt8Array::from(players_active)),
-        Arc::new(Float32Array::from_iter_values(
-            event_rows(hands).map(|(event, _)| event.context.pot_bb),
-        )),
-        Arc::new(Float32Array::from_iter_values(
-            event_rows(hands).map(|(event, _)| event.context.actor_stack_bb),
-        )),
-        Arc::new(Float32Array::from_iter_values(
-            event_rows(hands).map(|(event, _)| event.context.effective_stack_bb),
-        )),
-        Arc::new(Float32Array::from_iter_values(
-            event_rows(hands).map(|(event, _)| event.context.actor_street_commitment_bb),
-        )),
-        Arc::new(Float32Array::from_iter_values(
-            event_rows(hands).map(|(event, _)| event.context.current_bet_bb),
-        )),
-        Arc::new(Float32Array::from_iter_values(
-            event_rows(hands).map(|(event, _)| event.context.to_call_bb),
-        )),
-        Arc::new(Float32Array::from(
-            event_rows(hands)
-                .map(|(event, _)| event.context.min_raise_to_bb)
-                .collect::<Vec<_>>(),
-        )),
-        Arc::new(UInt8Array::from_iter_values(
-            event_rows(hands).map(|(event, _)| event.context.bet_or_raise_count_this_street),
-        )),
-        Arc::new(Float32Array::from_iter_values(
-            event_rows(hands).map(|(event, _)| event.action.amount_added_bb),
-        )),
-        Arc::new(Float32Array::from_iter_values(
-            event_rows(hands).map(|(event, _)| event.action.street_total_after_bb),
-        )),
         Arc::new(UInt32Array::from(decision_time_ms)),
     ];
-
+    let encoded = event_rows(hands)
+        .map(|(event, _)| encode_continuous(event))
+        .collect::<Vec<_>>();
+    for feature in 0..EVENT_CONTINUOUS_WIDTH {
+        let values = encoded
+            .iter()
+            .map(|(values, mask)| {
+                if mask[feature] == 1 {
+                    Some(values[feature])
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        columns.push(Arc::new(Float32Array::from(values)));
+    }
     let batch = RecordBatch::try_new(events_schema(), columns)?;
     if batch.num_rows() != row_count {
         return Err(BehaviourParquetDatasetError::InternalRowCountMismatch {
@@ -749,20 +717,20 @@ fn validate_hand_structure(hand: &AdaptedHand) -> Result<(), BehaviourParquetDat
     }
 
     for event in hand.sequence().events() {
-        if event.context.players_at_table != hand.players().len() {
+        event
+            .context
+            .validate()
+            .map_err(BehaviourParquetDatasetError::InvalidEvent)?;
+        event
+            .action
+            .validate_with_context(&event.context)
+            .map_err(BehaviourParquetDatasetError::InvalidEvent)?;
+        if event.context.players.len() != hand.players().len() {
             return Err(BehaviourParquetDatasetError::PlayerCountMismatch {
                 hand_id: hand.sequence().hand_id().clone(),
                 sequence_index: event.sequence_index,
                 observed_players: hand.players().len(),
-                context_players: event.context.players_at_table,
-            });
-        }
-        if event.context.players_active > event.context.players_at_table {
-            return Err(BehaviourParquetDatasetError::InvalidActivePlayerCount {
-                hand_id: hand.sequence().hand_id().clone(),
-                sequence_index: event.sequence_index,
-                active: event.context.players_active,
-                table: event.context.players_at_table,
+                context_players: event.context.players.len(),
             });
         }
         if !positions.contains(&event.context.actor_position) {
@@ -772,8 +740,16 @@ fn validate_hand_structure(hand: &AdaptedHand) -> Result<(), BehaviourParquetDat
                 position: event.context.actor_position,
             });
         }
-        checked_u8("players_at_table", event.context.players_at_table, event)?;
-        checked_u8("players_active", event.context.players_active, event)?;
+        for state in &event.context.players {
+            if !positions.contains(&state.position) {
+                return Err(BehaviourParquetDatasetError::UnknownActorPosition {
+                    hand_id: hand.sequence().hand_id().clone(),
+                    sequence_index: event.sequence_index,
+                    position: state.position,
+                });
+            }
+        }
+        checked_u8("players_at_table", event.context.players.len(), event)?;
     }
 
     Ok(())
@@ -818,6 +794,7 @@ pub enum BehaviourParquetDatasetError {
         field: &'static str,
     },
     InternalMissingTiming,
+    InvalidEvent(crate::behavioural::BehaviourEventError),
     InternalMissingSubjectId {
         player_id: PlayerId,
     },
@@ -863,12 +840,6 @@ pub enum BehaviourParquetDatasetError {
         observed_players: usize,
         context_players: usize,
     },
-    InvalidActivePlayerCount {
-        hand_id: HandId,
-        sequence_index: u32,
-        active: usize,
-        table: usize,
-    },
     UnknownActorPosition {
         hand_id: HandId,
         sequence_index: u32,
@@ -905,6 +876,7 @@ impl fmt::Display for BehaviourParquetDatasetError {
             Self::CounterOverflow { field } => {
                 write!(f, "dataset counter {field} overflow")
             }
+            Self::InvalidEvent(error) => write!(f, "invalid behavioural event: {error}"),
             Self::InternalMissingTiming => write!(
                 f,
                 "internal error: retained hand lost required decision timing during batch construction"
@@ -961,15 +933,6 @@ impl fmt::Display for BehaviourParquetDatasetError {
                 f,
                 "hand {hand_id} event {sequence_index} reports {context_players} table players but adapter exposes {observed_players}"
             ),
-            Self::InvalidActivePlayerCount {
-                hand_id,
-                sequence_index,
-                active,
-                table,
-            } => write!(
-                f,
-                "hand {hand_id} event {sequence_index} has {active} active players with only {table} at the table"
-            ),
             Self::UnknownActorPosition {
                 hand_id,
                 sequence_index,
@@ -997,6 +960,7 @@ impl std::error::Error for BehaviourParquetDatasetError {
             Self::Io(error) => Some(error),
             Self::Arrow(error) => Some(error),
             Self::Parquet(error) => Some(error),
+            Self::InvalidEvent(error) => Some(error),
             _ => None,
         }
     }
@@ -1023,16 +987,13 @@ impl From<ParquetError> for BehaviourParquetDatasetError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_array::{Array, StringArray, UInt32Array, UInt64Array};
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    use parquet::file::metadata::ParquetMetaData;
-
     use crate::adapters::ObservedPlayer;
     use crate::behavioural::{
-        ActionKind, BehaviourEvent, BehaviourSequence, DecisionContext, ObservedAction, Position,
-        Street,
+        ActionHistory, ActionKind, BehaviourEvent, BehaviourSequence, DecisionContext, ExactAction,
+        PlayerState, PlayerStatus, Position, Street,
     };
-
+    use arrow_array::UInt32Array;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn temp_dataset_dir(name: &str) -> PathBuf {
@@ -1042,283 +1003,170 @@ mod tests {
             std::process::id()
         ))
     }
-
-    fn make_hand(hand_id: &str, first_timing: Option<u32>) -> AdaptedHand {
-        let alice = PlayerId::new("test:alice");
-        let bob = PlayerId::new("test:bob");
+    fn make_hand(hand_id: &str, timing: Option<u32>) -> AdaptedHand {
+        let mut history = ActionHistory::new();
         let mut sequence = BehaviourSequence::new(hand_id);
-        sequence
-            .push(
-                BehaviourEvent::new(
-                    hand_id,
-                    0,
-                    DecisionContext {
-                        street: Street::Preflop,
-                        actor_position: Position::ButtonSmallBlind,
-                        players_at_table: 2,
-                        players_active: 2,
-                        pot_bb: 1.5,
-                        actor_stack_bb: 99.5,
-                        effective_stack_bb: 99.0,
-                        actor_street_commitment_bb: 0.5,
-                        current_bet_bb: 1.0,
-                        to_call_bb: 0.5,
-                        min_raise_to_bb: Some(2.0),
-                        bet_or_raise_count_this_street: 0,
+        for (
+            index,
+            (street, position, kind, pot, stack, street_bet, hand_bet, highest, added, time),
+        ) in [
+            (
+                Street::Preflop,
+                Position::ButtonSmallBlind,
+                ActionKind::Call,
+                1.5,
+                99.5,
+                0.5,
+                0.5,
+                1.0,
+                0.5,
+                timing,
+            ),
+            (
+                Street::Flop,
+                Position::BigBlind,
+                ActionKind::Check,
+                2.0,
+                99.0,
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                Some(320),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let other = if position == Position::ButtonSmallBlind {
+                Position::BigBlind
+            } else {
+                Position::ButtonSmallBlind
+            };
+            let mut ctx = DecisionContext {
+                street,
+                actor_position: position,
+                pot_bb: pot,
+                players: vec![
+                    PlayerState {
+                        position,
+                        status: PlayerStatus::Active,
+                        stack_remaining_bb: stack,
+                        committed_this_street_bb: street_bet,
+                        committed_this_hand_bb: hand_bet,
                     },
-                    ObservedAction {
-                        kind: ActionKind::Call,
+                    PlayerState {
+                        position: other,
+                        status: PlayerStatus::Active,
+                        stack_remaining_bb: 99.0,
+                        committed_this_street_bb: highest,
+                        committed_this_hand_bb: 1.0,
+                    },
+                ],
+                current_bet_bb: highest,
+                to_call_bb: (highest - street_bet).max(0.0),
+                min_raise_to_bb: Some(2.0),
+                players_yet_to_act: 1,
+                bets_and_raises_this_street: 0,
+                calls_this_street: 0,
+                folds_this_street: 0,
+                actor_has_acted_this_street: false,
+                actor_aggression_streak_before: 0,
+                table_aggression_streak_before: 0,
+                last_aggressor: None,
+                preflop_last_aggressor_position: None,
+            };
+            history.prepare(&mut ctx);
+            let response = history
+                .record(
+                    &ctx,
+                    ExactAction {
+                        kind,
+                        amount_added_bb: added,
+                        highest_bet_after_bb: highest,
                         is_all_in: false,
-                        amount_added_bb: 0.5,
-                        street_total_after_bb: 1.0,
-                        decision_time_ms: first_timing,
+                        decision_time_ms: time,
                     },
                 )
-                .unwrap(),
-            )
-            .unwrap();
-        sequence
-            .push(
-                BehaviourEvent::new(
-                    hand_id,
-                    1,
-                    DecisionContext {
-                        street: Street::Flop,
-                        actor_position: Position::BigBlind,
-                        players_at_table: 2,
-                        players_active: 2,
-                        pot_bb: 2.0,
-                        actor_stack_bb: 99.0,
-                        effective_stack_bb: 99.0,
-                        actor_street_commitment_bb: 0.0,
-                        current_bet_bb: 0.0,
-                        to_call_bb: 0.0,
-                        min_raise_to_bb: None,
-                        bet_or_raise_count_this_street: 0,
-                    },
-                    ObservedAction {
-                        kind: ActionKind::Check,
-                        is_all_in: false,
-                        amount_added_bb: 0.0,
-                        street_total_after_bb: 0.0,
-                        decision_time_ms: Some(320),
-                    },
-                )
-                .unwrap(),
-            )
-            .unwrap();
-
+                .unwrap();
+            sequence
+                .push(BehaviourEvent::new(hand_id, index as u32, ctx, response).unwrap())
+                .unwrap();
+        }
         AdaptedHand::new(
             sequence,
             vec![
                 ObservedPlayer {
-                    player_id: alice,
+                    player_id: PlayerId::new("test:alice"),
                     position: Position::ButtonSmallBlind,
                 },
                 ObservedPlayer {
-                    player_id: bob,
+                    player_id: PlayerId::new("test:bob"),
                     position: Position::BigBlind,
                 },
             ],
         )
     }
-
     fn subject_ids() -> HashMap<PlayerId, u64> {
         HashMap::from([
             (PlayerId::new("test:alice"), 17),
             (PlayerId::new("test:bob"), 42),
         ])
     }
-
-    fn read_all(path: &Path) -> Vec<RecordBatch> {
-        ParquetRecordBatchReaderBuilder::try_new(File::open(path).unwrap())
-            .unwrap()
-            .build()
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap()
-    }
-
-    fn metadata_value<'a>(metadata: &'a ParquetMetaData, key: &str) -> Option<&'a str> {
-        metadata
-            .file_metadata()
-            .key_value_metadata()?
-            .iter()
-            .find(|entry| entry.key == key)?
-            .value
-            .as_deref()
-    }
-
     #[test]
-    fn normalized_roundtrip_writes_events_once_and_subject_membership_separately() {
+    fn roundtrip_uses_single_observation_contract() {
         let dir = temp_dataset_dir("roundtrip");
-        let exact_timing = 16_777_217u32;
-        let hand = make_hand("hand-a", Some(exact_timing));
-
+        let hand = make_hand("hand-a", Some(16_777_217));
         let mut writer = BehaviourParquetDatasetWriter::create(&dir).unwrap();
         let report = writer.write_hands(&[hand], &subject_ids()).unwrap();
-        let summary = writer.close().unwrap();
-
-        assert_eq!(report.hands_seen, 1);
-        assert_eq!(report.hands_written, 1);
+        writer.close().unwrap();
         assert_eq!(report.events_written, 2);
-        assert_eq!(report.subject_hand_rows_written, 2);
-        assert_eq!(summary.events_written, 2);
-        assert!(dir.join(SUCCESS_FILE_NAME).is_file());
-
-        let event_batches = read_all(&dir.join(EVENTS_FILE_NAME));
-        let event_batch = &event_batches[0];
-        assert_eq!(event_batch.num_rows(), 2);
-        assert!(event_batch.schema().field_with_name("subject_id").is_err());
-        assert!(event_batch.schema().field_with_name("is_subject").is_err());
-        assert_eq!(
-            event_batch
-                .schema()
-                .field_with_name("players_at_table")
-                .unwrap()
-                .data_type(),
-            &DataType::UInt8
-        );
-        assert_eq!(
-            event_batch
-                .schema()
-                .field_with_name("decision_time_ms")
-                .unwrap()
-                .data_type(),
-            &DataType::UInt32
-        );
-        assert_eq!(
-            event_batch
-                .schema()
-                .field_with_name("bet_or_raise_count_this_street")
-                .unwrap()
-                .data_type(),
-            &DataType::UInt8
-        );
-
-        assert_eq!(event_batch.schema().fields().len(), 20);
+        let loaded =
+            crate::datasets::behaviour_parquet_loader::BehaviourParquetDataset::open(&dir).unwrap();
+        assert_eq!(loaded.hand_count(), 1);
+        assert_eq!(loaded.event_count(), 2);
+        let subject = loaded.subject_history(17).unwrap();
+        assert_eq!(subject.hands().len(), 1);
+        assert_eq!(subject.hands()[0].sequence_len(), 2);
+        let reader = ParquetRecordBatchReaderBuilder::try_new(
+            File::open(dir.join(EVENTS_FILE_NAME)).unwrap(),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        let batch = reader.map(|b| b.unwrap()).next().unwrap();
+        assert_eq!(batch.num_columns(), 9 + EVENT_CONTINUOUS_WIDTH);
         assert!(
-            event_batch
+            batch
                 .schema()
-                .fields()
-                .iter()
-                .all(|field| !field.name().starts_with("board_"))
+                .field_with_name("actor_stack_remaining_bb")
+                .is_ok()
         );
-        let timing_index = event_batch.schema().index_of("decision_time_ms").unwrap();
-        let timings = event_batch
-            .column(timing_index)
+        assert!(batch.schema().field_with_name("board_0_rank").is_err());
+        let times = batch
+            .column(8)
             .as_any()
             .downcast_ref::<UInt32Array>()
             .unwrap();
-        assert_eq!(timings.value(0), exact_timing);
-
-        let subject_batches = read_all(&dir.join(SUBJECTS_FILE_NAME));
-        let subject_batch = &subject_batches[0];
-        assert_eq!(subject_batch.num_rows(), 2);
-        assert_eq!(subject_batch.num_columns(), 4);
-        assert!(subject_batch.schema().field_with_name("player_id").is_err());
-        assert_eq!(
-            subject_batch
-                .schema()
-                .field_with_name("subject_position")
-                .unwrap()
-                .data_type(),
-            &DataType::UInt8
-        );
-        let ids = subject_batch
-            .column(subject_batch.schema().index_of("subject_id").unwrap())
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap();
-        assert_eq!([ids.value(0), ids.value(1)], [17, 42]);
-
-        let hand_ids = subject_batch
-            .column(subject_batch.schema().index_of("hand_id").unwrap())
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(hand_ids.value(0), "hand-a");
-        assert_eq!(hand_ids.value(1), "hand-a");
-        let hand_indexes = subject_batch
-            .column(subject_batch.schema().index_of("hand_index").unwrap())
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap();
-        assert_eq!([hand_indexes.value(0), hand_indexes.value(1)], [0, 0]);
-
-        let builder = ParquetRecordBatchReaderBuilder::try_new(
-            File::open(dir.join(EVENTS_FILE_NAME)).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(builder.metadata().file_metadata().num_rows(), 2);
-        assert_eq!(
-            metadata_value(builder.metadata(), "lechiffre.behaviour_schema_version"),
-            Some("2")
-        );
-        assert_eq!(
-            metadata_value(builder.metadata(), "lechiffre.events_written"),
-            Some("2")
-        );
-        drop(builder);
-
+        assert_eq!(times.value(0), 16_777_217);
         fs::remove_dir_all(dir).unwrap();
     }
-
     #[test]
-    fn drops_whole_hand_when_any_timing_is_missing() {
-        let dir = temp_dataset_dir("drop-timing");
-        let hand = make_hand("hand-missing", None);
-
+    fn missing_timing_drops_entire_hand() {
+        let dir = temp_dataset_dir("timing");
         let mut writer = BehaviourParquetDatasetWriter::create(&dir).unwrap();
-        let report = writer.write_hands(&[hand], &subject_ids()).unwrap();
-        assert_eq!(report.hands_seen, 1);
+        let report = writer
+            .write_hands(&[make_hand("hand-no-time", None)], &subject_ids())
+            .unwrap();
         assert_eq!(report.hands_written, 0);
-        assert_eq!(report.events_written, 0);
-        assert_eq!(report.subject_hand_rows_written, 0);
-        assert_eq!(
-            report.dropped_hand_ids_missing_timing,
-            vec![HandId::from("hand-missing")]
-        );
         writer.close().unwrap();
-
-        assert_eq!(read_all(&dir.join(EVENTS_FILE_NAME)).len(), 0);
-        assert_eq!(read_all(&dir.join(SUBJECTS_FILE_NAME)).len(), 0);
         fs::remove_dir_all(dir).unwrap();
     }
-
     #[test]
-    fn rejects_missing_or_ambiguous_subject_ids_without_fallback() {
-        let dir = temp_dataset_dir("subject-validation");
-        let hand = make_hand("hand-a", Some(100));
+    fn duplicate_hand_is_rejected() {
+        let dir = temp_dataset_dir("duplicate");
         let mut writer = BehaviourParquetDatasetWriter::create(&dir).unwrap();
-
-        let missing = HashMap::from([(PlayerId::new("test:alice"), 17)]);
-        assert!(matches!(
-            writer.write_hands(std::slice::from_ref(&hand), &missing),
-            Err(BehaviourParquetDatasetError::MissingSubjectId { .. })
-        ));
-
-        let ambiguous = HashMap::from([
-            (PlayerId::new("test:alice"), 17),
-            (PlayerId::new("test:bob"), 17),
-        ]);
-        assert!(matches!(
-            writer.write_hands(&[hand], &ambiguous),
-            Err(BehaviourParquetDatasetError::DuplicateSubjectId { .. })
-        ));
-
-        drop(writer);
-        assert!(!dir.join(SUCCESS_FILE_NAME).exists());
-        assert!(!dir.join(EVENTS_FILE_NAME).exists());
-        assert!(!dir.join(SUBJECTS_FILE_NAME).exists());
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn refuses_duplicate_hand_ids_across_write_calls() {
-        let dir = temp_dataset_dir("duplicate-hand");
-        let hand = make_hand("hand-a", Some(100));
-        let mut writer = BehaviourParquetDatasetWriter::create(&dir).unwrap();
+        let hand = make_hand("hand-dup", Some(1));
         writer
             .write_hands(std::slice::from_ref(&hand), &subject_ids())
             .unwrap();
@@ -1327,6 +1175,30 @@ mod tests {
             Err(BehaviourParquetDatasetError::DuplicateHandId { .. })
         ));
         drop(writer);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn retained_hand_order_skips_timing_gaps_without_renumbering() {
+        let dir = temp_dataset_dir("ordering");
+        let mut writer = BehaviourParquetDatasetWriter::create(&dir).unwrap();
+        let hands = [
+            make_hand("first", Some(100)),
+            make_hand("missing", None),
+            make_hand("third", Some(300)),
+        ];
+        let report = writer.write_hands(&hands, &subject_ids()).unwrap();
+        assert_eq!(report.hands_written, 2);
+        assert_eq!(
+            report.dropped_hand_ids_missing_timing,
+            vec![HandId::new("missing")]
+        );
+        writer.close().unwrap();
+        let loaded =
+            crate::datasets::behaviour_parquet_loader::BehaviourParquetDataset::open(&dir).unwrap();
+        let hands = loaded.subject_history(17).unwrap();
+        assert_eq!(hands.hands().len(), 2);
+        assert_eq!(hands.hands()[0].hand_id().as_str(), "first");
+        assert_eq!(hands.hands()[1].hand_id().as_str(), "third");
         fs::remove_dir_all(dir).unwrap();
     }
 }

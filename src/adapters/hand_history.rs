@@ -8,8 +8,8 @@ use rs_poker::open_hand_history::{
 };
 
 use crate::behavioural::{
-    ActionKind, BehaviourEvent, BehaviourEventError, BehaviourHistory, BehaviourSequence,
-    BehaviourSequenceError, HandId, ObservedAction,
+    ActionHistory, ActionKind, BehaviourEvent, BehaviourEventError, BehaviourHistory,
+    BehaviourSequence, BehaviourSequenceError, ExactAction, HandId,
 };
 
 use super::rs_poker::{decision_context, position_for_index, to_bb};
@@ -60,19 +60,19 @@ impl HandHistoryAdapter {
         let hand_id = HandId::new(format!("{}:{}", hand.site_name, hand.game_number));
         let players = observed_players(hand, &replayed, player_ids)?;
         let mut sequence = BehaviourSequence::new(hand_id.clone());
+        let mut history = ActionHistory::new();
 
         for (sequence_offset, step) in replayed.transitions().enumerate() {
             let sequence_index = u32::try_from(sequence_offset)
                 .map_err(|_| HandHistoryAdapterError::SequenceTooLong)?;
-            let event = BehaviourEvent::new(
-                hand_id.clone(),
-                sequence_index,
-                decision_context(&step.state_before),
-                observed_action(
-                    step,
-                    decision_times_ms.and_then(|times| times[sequence_offset]),
-                ),
-            )?;
+            let mut context = decision_context(&step.state_before);
+            history.prepare(&mut context);
+            let exact = exact_action(
+                step,
+                decision_times_ms.and_then(|times| times[sequence_offset]),
+            );
+            let action = history.record(&context, exact)?;
+            let event = BehaviourEvent::new(hand_id.clone(), sequence_index, context, action)?;
             sequence.push(event)?;
         }
 
@@ -131,14 +131,13 @@ fn observed_players(
     Ok(players)
 }
 
-fn observed_action(step: &ReplayStep, decision_time_ms: Option<u32>) -> ObservedAction {
+fn exact_action(step: &ReplayStep, decision_time_ms: Option<u32>) -> ExactAction {
     let actor_index = step.state_before.to_act_idx();
     let before_player_bet = step.state_before.current_round_player_bet(actor_index);
     let after_player_bet = step.state_after.current_round_player_bet(actor_index);
     let amount_added = after_player_bet - before_player_bet;
     let starting_bet = step.state_before.current_round_bet();
     let final_bet = step.state_after.current_round_bet();
-
     let kind = if matches!(&step.action, AgentAction::Fold) {
         ActionKind::Fold
     } else if final_bet > starting_bet {
@@ -152,12 +151,11 @@ fn observed_action(step: &ReplayStep, decision_time_ms: Option<u32>) -> Observed
     } else {
         ActionKind::Check
     };
-
-    ObservedAction {
+    ExactAction {
         kind,
-        is_all_in: step.state_after.player_all_in.get(actor_index),
         amount_added_bb: to_bb(amount_added, step.state_before.big_blind),
-        street_total_after_bb: to_bb(after_player_bet, step.state_before.big_blind),
+        highest_bet_after_bb: to_bb(final_bet, step.state_before.big_blind),
+        is_all_in: step.state_after.player_all_in.get(actor_index),
         decision_time_ms,
     }
 }

@@ -61,9 +61,9 @@ pub struct BehaviourDatasetStatistics {
     pub subjects_per_component: IntegerDistributionSummary,
     pub decision_time_ms: IntegerDistributionSummary,
     pub pot_bb: FloatDistributionSummary,
-    pub actor_stack_bb: FloatDistributionSummary,
-    pub effective_stack_bb: FloatDistributionSummary,
-    pub amount_added_bb: FloatDistributionSummary,
+    pub stack_remaining_bb: FloatDistributionSummary,
+    pub committed_this_hand_bb: FloatDistributionSummary,
+    pub amount_over_pot: FloatDistributionSummary,
     /// Preflop, flop, turn, river in the persisted street codebook order.
     pub street_counts: [u64; 4],
     /// Fold, check, call, bet, raise in the persisted action codebook order.
@@ -258,9 +258,9 @@ impl BehaviourParquetDataset {
 
         let mut decision_time_ms = Vec::with_capacity(self.event_count);
         let mut pot_bb = Vec::with_capacity(self.event_count);
-        let mut actor_stack_bb = Vec::with_capacity(self.event_count);
-        let mut effective_stack_bb = Vec::with_capacity(self.event_count);
-        let mut amount_added_bb = Vec::with_capacity(self.event_count);
+        let mut stack_remaining_bb = Vec::with_capacity(self.event_count);
+        let mut committed_this_hand_bb = Vec::with_capacity(self.event_count);
+        let mut amount_over_pot = Vec::with_capacity(self.event_count);
         let mut street_counts = [0_u64; 4];
         let mut action_counts = [0_u64; 5];
         let mut actor_position_counts = [0_u64; 7];
@@ -320,9 +320,14 @@ impl BehaviourParquetDataset {
                 decision_time_ms.push(u64::from(hand.decision_time_ms[event_index]));
                 let continuous = hand.continuous[event_index];
                 pot_bb.push(continuous[ContinuousFeature::PotBb as usize]);
-                actor_stack_bb.push(continuous[ContinuousFeature::ActorStackBb as usize]);
-                effective_stack_bb.push(continuous[ContinuousFeature::EffectiveStackBb as usize]);
-                amount_added_bb.push(continuous[ContinuousFeature::AmountAddedBb as usize]);
+                stack_remaining_bb.push(continuous[ContinuousFeature::StackRemainingBb as usize]);
+                committed_this_hand_bb
+                    .push(continuous[ContinuousFeature::CommittedThisHandBb as usize]);
+                if hand.continuous_present[event_index][ContinuousFeature::AmountOverPot as usize]
+                    == 1
+                {
+                    amount_over_pot.push(continuous[ContinuousFeature::AmountOverPot as usize]);
+                }
             }
         }
 
@@ -342,9 +347,9 @@ impl BehaviourParquetDataset {
             subjects_per_component: summarize_u64(subjects_per_component)?,
             decision_time_ms: summarize_u64(decision_time_ms)?,
             pot_bb: summarize_f32(pot_bb)?,
-            actor_stack_bb: summarize_f32(actor_stack_bb)?,
-            effective_stack_bb: summarize_f32(effective_stack_bb)?,
-            amount_added_bb: summarize_f32(amount_added_bb)?,
+            stack_remaining_bb: summarize_f32(stack_remaining_bb)?,
+            committed_this_hand_bb: summarize_f32(committed_this_hand_bb)?,
+            amount_over_pot: summarize_f32(amount_over_pot)?,
             street_counts,
             action_counts,
             actor_position_counts,
@@ -644,9 +649,9 @@ mod tests {
         } = fixture;
         let mut continuous = [0.0_f32; crate::behavioural::EVENT_CONTINUOUS_WIDTH];
         continuous[ContinuousFeature::PotBb as usize] = pot_bb;
-        continuous[ContinuousFeature::ActorStackBb as usize] = 100.0;
-        continuous[ContinuousFeature::EffectiveStackBb as usize] = 80.0;
-        continuous[ContinuousFeature::AmountAddedBb as usize] = 2.0;
+        continuous[ContinuousFeature::StackRemainingBb as usize] = 100.0;
+        continuous[ContinuousFeature::CommittedThisHandBb as usize] = 80.0;
+        continuous[ContinuousFeature::AmountOverPot as usize] = 2.0;
         continuous[ContinuousFeature::DecisionTimeMs as usize] = timing as f32;
 
         PersistedHand {

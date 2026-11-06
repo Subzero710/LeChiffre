@@ -9,8 +9,9 @@ use rs_poker::arena::game_state::Round;
 use rs_poker::arena::{Agent, GameState, Historian, HistorianError};
 
 use crate::behavioural::{
-    ActionKind, BehaviourEvent, BehaviourEventError, BehaviourSequence, BehaviourSequenceError,
-    DecisionContext, HandId, ObservedAction, Position, Street,
+    ActionHistory, ActionKind, BehaviourEvent, BehaviourEventError, BehaviourSequence,
+    BehaviourSequenceError, DecisionContext, ExactAction, HandId, PlayerState, PlayerStatus,
+    Position, Street,
 };
 
 type DecisionKey = (u128, usize);
@@ -19,6 +20,7 @@ type DecisionKey = (u128, usize);
 struct AdapterState {
     pending: HashMap<DecisionKey, PendingDecision>,
     sequences: HashMap<u128, BehaviourSequence>,
+    histories: HashMap<u128, ActionHistory>,
 }
 
 struct PendingDecision {
@@ -79,6 +81,7 @@ impl RsPokerAdapter {
             .state
             .lock()
             .map_err(|_| RsPokerAdapterError::StoragePoisoned)?;
+        state.histories.remove(&hand_id);
         Ok(state.sequences.remove(&hand_id))
     }
 }
@@ -92,7 +95,14 @@ struct ObservedAgent {
 impl Agent for ObservedAgent {
     async fn act(&mut self, id: u128, game_state: &GameState) -> AgentAction {
         let actor_seat = game_state.to_act_idx();
-        let context = decision_context(game_state);
+        let mut context = decision_context(game_state);
+        self.state
+            .lock()
+            .expect("rs-poker adapter state lock poisoned")
+            .histories
+            .entry(id)
+            .or_default()
+            .prepare(&mut context);
         let started = Instant::now();
         let action = self.inner.act(id, game_state).await;
         let decision_time_ms = u32::try_from(started.elapsed().as_millis())
@@ -162,18 +172,33 @@ fn record_played_action(
         },
     )?;
 
+    let action = state.histories.entry(hand_id).or_default().record(
+        &pending.context,
+        ExactAction {
+            kind: semantic_action(
+                payload,
+                payload.final_player_bet - payload.starting_player_bet,
+            ),
+            amount_added_bb: to_bb(
+                payload.final_player_bet - payload.starting_player_bet,
+                pending.big_blind,
+            ),
+            highest_bet_after_bb: to_bb(payload.final_bet, pending.big_blind),
+            is_all_in: payload.players_all_in.get(payload.idx),
+            decision_time_ms: Some(pending.decision_time_ms),
+        },
+    )?;
     let sequence = state
         .sequences
         .entry(hand_id)
         .or_insert_with(|| BehaviourSequence::new(rs_poker_hand_id(hand_id)));
-
     let sequence_index = u32::try_from(sequence.len())
         .map_err(|_| RsPokerAdapterError::SequenceTooLong { hand_id })?;
     let event = BehaviourEvent::new(
         rs_poker_hand_id(hand_id),
         sequence_index,
         pending.context,
-        observed_action(payload, pending.big_blind, pending.decision_time_ms),
+        action,
     )?;
     sequence.push(event)?;
 
@@ -182,36 +207,53 @@ fn record_played_action(
 
 pub(super) fn decision_context(game_state: &GameState) -> DecisionContext {
     let actor_seat = game_state.to_act_idx();
+    let position = |seat| position_for_index(game_state.num_players, game_state.dealer_idx, seat);
+    let players = (0..game_state.num_players)
+        .map(|seat| PlayerState {
+            position: position(seat),
+            status: if game_state.player_all_in.get(seat) {
+                PlayerStatus::AllIn
+            } else if game_state.player_active.get(seat) {
+                PlayerStatus::Active
+            } else {
+                PlayerStatus::Folded
+            },
+            stack_remaining_bb: to_bb(game_state.stacks[seat], game_state.big_blind),
+            committed_this_street_bb: to_bb(
+                game_state.current_round_player_bet(seat),
+                game_state.big_blind,
+            ),
+            committed_this_hand_bb: to_bb(game_state.player_bet[seat], game_state.big_blind),
+        })
+        .collect();
     let current_bet = game_state.current_round_bet();
     let actor_commitment = game_state.current_round_player_bet(actor_seat);
-    let live_players = game_state.player_active | game_state.player_all_in;
-
     DecisionContext {
         street: street(game_state.round),
-        actor_position: position_for_index(
-            game_state.num_players,
-            game_state.dealer_idx,
-            actor_seat,
-        ),
-        players_at_table: game_state.num_players,
-        players_active: live_players.count(),
+        actor_position: position(actor_seat),
         pot_bb: to_bb(game_state.total_pot, game_state.big_blind),
-        actor_stack_bb: to_bb(game_state.stacks[actor_seat], game_state.big_blind),
-        effective_stack_bb: to_bb(
-            effective_stack_behind(game_state, actor_seat),
-            game_state.big_blind,
-        ),
-        actor_street_commitment_bb: to_bb(actor_commitment, game_state.big_blind),
+        players,
         current_bet_bb: to_bb(current_bet, game_state.big_blind),
         to_call_bb: to_bb(
             (current_bet - actor_commitment).max(0),
             game_state.big_blind,
         ),
-        min_raise_to_bb: Some(
-            to_bb(current_bet, game_state.big_blind)
-                + to_bb(game_state.current_round_min_raise(), game_state.big_blind),
-        ),
-        bet_or_raise_count_this_street: game_state.round_data.total_raise_count,
+        min_raise_to_bb: Some(to_bb(
+            current_bet + game_state.current_round_min_raise(),
+            game_state.big_blind,
+        )),
+        players_yet_to_act: u8::try_from(
+            game_state.round_data.needs_action.count().saturating_sub(1),
+        )
+        .expect("rs-poker supports only six players"),
+        bets_and_raises_this_street: 0,
+        calls_this_street: 0,
+        folds_this_street: 0,
+        actor_has_acted_this_street: false,
+        actor_aggression_streak_before: 0,
+        table_aggression_streak_before: 0,
+        last_aggressor: None,
+        preflop_last_aggressor_position: None,
     }
 }
 
@@ -253,34 +295,6 @@ pub(super) fn position_for_index(
         (6, 4) => Position::Hijack,
         (6, 5) => Position::Cutoff,
         _ => unreachable!("validated 2..=6-max position mapping is exhaustive"),
-    }
-}
-
-fn effective_stack_behind(game_state: &GameState, actor_seat: usize) -> rs_poker::arena::Chips {
-    let live_players = game_state.player_active | game_state.player_all_in;
-    let deepest_opponent = live_players
-        .ones()
-        .filter(|&seat| seat != actor_seat)
-        .map(|seat| game_state.stacks[seat])
-        .max()
-        .expect("agent decision occurred without a live opponent");
-
-    game_state.stacks[actor_seat].min(deepest_opponent)
-}
-
-fn observed_action(
-    payload: &PlayedActionPayload,
-    big_blind: rs_poker::arena::Chips,
-    decision_time_ms: u32,
-) -> ObservedAction {
-    let amount_added = payload.final_player_bet - payload.starting_player_bet;
-
-    ObservedAction {
-        kind: semantic_action(payload, amount_added),
-        is_all_in: payload.players_all_in.get(payload.idx),
-        amount_added_bb: to_bb(amount_added, big_blind),
-        street_total_after_bb: to_bb(payload.final_player_bet, big_blind),
-        decision_time_ms: Some(decision_time_ms),
     }
 }
 

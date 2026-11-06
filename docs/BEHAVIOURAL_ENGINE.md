@@ -1,4 +1,4 @@
-# Behavioral Engine — invariants et Generator V1
+# Behavioral Engine — invariants et Generator
 
 Statut : **conception et noyau d'inférence non entraîné**. Aucun blueprint de référence n'est disponible à ce stade. L'entraînement du blueprint est un chantier indépendant, et ne doit pas être confondu avec l'inférence effectuée par le Behavioral Engine.
 
@@ -14,19 +14,23 @@ A et G décrivent et génèrent des comportements. La recherche d'un profil cont
 
 ## Frontière stricte : aucune carte dans le Behavioral Engine
 
-Le contexte `DecisionContext` ne contient que les informations situationnelles
-et financières observables nécessaires au comportement : street, position,
-participants, pot, stacks, engagements, mise à payer, minimum de relance et
-nombre de bets/raises précédents. La street n'est **pas** une information de
-carte. `ObservedAction` ne contient que le type d'action, ses montants, le
-statut all-in et le temps de décision. Aucun rang, aucune couleur, aucune
+Le `DecisionContext` contient les états individuels des joueurs (stacks
+restants, engagements de street et de main), les contraintes de mise, la position,
+les compteurs antérieurs, ainsi que `last_aggressor` avec son action antérieure.
+`ObservedAction` contient le type d'action, le sizing relatif au pot et au stack,
+le timing et les compteurs d'agressivité après action. Le Fold n'a pas de sizing ;
+le Check a un sizing nul explicite. Toutes les mesures relatives proviennent de
+montants exacts observés par les adaptateurs ; aucun montant absolu redondant
+n'est conservé dans `ObservedAction`. Aucun rang, aucune couleur, aucune
 carte privée et aucune carte publique ne fait partie du contrat.
 
 Les adaptateurs du moteur de jeu peuvent lire les cartes pour rejouer une main
 à leur niveau, mais ne les transmettent **jamais** au pipeline comportemental.
 Les tenseurs et fichiers Parquet du Behavioral Engine n'ont aucun champ de carte.
-Le Parquet passe de **v1 à v2** : les fichiers v1 doivent être régénérés depuis
-la source avant utilisation avec le loader v2. Pas de conversion silencieuse.
+Le Parquet utilise exclusivement le schéma actuel de features ; tout jeu de
+fichiers dont les colonnes ne correspondent pas à ce schéma est rejeté.
+Les jeux de données précédemment produits doivent être régénérés depuis les
+historiques sources, sans compatibilité avec les anciens formats.
 
 ## Quatre propriétés de référence
 
@@ -60,7 +64,7 @@ Cela n'oblige pas A à accepter un historique de mains : l'accumulation de plusi
 
 Les cartes de densité, d'incertitude et de comportement sont distinctes des cartes d'EV, qui demanderont plus tard un évaluateur poker externe.
 
-## Generator V1 : périmètre de ce premier patch
+## Generator : périmètre actuel
 
 `src/behavioural/generator.rs` est un **noyau d'inférence avec poids explicites** :
 
@@ -71,7 +75,7 @@ Les cartes de densité, d'incertitude et de comportement sont distinctes des car
 
 **Aucun poids entraîné, aucune boucle d'entraînement, aucune autodifférentiation, aucun blueprint, aucun Analyzer et aucun plugin rs-poker de production ne sont inclus.** Il faudra notamment remplacer ou prolonger le scoring sur candidats discrets pour représenter plus finement les sizings continus. Un candidat « légal » est ici déclaré par l'appelant : la validation intégrale de sa légalité appartient aux règles du jeu. Le Generator contrôle seulement les invariants numériques et certaines cohérences de montants ; il ne reconstruit pas les règles NLHE à partir de `DecisionContext`.
 
-L'interface historique `BehaviourGenerator::generate(profile, sequence, context)` a été remplacée dans ce patch par `predict(profile, context, legal_moves)`. Aucun historique de mains n'entre dans G.
+L'interface `BehaviourGenerator::predict(profile, context, legal_moves)` ne reçoit que le contexte courant. Aucun historique de mains n'entre dans G.
 
 ## Points d'attention avant entraînement de G
 

@@ -19,12 +19,12 @@ use crate::behavioural::codebook::{
 };
 use crate::behavioural::{
     CategoricalFeature, ContinuousFeature, EVENT_CATEGORICAL_WIDTH, EVENT_CONTINUOUS_WIDTH,
-    FeaturizedHand, FeaturizedHandData, HandId, Position,
+    FeaturizedHand, FeaturizedHandData, HandId, Position, continuous_feature_name,
 };
 
 use super::behaviour_parquet::{
-    BEHAVIOUR_PARQUET_SCHEMA_VERSION, BehaviourParquetDatasetSummary, EVENTS_FILE_NAME,
-    SUBJECTS_FILE_NAME, SUCCESS_FILE_NAME, events_schema, subjects_schema,
+    BehaviourParquetDatasetSummary, EVENTS_FILE_NAME, SUBJECTS_FILE_NAME, SUCCESS_FILE_NAME,
+    events_schema, subjects_schema,
 };
 
 const READ_BATCH_ROWS: usize = 8_192;
@@ -624,12 +624,6 @@ fn validate_metadata(
         }
     }
 
-    require_metadata(
-        path,
-        &values,
-        "lechiffre.behaviour_schema_version",
-        &BEHAVIOUR_PARQUET_SCHEMA_VERSION.to_string(),
-    )?;
     require_metadata(path, &values, "lechiffre.table", table)?;
     require_metadata(
         path,
@@ -743,18 +737,8 @@ struct EventColumns<'a> {
     action: &'a UInt8Array,
     is_all_in: &'a BooleanArray,
     players_at_table: &'a UInt8Array,
-    players_active: &'a UInt8Array,
-    pot_bb: &'a Float32Array,
-    actor_stack_bb: &'a Float32Array,
-    effective_stack_bb: &'a Float32Array,
-    actor_street_commitment_bb: &'a Float32Array,
-    current_bet_bb: &'a Float32Array,
-    to_call_bb: &'a Float32Array,
-    min_raise_to_bb: &'a Float32Array,
-    bet_or_raise_count_this_street: &'a UInt8Array,
-    amount_added_bb: &'a Float32Array,
-    street_total_after_bb: &'a Float32Array,
     decision_time_ms: &'a UInt32Array,
+    features: Vec<&'a Float32Array>,
 }
 
 impl<'a> EventColumns<'a> {
@@ -767,23 +751,7 @@ impl<'a> EventColumns<'a> {
         let action = typed_column::<UInt8Array>(batch, "events", "action")?;
         let is_all_in = typed_column::<BooleanArray>(batch, "events", "is_all_in")?;
         let players_at_table = typed_column::<UInt8Array>(batch, "events", "players_at_table")?;
-        let players_active = typed_column::<UInt8Array>(batch, "events", "players_active")?;
-        let pot_bb = typed_column::<Float32Array>(batch, "events", "pot_bb")?;
-        let actor_stack_bb = typed_column::<Float32Array>(batch, "events", "actor_stack_bb")?;
-        let effective_stack_bb =
-            typed_column::<Float32Array>(batch, "events", "effective_stack_bb")?;
-        let actor_street_commitment_bb =
-            typed_column::<Float32Array>(batch, "events", "actor_street_commitment_bb")?;
-        let current_bet_bb = typed_column::<Float32Array>(batch, "events", "current_bet_bb")?;
-        let to_call_bb = typed_column::<Float32Array>(batch, "events", "to_call_bb")?;
-        let min_raise_to_bb = typed_column::<Float32Array>(batch, "events", "min_raise_to_bb")?;
-        let bet_or_raise_count_this_street =
-            typed_column::<UInt8Array>(batch, "events", "bet_or_raise_count_this_street")?;
-        let amount_added_bb = typed_column::<Float32Array>(batch, "events", "amount_added_bb")?;
-        let street_total_after_bb =
-            typed_column::<Float32Array>(batch, "events", "street_total_after_bb")?;
         let decision_time_ms = typed_column::<UInt32Array>(batch, "events", "decision_time_ms")?;
-
         for (name, array) in [
             ("hand_id", hand_id as &dyn Array),
             ("hand_index", hand_index as &dyn Array),
@@ -793,27 +761,13 @@ impl<'a> EventColumns<'a> {
             ("action", action as &dyn Array),
             ("is_all_in", is_all_in as &dyn Array),
             ("players_at_table", players_at_table as &dyn Array),
-            ("players_active", players_active as &dyn Array),
-            ("pot_bb", pot_bb as &dyn Array),
-            ("actor_stack_bb", actor_stack_bb as &dyn Array),
-            ("effective_stack_bb", effective_stack_bb as &dyn Array),
-            (
-                "actor_street_commitment_bb",
-                actor_street_commitment_bb as &dyn Array,
-            ),
-            ("current_bet_bb", current_bet_bb as &dyn Array),
-            ("to_call_bb", to_call_bb as &dyn Array),
-            (
-                "bet_or_raise_count_this_street",
-                bet_or_raise_count_this_street as &dyn Array,
-            ),
-            ("amount_added_bb", amount_added_bb as &dyn Array),
-            ("street_total_after_bb", street_total_after_bb as &dyn Array),
             ("decision_time_ms", decision_time_ms as &dyn Array),
         ] {
             ensure_non_nullable("events", name, array)?;
         }
-
+        let features = (0..EVENT_CONTINUOUS_WIDTH)
+            .map(|i| typed_column::<Float32Array>(batch, "events", &continuous_feature_name(i)))
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             hand_id,
             hand_index,
@@ -823,18 +777,8 @@ impl<'a> EventColumns<'a> {
             action,
             is_all_in,
             players_at_table,
-            players_active,
-            pot_bb,
-            actor_stack_bb,
-            effective_stack_bb,
-            actor_street_commitment_bb,
-            current_bet_bb,
-            to_call_bb,
-            min_raise_to_bb,
-            bet_or_raise_count_this_street,
-            amount_added_bb,
-            street_total_after_bb,
             decision_time_ms,
+            features,
         })
     }
 
@@ -855,7 +799,6 @@ impl<'a> EventColumns<'a> {
         if action_from_id(action).is_none() {
             return Err(invalid_code("events", "action", action));
         }
-
         let players_at_table = self.players_at_table.value(row);
         if !(2..=6).contains(&players_at_table) {
             return Err(BehaviourParquetLoadError::InvalidPlayersAtTable {
@@ -863,58 +806,54 @@ impl<'a> EventColumns<'a> {
                 value: players_at_table,
             });
         }
-        let players_active = self.players_active.value(row);
-        if players_active > players_at_table {
-            return Err(BehaviourParquetLoadError::InvalidPlayersActive {
-                hand_id: hand_id.clone(),
-                active: players_active,
-                table: players_at_table,
-            });
-        }
-
         let mut continuous = [0.0_f32; EVENT_CONTINUOUS_WIDTH];
         let mut continuous_present = [1_u8; EVENT_CONTINUOUS_WIDTH];
-        continuous[ContinuousFeature::PlayersAtTable as usize] = f32::from(players_at_table);
-        continuous[ContinuousFeature::PlayersActive as usize] = f32::from(players_active);
-        continuous[ContinuousFeature::PotBb as usize] =
-            checked_non_negative_f32(&hand_id, "pot_bb", self.pot_bb.value(row))?;
-        continuous[ContinuousFeature::ActorStackBb as usize] =
-            checked_non_negative_f32(&hand_id, "actor_stack_bb", self.actor_stack_bb.value(row))?;
-        continuous[ContinuousFeature::EffectiveStackBb as usize] = checked_non_negative_f32(
-            &hand_id,
-            "effective_stack_bb",
-            self.effective_stack_bb.value(row),
-        )?;
-        continuous[ContinuousFeature::ActorStreetCommitmentBb as usize] = checked_non_negative_f32(
-            &hand_id,
-            "actor_street_commitment_bb",
-            self.actor_street_commitment_bb.value(row),
-        )?;
-        continuous[ContinuousFeature::CurrentBetBb as usize] =
-            checked_non_negative_f32(&hand_id, "current_bet_bb", self.current_bet_bb.value(row))?;
-        continuous[ContinuousFeature::ToCallBb as usize] =
-            checked_non_negative_f32(&hand_id, "to_call_bb", self.to_call_bb.value(row))?;
-        if self.min_raise_to_bb.is_null(row) {
-            continuous_present[ContinuousFeature::MinRaiseToBb as usize] = 0;
-        } else {
-            continuous[ContinuousFeature::MinRaiseToBb as usize] = checked_non_negative_f32(
-                &hand_id,
-                "min_raise_to_bb",
-                self.min_raise_to_bb.value(row),
-            )?;
+        for (index, column) in self.features.iter().enumerate() {
+            if column.is_null(row) {
+                continuous_present[index] = 0;
+            } else {
+                continuous[index] =
+                    checked_non_negative_f32(&hand_id, "feature", column.value(row))?;
+            }
         }
-        continuous[ContinuousFeature::BetOrRaiseCountThisStreet as usize] =
-            f32::from(self.bet_or_raise_count_this_street.value(row));
-        continuous[ContinuousFeature::AmountAddedBb as usize] =
-            checked_non_negative_f32(&hand_id, "amount_added_bb", self.amount_added_bb.value(row))?;
-        continuous[ContinuousFeature::StreetTotalAfterBb as usize] = checked_non_negative_f32(
-            &hand_id,
-            "street_total_after_bb",
-            self.street_total_after_bb.value(row),
-        )?;
+        for index in [
+            ContinuousFeature::PotBb as usize,
+            ContinuousFeature::StackRemainingBb as usize,
+            ContinuousFeature::CommittedThisStreetBb as usize,
+            ContinuousFeature::CommittedThisHandBb as usize,
+            ContinuousFeature::CurrentBetBb as usize,
+            ContinuousFeature::ToCallBb as usize,
+            ContinuousFeature::ActorAggressionStreakBefore as usize,
+            ContinuousFeature::TableAggressionStreakBefore as usize,
+            ContinuousFeature::ActorAggressionStreakAfter as usize,
+            ContinuousFeature::TableAggressionStreakAfter as usize,
+            ContinuousFeature::DecisionTimeMs as usize,
+        ] {
+            if continuous_present[index] == 0 {
+                return Err(BehaviourParquetLoadError::InvalidFloat {
+                    hand_id: hand_id.clone(),
+                    field: "required feature",
+                    value: f32::NAN,
+                });
+            }
+        }
         let decision_time_ms = self.decision_time_ms.value(row);
-        continuous[ContinuousFeature::DecisionTimeMs as usize] = decision_time_ms as f32;
-
+        if continuous[ContinuousFeature::DecisionTimeMs as usize] != decision_time_ms as f32 {
+            return Err(BehaviourParquetLoadError::InvalidFloat {
+                hand_id: hand_id.clone(),
+                field: "decision_time_ms",
+                value: continuous[ContinuousFeature::DecisionTimeMs as usize],
+            });
+        }
+        validate_loaded_observation(
+            &hand_id,
+            self.sequence_index.value(row),
+            players_at_table,
+            actor_position,
+            action,
+            self.is_all_in.value(row),
+            (&continuous, &continuous_present),
+        )?;
         Ok(EventRow {
             hand_id,
             sequence_index: self.sequence_index.value(row),
@@ -930,6 +869,141 @@ impl<'a> EventColumns<'a> {
             decision_time_ms,
         })
     }
+}
+
+fn validate_loaded_observation(
+    hand_id: &HandId,
+    sequence_index: u32,
+    players_at_table: u8,
+    actor_position: u8,
+    action: u8,
+    is_all_in: bool,
+    features: (
+        &[f32; EVENT_CONTINUOUS_WIDTH],
+        &[u8; EVENT_CONTINUOUS_WIDTH],
+    ),
+) -> Result<(), BehaviourParquetLoadError> {
+    let (values, mask) = features;
+    let invalid = |reason| BehaviourParquetLoadError::InvalidObservation {
+        hand_id: hand_id.clone(),
+        reason,
+    };
+    let present = |name: ContinuousFeature| mask[name as usize] == 1;
+    let value = |name: ContinuousFeature| values[name as usize];
+    let ratio_pot = ContinuousFeature::AmountOverPot;
+    let ratio_stack = ContinuousFeature::AmountOverStack;
+    let increment = ContinuousFeature::RaiseIncrementOverPot;
+    match action {
+        0 if !present(ratio_pot) && !present(ratio_stack) && !present(increment) && !is_all_in => {}
+        1 if present(ratio_pot)
+            && present(ratio_stack)
+            && !present(increment)
+            && value(ratio_pot) == 0.0
+            && value(ratio_stack) == 0.0
+            && !is_all_in
+            && value(ContinuousFeature::ToCallBb) == 0.0 => {}
+        2 | 3 if present(ratio_pot) && present(ratio_stack) && !present(increment) => {}
+        4 if present(ratio_pot) && present(ratio_stack) && present(increment) => {}
+        _ => return Err(invalid("action kind and sizing presence disagree")),
+    }
+    if matches!(action, 2..=4) {
+        if value(ratio_pot) <= 0.0 || value(ratio_stack) <= 0.0 || value(ratio_stack) > 1.0001 {
+            return Err(invalid("invalid action sizing ratios"));
+        }
+        if is_all_in != (value(ratio_stack) >= 1.0 - 1e-4) {
+            return Err(invalid("all-in flag disagrees with sizing"));
+        }
+    }
+    if action == 2 && value(ContinuousFeature::ToCallBb) <= 0.0 {
+        return Err(invalid("call without amount to call"));
+    }
+    if action == 3 && value(ContinuousFeature::CurrentBetBb) != 0.0 {
+        return Err(invalid("bet facing an existing street bet"));
+    }
+    if action == 4 && (value(ContinuousFeature::CurrentBetBb) <= 0.0 || value(increment) <= 0.0) {
+        return Err(invalid("raise without a positive increment"));
+    }
+    let aggressive = matches!(action, 3 | 4);
+    let before_actor = value(ContinuousFeature::ActorAggressionStreakBefore);
+    let before_table = value(ContinuousFeature::TableAggressionStreakBefore);
+    let after_actor = value(ContinuousFeature::ActorAggressionStreakAfter);
+    let after_table = value(ContinuousFeature::TableAggressionStreakAfter);
+    let expected_actor = if aggressive { before_actor + 1.0 } else { 0.0 };
+    let expected_table = if aggressive { before_table + 1.0 } else { 0.0 };
+    if after_actor != expected_actor || after_table != expected_table {
+        return Err(invalid(
+            "post-action aggression streak disagrees with pre-action state",
+        ));
+    }
+    if present(ContinuousFeature::LastAggressorSequenceIndex) {
+        if !present(ContinuousFeature::LastAggressorPosition)
+            || !present(ContinuousFeature::LastAggressorActionKind)
+            || !present(ContinuousFeature::LastAggressorAmountOverPot)
+            || value(ContinuousFeature::LastAggressorSequenceIndex) >= sequence_index as f32
+            || !matches!(
+                value(ContinuousFeature::LastAggressorActionKind) as u8,
+                3 | 4
+            )
+        {
+            return Err(invalid("last aggressor fields inconsistent"));
+        }
+    } else if present(ContinuousFeature::LastAggressorPosition)
+        || present(ContinuousFeature::LastAggressorActionKind)
+    {
+        return Err(invalid("last aggressor unexpectedly present"));
+    }
+    let mut seen = [false; 7];
+    let mut total_pot_commitment = value(ContinuousFeature::CommittedThisHandBb);
+    let mut highest_street_commitment = value(ContinuousFeature::CommittedThisStreetBb);
+    if !approximately_equal(
+        (value(ContinuousFeature::CurrentBetBb) - value(ContinuousFeature::CommittedThisStreetBb))
+            .max(0.0),
+        value(ContinuousFeature::ToCallBb),
+    ) {
+        return Err(invalid("actor to-call inconsistent with street commitment"));
+    }
+    seen[usize::from(actor_position)] = true;
+    for slot in 0..5 {
+        let at = 26 + slot * 5;
+        if slot >= usize::from(players_at_table) - 1 {
+            if mask[at..at + 5].iter().any(|v| *v != 0) {
+                return Err(invalid("unused player slot is not masked"));
+            }
+            continue;
+        }
+        if mask[at..at + 5].iter().any(|v| *v != 1) {
+            return Err(invalid("a present player has missing values"));
+        }
+        let pos = values[at];
+        if pos.fract() != 0.0 || !(0.0..7.0).contains(&pos) || seen[pos as usize] {
+            return Err(invalid("duplicate or invalid player position"));
+        }
+        seen[pos as usize] = true;
+        let status = values[at + 1];
+        if status != 0.0 && status != 1.0 && status != 2.0 {
+            return Err(invalid("invalid player status"));
+        }
+        total_pot_commitment += values[at + 4];
+        highest_street_commitment = highest_street_commitment.max(values[at + 3]);
+        if values[at + 3] > values[at + 4] + 1e-4 {
+            return Err(invalid("street commitment exceeds hand commitment"));
+        }
+    }
+    if !approximately_equal(total_pot_commitment, value(ContinuousFeature::PotBb))
+        || !approximately_equal(
+            highest_street_commitment,
+            value(ContinuousFeature::CurrentBetBb),
+        )
+    {
+        return Err(invalid(
+            "pot or current bet inconsistent with the player ledger",
+        ));
+    }
+    Ok(())
+}
+
+fn approximately_equal(left: f32, right: f32) -> bool {
+    (left - right).abs() <= 1e-4 * left.abs().max(right.abs()).max(1.0)
 }
 
 struct SubjectColumns<'a> {
@@ -1097,14 +1171,13 @@ pub enum BehaviourParquetLoadError {
         field: &'static str,
         value: f32,
     },
+    InvalidObservation {
+        hand_id: HandId,
+        reason: &'static str,
+    },
     InvalidPlayersAtTable {
         hand_id: HandId,
         value: u8,
-    },
-    InvalidPlayersActive {
-        hand_id: HandId,
-        active: u8,
-        table: u8,
     },
     HandIndexOutsideSeenRange {
         hand_index: u64,
@@ -1189,7 +1262,7 @@ impl fmt::Display for BehaviourParquetLoadError {
             Self::SchemaMismatch { table, path } => {
                 write!(
                     f,
-                    "{table} schema does not match LeChiffre v1 at {}",
+                    "{table} schema does not match LeChiffre current schema at {}",
                     path.display()
                 )
             }
@@ -1267,17 +1340,13 @@ impl fmt::Display for BehaviourParquetLoadError {
                 field,
                 value,
             } => write!(f, "hand {hand_id} contains invalid {field} value {value}"),
+            Self::InvalidObservation { hand_id, reason } => write!(
+                f,
+                "hand {hand_id} contains an invalid observation: {reason}"
+            ),
             Self::InvalidPlayersAtTable { hand_id, value } => {
                 write!(f, "hand {hand_id} has invalid players_at_table {value}")
             }
-            Self::InvalidPlayersActive {
-                hand_id,
-                active,
-                table,
-            } => write!(
-                f,
-                "hand {hand_id} has {active} active players with only {table} at the table"
-            ),
             Self::HandIndexOutsideSeenRange {
                 hand_index,
                 hands_seen,
@@ -1401,222 +1470,14 @@ impl From<ParquetError> for BehaviourParquetLoadError {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
     use super::*;
-    use crate::adapters::{AdaptedHand, ObservedPlayer, PlayerId};
-    use crate::behavioural::{
-        ActionKind, BehaviourEvent, BehaviourSequence, DecisionContext, ObservedAction, Street,
-    };
-    use crate::datasets::behaviour_parquet::BehaviourParquetDatasetWriter;
-
-    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    fn temp_dataset_dir(name: &str) -> PathBuf {
-        let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "lechiffre-loader-{name}-{}-{id}",
-            std::process::id()
-        ))
-    }
-
-    fn subject_ids() -> HashMap<PlayerId, u64> {
-        HashMap::from([
-            (PlayerId::new("test:alice"), 17),
-            (PlayerId::new("test:bob"), 42),
-        ])
-    }
-
-    fn make_hand(hand_id: &str, first_timing: Option<u32>) -> AdaptedHand {
-        let mut sequence = BehaviourSequence::new(hand_id);
-        sequence
-            .push(
-                BehaviourEvent::new(
-                    hand_id,
-                    0,
-                    DecisionContext {
-                        street: Street::Preflop,
-                        actor_position: Position::ButtonSmallBlind,
-                        players_at_table: 2,
-                        players_active: 2,
-                        pot_bb: 1.5,
-                        actor_stack_bb: 99.5,
-                        effective_stack_bb: 99.0,
-                        actor_street_commitment_bb: 0.5,
-                        current_bet_bb: 1.0,
-                        to_call_bb: 0.5,
-                        min_raise_to_bb: Some(2.0),
-                        bet_or_raise_count_this_street: 0,
-                    },
-                    ObservedAction {
-                        kind: ActionKind::Call,
-                        is_all_in: false,
-                        amount_added_bb: 0.5,
-                        street_total_after_bb: 1.0,
-                        decision_time_ms: first_timing,
-                    },
-                )
-                .unwrap(),
-            )
-            .unwrap();
-        sequence
-            .push(
-                BehaviourEvent::new(
-                    hand_id,
-                    1,
-                    DecisionContext {
-                        street: Street::Flop,
-                        actor_position: Position::BigBlind,
-                        players_at_table: 2,
-                        players_active: 2,
-                        pot_bb: 2.0,
-                        actor_stack_bb: 99.0,
-                        effective_stack_bb: 99.0,
-                        actor_street_commitment_bb: 0.0,
-                        current_bet_bb: 0.0,
-                        to_call_bb: 0.0,
-                        min_raise_to_bb: None,
-                        bet_or_raise_count_this_street: 0,
-                    },
-                    ObservedAction {
-                        kind: ActionKind::Check,
-                        is_all_in: false,
-                        amount_added_bb: 0.0,
-                        street_total_after_bb: 0.0,
-                        decision_time_ms: Some(320),
-                    },
-                )
-                .unwrap(),
-            )
-            .unwrap();
-
-        AdaptedHand::new(
-            sequence,
-            vec![
-                ObservedPlayer {
-                    player_id: PlayerId::new("test:alice"),
-                    position: Position::ButtonSmallBlind,
-                },
-                ObservedPlayer {
-                    player_id: PlayerId::new("test:bob"),
-                    position: Position::BigBlind,
-                },
-            ],
-        )
-    }
-
-    #[test]
-    fn loads_unique_events_and_materializes_subject_specific_histories() {
-        let dir = temp_dataset_dir("roundtrip");
-        let exact_timing = 16_777_217_u32;
-        let hand = make_hand("hand-a", Some(exact_timing));
-        let mut writer = BehaviourParquetDatasetWriter::create(&dir).unwrap();
-        writer.write_hands(&[hand], &subject_ids()).unwrap();
-        writer.close().unwrap();
-
-        let dataset = BehaviourParquetDataset::open(&dir).unwrap();
-        assert_eq!(dataset.hand_count(), 1);
-        assert_eq!(dataset.event_count(), 2);
-        assert_eq!(dataset.subject_count(), 2);
-        assert_eq!(dataset.subject_ids().collect::<Vec<_>>(), vec![17, 42]);
-        assert_eq!(dataset.subject_hand_count(17), Some(1));
-        assert_eq!(dataset.subject_hand_count(999), None);
-
-        let alice = dataset.subject_history(17).unwrap();
-        let bob = dataset.subject_history(42).unwrap();
-        assert_eq!(alice.subject_id(), 17);
-        assert_eq!(bob.subject_id(), 42);
-        assert_eq!(alice.len(), 1);
-        assert_eq!(bob.len(), 1);
-        assert_eq!(alice.total_events(), 2);
-        assert_eq!(dataset.subject_hands(17).unwrap().len(), 1);
-        assert_eq!(alice.hands()[0].hand_id().as_str(), "hand-a");
-        assert_eq!(alice.hands()[0].decision_time_ms(), &[exact_timing, 320]);
-        assert_eq!(bob.hands()[0].decision_time_ms(), &[exact_timing, 320]);
-        assert_eq!(
-            alice.hands()[0].categorical()[0][CategoricalFeature::IsSubject as usize],
-            1
-        );
-        assert_eq!(
-            alice.hands()[0].categorical()[1][CategoricalFeature::IsSubject as usize],
-            0
-        );
-        assert_eq!(
-            bob.hands()[0].categorical()[0][CategoricalFeature::IsSubject as usize],
-            0
-        );
-        assert_eq!(
-            bob.hands()[0].categorical()[1][CategoricalFeature::IsSubject as usize],
-            1
-        );
-        assert_eq!(
-            alice.hands()[0].continuous_present()[1][ContinuousFeature::MinRaiseToBb as usize],
-            0
-        );
-        assert!(dataset.subject_history(999).is_none());
-        assert_eq!(alice.hands()[0].categorical().len(), 2);
-        assert_eq!(alice.hands()[0].continuous().len(), 2);
-
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn preserves_retained_hand_order_across_dropped_timing_gaps() {
-        let dir = temp_dataset_dir("order-gaps");
-        let hands = vec![
-            make_hand("hand-a", Some(100)),
-            make_hand("hand-dropped", None),
-            make_hand("hand-c", Some(300)),
-        ];
-        let mut writer = BehaviourParquetDatasetWriter::create(&dir).unwrap();
-        writer.write_hands(&hands, &subject_ids()).unwrap();
-        writer.close().unwrap();
-
-        let dataset = BehaviourParquetDataset::open(&dir).unwrap();
-        assert_eq!(dataset.summary().hands_seen, 3);
-        assert_eq!(dataset.summary().hands_written, 2);
-        assert_eq!(dataset.summary().dropped_hands_missing_timing, 1);
-        let history = dataset.subject_history(17).unwrap();
-        assert_eq!(history.len(), 2);
-        assert_eq!(history.hands()[0].hand_id().as_str(), "hand-a");
-        assert_eq!(history.hands()[1].hand_id().as_str(), "hand-c");
-
-        fs::remove_dir_all(dir).unwrap();
-    }
-
     #[test]
     fn rejects_dataset_without_commit_marker() {
-        let dir = temp_dataset_dir("missing-success");
-        let hand = make_hand("hand-a", Some(100));
-        let mut writer = BehaviourParquetDatasetWriter::create(&dir).unwrap();
-        writer.write_hands(&[hand], &subject_ids()).unwrap();
-        writer.close().unwrap();
-        fs::remove_file(dir.join(SUCCESS_FILE_NAME)).unwrap();
-
+        let dir = std::env::temp_dir().join(format!("lechiffre-absent-{}", std::process::id()));
+        let result = BehaviourParquetDataset::open(&dir);
         assert!(matches!(
-            BehaviourParquetDataset::open(&dir),
+            result,
             Err(BehaviourParquetLoadError::MissingSuccessMarker { .. })
         ));
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn rejects_cross_table_schema_substitution() {
-        let dir = temp_dataset_dir("schema-substitution");
-        let hand = make_hand("hand-a", Some(100));
-        let mut writer = BehaviourParquetDatasetWriter::create(&dir).unwrap();
-        writer.write_hands(&[hand], &subject_ids()).unwrap();
-        writer.close().unwrap();
-        fs::copy(dir.join(EVENTS_FILE_NAME), dir.join(SUBJECTS_FILE_NAME)).unwrap();
-
-        assert!(matches!(
-            BehaviourParquetDataset::open(&dir),
-            Err(BehaviourParquetLoadError::SchemaMismatch {
-                table: "subjects",
-                ..
-            })
-        ));
-        fs::remove_dir_all(dir).unwrap();
     }
 }

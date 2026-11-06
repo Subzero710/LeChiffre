@@ -94,28 +94,58 @@ mod tests {
     use crate::behavioural::{ActionKind, BehaviourEvent, DecisionContext, ObservedAction, Street};
 
     fn event(hand_id: &str, sequence_index: u32, position: Position) -> BehaviourEvent {
+        let other = if position == Position::Button {
+            Position::BigBlind
+        } else {
+            Position::Button
+        };
+        let context = DecisionContext {
+            street: Street::Preflop,
+            actor_position: position,
+            pot_bb: 2.0,
+            players: vec![
+                crate::behavioural::PlayerState {
+                    position,
+                    status: crate::behavioural::PlayerStatus::Active,
+                    stack_remaining_bb: 99.0,
+                    committed_this_street_bb: 1.0,
+                    committed_this_hand_bb: 1.0,
+                },
+                crate::behavioural::PlayerState {
+                    position: other,
+                    status: crate::behavioural::PlayerStatus::Active,
+                    stack_remaining_bb: 99.0,
+                    committed_this_street_bb: 1.0,
+                    committed_this_hand_bb: 1.0,
+                },
+            ],
+            current_bet_bb: 1.0,
+            to_call_bb: 0.0,
+            min_raise_to_bb: Some(2.0),
+            players_yet_to_act: 1,
+            bets_and_raises_this_street: 0,
+            calls_this_street: 0,
+            folds_this_street: 0,
+            actor_has_acted_this_street: false,
+            actor_aggression_streak_before: 0,
+            table_aggression_streak_before: 0,
+            last_aggressor: None,
+            preflop_last_aggressor_position: None,
+        };
         BehaviourEvent::new(
             hand_id,
             sequence_index,
-            DecisionContext {
-                street: Street::Preflop,
-                actor_position: position,
-                players_at_table: 6,
-                players_active: 6,
-                pot_bb: 2.0,
-                actor_stack_bb: 99.0,
-                effective_stack_bb: 99.0,
-                actor_street_commitment_bb: 1.0,
-                current_bet_bb: 1.0,
-                to_call_bb: 0.0,
-                min_raise_to_bb: Some(2.0),
-                bet_or_raise_count_this_street: 0,
-            },
+            context,
             ObservedAction {
                 kind: ActionKind::Check,
                 is_all_in: false,
-                amount_added_bb: 0.0,
-                street_total_after_bb: 1.0,
+                sizing: Some(crate::behavioural::ActionSizing {
+                    amount_over_pot_before: 0.0,
+                    amount_over_stack_before: 0.0,
+                    raise_increment_over_pot_before: None,
+                }),
+                actor_aggression_streak_after: 0,
+                table_aggression_streak_after: 0,
                 decision_time_ms: Some(320),
             },
         )

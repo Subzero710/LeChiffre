@@ -9,14 +9,16 @@ mod profile;
 mod sequence;
 
 pub use event::{
-    ActionKind, BehaviourEvent, BehaviourEventError, DecisionContext, HandId, ObservedAction,
-    Position, Street,
+    ActionHistory, ActionKind, ActionSizing, BehaviourEvent, BehaviourEventError, DecisionContext,
+    ExactAction, HandId, ObservedAction, PlayerState, PlayerStatus, Position, PreviousAggression,
+    Street,
 };
-pub(crate) use featurizer::FeaturizedHandData;
 pub use featurizer::{
     BehaviourFeaturizer, BehaviourFeaturizerError, CategoricalFeature, ContinuousFeature,
     EVENT_CATEGORICAL_WIDTH, EVENT_CONTINUOUS_WIDTH, FeaturizedHand, FeaturizedHistory,
+    PRE_ACTION_CONTEXT_WIDTH,
 };
+pub(crate) use featurizer::{FeaturizedHandData, continuous_feature_name, encode_continuous};
 pub use generator::{
     BehaviourPolicy, DenseLayer, GENERATOR_CONTEXT_WIDTH, GENERATOR_MOVE_WIDTH, GeneratorDraws,
     GeneratorError, GeneratorParameters, LegalMove, NeuralBehaviourGenerator, TimingDistribution,
