@@ -354,15 +354,15 @@ fn decode_decision(
     let street = u8::try_from(categorical[CategoricalFeature::Street as usize])
         .ok()
         .and_then(street_from_id)
-        .ok_or_else(&invalid)?;
+        .ok_or_else(invalid)?;
     let actor_position = u8::try_from(categorical[CategoricalFeature::ActorPosition as usize])
         .ok()
         .and_then(position_from_id)
-        .ok_or_else(&invalid)?;
+        .ok_or_else(invalid)?;
     let kind = u8::try_from(categorical[CategoricalFeature::Action as usize])
         .ok()
         .and_then(action_from_id)
-        .ok_or_else(&invalid)?;
+        .ok_or_else(invalid)?;
     let is_all_in = match categorical[CategoricalFeature::IsAllIn as usize] {
         0 => false,
         1 => true,
