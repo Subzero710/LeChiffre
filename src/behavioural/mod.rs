@@ -1,4 +1,4 @@
-//! Behavioural Engine data contracts and untrained conditional generator.
+//! Behavioural Engine data contracts and trainable conditional generator.
 
 pub(crate) mod codebook;
 mod event;
@@ -20,8 +20,10 @@ pub use featurizer::{
 };
 pub(crate) use featurizer::{FeaturizedHandData, continuous_feature_name, encode_continuous};
 pub use generator::{
-    BehaviourPolicy, DenseLayer, GENERATOR_CONTEXT_WIDTH, GENERATOR_MOVE_WIDTH, GeneratorDraws,
-    GeneratorError, GeneratorParameters, LegalMove, NeuralBehaviourGenerator, TimingDistribution,
+    ACTION_COUNT, Adam, BehaviourPolicy, DenseLayer, GENERATOR_CONTEXT_WIDTH,
+    GENERATOR_SIZING_WIDTH, GENERATOR_TIMING_WIDTH, GeneratorDraws, GeneratorError,
+    GeneratorParameters, LegalActionSpace, NeuralBehaviourGenerator, TimingDistribution,
+    TrainingLoss, WagerBounds,
 };
 pub use history::{BehaviourHistory, SubjectHand};
 pub use profile::{
@@ -41,7 +43,7 @@ pub trait BehaviourAnalyzer: BehaviourLatentModel {
     fn analyze(&self, support: &[FeaturizedHand]) -> Result<BehaviourProfile, Self::Error>;
 }
 
-/// Predicts a distribution over externally provided legal moves from (context, Z).
+/// Predicts action, continuous sizing and timing distributions from (context, Z).
 /// A separately supplied random draw produces one observed action from this policy.
 pub trait BehaviourGenerator: BehaviourLatentModel {
     type Error;
@@ -50,7 +52,7 @@ pub trait BehaviourGenerator: BehaviourLatentModel {
         &self,
         profile: &BehaviourProfile,
         context: &DecisionContext,
-        legal_moves: &[LegalMove],
+        legal: &LegalActionSpace,
     ) -> Result<BehaviourPolicy, Self::Error>;
 }
 
@@ -61,9 +63,9 @@ impl BehaviourGenerator for NeuralBehaviourGenerator {
         &self,
         profile: &BehaviourProfile,
         context: &DecisionContext,
-        legal_moves: &[LegalMove],
+        legal: &LegalActionSpace,
     ) -> Result<BehaviourPolicy, Self::Error> {
-        NeuralBehaviourGenerator::predict(self, profile, context, legal_moves)
+        NeuralBehaviourGenerator::predict(self, profile, context, legal)
     }
 }
 
@@ -154,7 +156,7 @@ mod tests {
             &self,
             _profile: &BehaviourProfile,
             _context: &DecisionContext,
-            _legal_moves: &[LegalMove],
+            _legal: &LegalActionSpace,
         ) -> Result<BehaviourPolicy, Self::Error> {
             unreachable!("latent contract test does not predict poker actions")
         }

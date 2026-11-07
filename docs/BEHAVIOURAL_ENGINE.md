@@ -1,6 +1,6 @@
 # Behavioral Engine — invariants et Generator
 
-Statut : **conception et noyau d'inférence non entraîné**. Aucun blueprint de référence n'est disponible à ce stade. L'entraînement du blueprint est un chantier indépendant, et ne doit pas être confondu avec l'inférence effectuée par le Behavioral Engine.
+Statut : **Generator différentiable avec loss et optimiseur Adam ; aucun poids entraîné fourni**. Aucun blueprint de référence n'est disponible à ce stade. L'entraînement du blueprint est un chantier indépendant, et ne doit pas être confondu avec l'inférence effectuée par le Behavioral Engine.
 
 ## Objectif
 
@@ -64,31 +64,36 @@ Cela n'oblige pas A à accepter un historique de mains : l'accumulation de plusi
 
 Les cartes de densité, d'incertitude et de comportement sont distinctes des cartes d'EV, qui demanderont plus tard un évaluateur poker externe.
 
-## Generator : périmètre actuel
+## Generator : architecture et entraînement
 
-`src/behavioural/generator.rs` est un **noyau d'inférence avec poids explicites** :
+`src/behavioural/generator.rs` contient **une seule implémentation** du Generator.
 
-1. Encode `DecisionContext` (street, position, valeurs en BB, masque des valeurs absentes), **sans cartes**, et `BehaviourProfile` (latent Z).
-2. Évalue par un petit MLP chaque **mouvement légal candidat** fourni par le moteur de jeu.
-3. Renvoie une distribution normalisée sur ces mouvements, plus les paramètres d'une distribution log-normale de timing.
-4. Échantillonne un `ObservedAction` uniquement parmi les mouvements fournis, avec des valeurs uniformes explicites, reproductibles.
+1. Un MLP partagé reçoit `DecisionContext` et le profil continu `Z`, sans carte ni action cible. Les valeurs numériques non négatives sont compressées par `log1p` et un masque distinct préserve les valeurs absentes.
+2. La tête **action** produit cinq logits (`Fold`, `Check`, `Call`, `Bet`, `Raise`). `LegalActionSpace`, fourni par le moteur de jeu, masque strictement les actions illégales avant le softmax. Le modèle ne reconstruit pas les règles NLHE.
+3. La tête **sizing**, conditionnée à l'action Bet/ Raise, produit trois paramètres : position et échelle d'une logistique tronquée sur l'intervalle des mises non all-in, et probabilité discrète d'all-in. L'espace des mises est défini par `WagerBounds` : montant minimal, stack maximal, incrément légal en **jetons entiers** et taille de la BB en jetons. Les probabilités sont calculées pour **chaque intervalle d'un incrément légal** via la différence des CDF, pas en scorant une liste arbitraire de quelques bet sizes. La dernière unité (stack maximal) est un all-in atomique. Une relance all-in courte est représentée par une borne minimale égale à la maximale, si le moteur l'autorise.
+4. La tête **timing** reçoit l'état caché, l'action et la fraction de stack engagée. Elle prédit une loi normale sur `log(1 + decision_time_ms)` ; l'échantillonnage produit un nombre de millisecondes non négatif.
+5. Le `GeneratorDraws` possède des tirages reproductibles distincts pour action, sizing, masse all-in et timing. `ObservedAction::from_exact` reconstruit les ratios et les streaks depuis le contexte, donc `Fold` garde un sizing absent et `Check` un sizing nul.
+6. `Adam::train_step` calcule la NLL masquée de l'action, la NLL du sizing discrétisé uniquement pour Bet/Raise, et la NLL du timing lorsqu'il est observé ; puis effectue une **rétropropagation analytique** (reverse-mode) dans les quatre couches et une mise à jour Adam. Les deux représentations des ratios du sizing ne constituent jamais deux cibles indépendantes.
+7. `TrainingLoss.latent_gradient` expose le gradient par rapport à Z, mais **n'optimise pas silencieusement Z**. Son apprentissage et celui de l'Analyzer restent des chantiers distincts.
 
-**Aucun poids entraîné, aucune boucle d'entraînement, aucune autodifférentiation, aucun blueprint, aucun Analyzer et aucun plugin rs-poker de production ne sont inclus.** Il faudra notamment remplacer ou prolonger le scoring sur candidats discrets pour représenter plus finement les sizings continus. Un candidat « légal » est ici déclaré par l'appelant : la validation intégrale de sa légalité appartient aux règles du jeu. Le Generator contrôle seulement les invariants numériques et certaines cohérences de montants ; il ne reconstruit pas les règles NLHE à partir de `DecisionContext`.
+### Contrats obligatoires
 
-L'interface `BehaviourGenerator::predict(profile, context, legal_moves)` ne reçoit que le contexte courant. Aucun historique de mains n'entre dans G.
+- Le moteur externe fournit le masque exact et les bornes de chaque mise ou relance à chaque décision. Le Generator rejette une observation incompatible, plutôt que d'inférer des règles manquantes.
+- Les bounds utilisent des montants exacts en jetons entiers ; la conversion BB ne sert qu'à la représentation comportementale. Le montant max représente l'all-in. Pour le NLHE, il égale le stack disponible.
+- La loss temporelle est définie sur les millisecondes transformées par `log1p`, pas sur les millisecondes brutes.
+- L'optimiseur s'entraîne sur une décision à la fois. L'assemblage de batches, le raccordement à l'export Parquet et l'apprentissage de Z par joueur appartiennent à l'étape suivante.
+- Le code d'apprentissage est en Rust standard : rétropropagation analytique et Adam, sans backend externe d'autodiff. Aucun blueprint ni Analyzer n'a été ajouté.
 
-## Points d'attention avant entraînement de G
+## Contrôles requis
 
-- La sortie probabiliste de G doit rester différentiable **par rapport à Z** pendant l'entraînement futur de A/G. Le noyau actuel fait uniquement l'inférence CPU en Rust standard ; il ne fournit **pas** encore de gradient.
-- La quantification des tailles de mises et la granularité de timing doivent respecter le format observable. Ne jamais encoder silencieusement Z dans des décimales non observables.
-- Une politique sur les seuls candidats fournis ne couvre que ces candidats. La génération exhaustive des sizings légaux et son coût restent à traiter avec le moteur.
-- Des tests de validité, de continuité, de diversité, d'incertitude et de sensibilité à Z seront nécessaires **après** l'entraînement ; des tests unitaires de forme ne démontrent pas ces propriétés.
-- La relation entre le blueprint futur et l'espace Z (déviation conditionnelle ou autre conditionnement) reste à définir. Il ne faut pas imposer aujourd'hui une sémantique non décidée aux coordonnées de Z.
+`cargo fmt --all --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings` et `cargo test --locked --all-targets --all-features` doivent réussir avant intégration.
+
+Les tests du Generator vérifient le masque légal, la normalisation, les incréments de sizing, la masse all-in, `Fold=None`, `Check=0`, la correspondance des gradients de sizing aux différences finies, la baisse de la loss sous Adam et la présence du gradient jusqu'à Z. Les tests ne remplacent pas la validation empirique sur des mains jamais vues.
 
 ## Phases distinctes
 
 1. **Blueprint** : apprentissage externe de la stratégie de référence (non réalisé).
-2. **A/G** : entraînement de l'espace latent comportemental et des deux modèles, en contrôlant les raccourcis/collusions (non réalisé).
-3. **Inférence** : A infère des informations sur Z depuis des observations, G transforme C et Z en distribution d'actions (noyau G commencé seulement).
+2. **A/G** : construction du Generator entraînable réalisée ; apprentissage de Z et entraînement conjoint avec l'Analyzer non réalisés.
+3. **Inférence** : G transforme C et Z en distributions d'action, sizing et timing ; A reste à développer.
 
-Ce document décrit les invariants de conception, et distingue explicitement les fonctionnalités disponibles des objectifs à venir.
+Ce document décrit le contrat actuel, les capacités implémentées et les objectifs encore non réalisés.
