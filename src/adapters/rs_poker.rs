@@ -10,8 +10,8 @@ use rs_poker::arena::{Agent, GameState, Historian, HistorianError};
 
 use crate::behavioural::{
     ActionHistory, ActionKind, BehaviourEvent, BehaviourEventError, BehaviourSequence,
-    BehaviourSequenceError, DecisionContext, ExactAction, HandId, PlayerState, PlayerStatus,
-    Position, Street,
+    BehaviourSequenceError, DecisionContext, ExactAction, GeneratorError, HandId, LegalActionSpace,
+    PlayerState, PlayerStatus, Position, Street, WagerBounds,
 };
 
 type DecisionKey = (u128, usize);
@@ -203,6 +203,53 @@ fn record_played_action(
     sequence.push(event)?;
 
     Ok(())
+}
+
+/// Derive the complete NLHE action mask and exact chip bounds from the engine.
+/// The behavioural model never infers legal actions from an observed choice.
+pub fn exact_legal_actions(game_state: &GameState) -> Result<LegalActionSpace, GeneratorError> {
+    let seat = game_state.to_act_idx();
+    let stack = game_state.stacks[seat];
+    let street_commitment = game_state.current_round_player_bet(seat);
+    let current_bet = game_state.current_round_bet();
+    let minimum_raise = game_state.current_round_min_raise();
+    if stack <= 0 || game_state.big_blind <= 0 {
+        return Err(GeneratorError::InvalidLegalActions);
+    }
+    let to_call = (current_bet - street_commitment).max(0);
+    let mut legal = LegalActionSpace {
+        fold: true,
+        check: to_call == 0,
+        call: to_call > 0,
+        bet: None,
+        raise: None,
+    };
+    let max_total = street_commitment
+        .checked_add(stack)
+        .ok_or(GeneratorError::InvalidWagerBounds)?;
+    let min_total = current_bet
+        .checked_add(minimum_raise)
+        .ok_or(GeneratorError::InvalidWagerBounds)?;
+    let min_legal_total = min_total.min(max_total);
+    if min_legal_total > current_bet
+        && !game_state.is_raise_capped()
+        && game_state.validate_bet_amount(min_legal_total).is_ok()
+        && game_state.validate_bet_amount(max_total).is_ok()
+    {
+        let bounds = WagerBounds {
+            min_added_chips: min_legal_total - street_commitment,
+            max_added_chips: stack,
+            chip_unit: 1,
+            big_blind_chips: game_state.big_blind,
+        };
+        if current_bet == 0 {
+            legal.bet = Some(bounds);
+        } else {
+            legal.raise = Some(bounds);
+        }
+    }
+    legal.validate(&decision_context(game_state))?;
+    Ok(legal)
 }
 
 pub(super) fn decision_context(game_state: &GameState) -> DecisionContext {
@@ -464,6 +511,35 @@ mod tests {
             validate_player_count(7),
             Err(RsPokerAdapterError::UnsupportedPlayerCount { players: 7 })
         ));
+    }
+
+    #[test]
+    fn exact_legality_matches_engine_minimum_and_all_in() {
+        let game = GameStateBuilder::new()
+            .num_players_with_stack(2, 100)
+            .blinds(2, 1)
+            .round(Round::Flop)
+            .player_bet([2, 2])
+            .max_raises_per_round(None)
+            .build()
+            .unwrap();
+        assert_eq!(game.total_pot, 4);
+        assert_eq!(game.current_round_bet(), 0);
+        let legal = exact_legal_actions(&game).unwrap();
+        assert!(legal.check);
+        assert!(!legal.call);
+        assert_eq!(legal.bet.unwrap().min_added_chips, 2);
+        assert_eq!(legal.bet.unwrap().max_added_chips, 100);
+        assert_eq!(legal.bet.unwrap().big_blind_chips, 2);
+
+        let mut raised = game;
+        raised.do_bet(10, false).unwrap();
+        let facing = exact_legal_actions(&raised).unwrap();
+        assert!(facing.fold);
+        assert!(facing.call);
+        assert!(!facing.check);
+        assert!(facing.raise.is_some());
+        assert_eq!(facing.raise.unwrap().min_added_chips, 20);
     }
 
     #[tokio::test]

@@ -11,11 +11,17 @@ use serde_json::Value;
 
 use super::hand_history::{HandHistoryAdapter, HandHistoryAdapterError};
 use super::{AdaptedHand, PlayerId};
+use crate::behavioural::{HandId, LegalActionSpace};
+
+type AdaptedHandWithLegality = (AdaptedHand, HashMap<(HandId, u32), LegalActionSpace>);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PokerNowImport {
     pub hands: Vec<AdaptedHand>,
     pub rejected: Vec<PokerNowRejectedHand>,
+    /// Exact rules-engine legal spaces for each source decision, keyed by
+    /// canonical hand ID and sequence index. Never a model input/target.
+    pub exact_legal_actions: HashMap<(HandId, u32), LegalActionSpace>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +47,7 @@ impl PokerNowAdapter {
 
         let mut hands = Vec::new();
         let mut rejected = Vec::new();
+        let mut exact_legal_actions = HashMap::new();
         let mut current = Vec::new();
 
         for row in rows {
@@ -52,6 +59,7 @@ impl PokerNowAdapter {
                     &mut normalize_name,
                     &mut hands,
                     &mut rejected,
+                    &mut exact_legal_actions,
                 );
                 current.clear();
             }
@@ -69,6 +77,7 @@ impl PokerNowAdapter {
                     &mut normalize_name,
                     &mut hands,
                     &mut rejected,
+                    &mut exact_legal_actions,
                 );
                 current.clear();
             }
@@ -81,10 +90,15 @@ impl PokerNowAdapter {
                 &mut normalize_name,
                 &mut hands,
                 &mut rejected,
+                &mut exact_legal_actions,
             );
         }
 
-        Ok(PokerNowImport { hands, rejected })
+        Ok(PokerNowImport {
+            hands,
+            rejected,
+            exact_legal_actions,
+        })
     }
 
     pub fn adapt_pokerlater_json<F>(
@@ -112,6 +126,7 @@ impl PokerNowAdapter {
 
         let mut hands = Vec::new();
         let mut rejected = Vec::new();
+        let mut exact_legal_actions = HashMap::new();
         for raw in raw_hands {
             if raw["final"]["phase"].as_str() != Some("complete") {
                 continue;
@@ -131,7 +146,10 @@ impl PokerNowAdapter {
             )
             .and_then(adapt_parsed_hand)
             {
-                Ok(hand) => hands.push(hand),
+                Ok((hand, legal)) => {
+                    exact_legal_actions.extend(legal);
+                    hands.push(hand);
+                }
                 Err(error) => rejected.push(PokerNowRejectedHand {
                     source_hand_id,
                     reason: error.to_string(),
@@ -139,7 +157,11 @@ impl PokerNowAdapter {
             }
         }
 
-        Ok(PokerNowImport { hands, rejected })
+        Ok(PokerNowImport {
+            hands,
+            rejected,
+            exact_legal_actions,
+        })
     }
 }
 
@@ -150,6 +172,7 @@ fn import_csv_hand<F>(
     normalize_name: &mut F,
     hands: &mut Vec<AdaptedHand>,
     rejected: &mut Vec<PokerNowRejectedHand>,
+    exact_legal_actions: &mut HashMap<(HandId, u32), LegalActionSpace>,
 ) where
     F: FnMut(&str) -> Option<String>,
 {
@@ -162,7 +185,10 @@ fn import_csv_hand<F>(
     match build_csv_hand(session_id, identity_namespace, rows, normalize_name)
         .and_then(adapt_parsed_hand)
     {
-        Ok(hand) => hands.push(hand),
+        Ok((hand, legal)) => {
+            exact_legal_actions.extend(legal);
+            hands.push(hand);
+        }
         Err(error) => rejected.push(PokerNowRejectedHand {
             source_hand_id,
             reason: error.to_string(),
@@ -170,13 +196,15 @@ fn import_csv_hand<F>(
     }
 }
 
-fn adapt_parsed_hand(parsed: ParsedHand) -> Result<AdaptedHand, PokerNowHandError> {
-    Ok(HandHistoryAdapter::adapt_with_observations(
+fn adapt_parsed_hand(parsed: ParsedHand) -> Result<AdaptedHandWithLegality, PokerNowHandError> {
+    let legal = HandHistoryAdapter::exact_legality_index(&parsed.hand, RakeConfig::none())?;
+    let hand = HandHistoryAdapter::adapt_with_observations(
         &parsed.hand,
         RakeConfig::none(),
         &parsed.decision_times_ms,
         &parsed.player_ids,
-    )?)
+    )?;
+    Ok((hand, legal))
 }
 
 #[derive(Debug, Clone)]
@@ -1485,6 +1513,14 @@ mod tests {
         assert_eq!(imported.rejected.len(), 0);
         assert_eq!(imported.hands.len(), 1);
         let events = imported.hands[0].sequence().events();
+        assert_eq!(imported.exact_legal_actions.len(), events.len());
+        for event in events {
+            assert!(
+                imported
+                    .exact_legal_actions
+                    .contains_key(&(event.hand_id.clone(), event.sequence_index))
+            );
+        }
         assert_eq!(events[0].action.decision_time_ms, Some(1292));
         assert_eq!(events[1].action.decision_time_ms, Some(890));
         assert!(

@@ -46,6 +46,12 @@ pub use sampling::{
     SupportQuerySample, SupportQuerySampleError,
 };
 
+mod generator_training;
+pub use generator_training::{
+    ExactLegalityProvider, GeneratorEpochReport, GeneratorHandSplit, GeneratorLossSummary,
+    GeneratorTrainer, GeneratorTrainingConfig, GeneratorTrainingError,
+};
+
 mod training_episode;
 pub use training_episode::{
     BehaviourQueryContext, BehaviourQueryDecision, BehaviourQueryTarget, BehaviourTrainingEpisode,

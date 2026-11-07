@@ -10,8 +10,9 @@ use std::fmt;
 use super::codebook::{action_id, position_id, street_id};
 use super::featurizer::encode_context;
 use super::{
-    ActionKind, BehaviourEventError, BehaviourLatentConfig, BehaviourLatentModel, BehaviourProfile,
-    DecisionContext, ExactAction, ObservedAction, PRE_ACTION_CONTEXT_WIDTH,
+    ActionKind, ActionSizing, BehaviourEventError, BehaviourLatentConfig, BehaviourLatentModel,
+    BehaviourProfile, DecisionContext, ExactAction, ObservedAction, PRE_ACTION_CONTEXT_WIDTH,
+    Position, Street,
 };
 
 const STREET_COUNT: usize = 4;
@@ -133,45 +134,60 @@ impl LegalActionSpace {
 
     pub fn validate(self, context: &DecisionContext) -> Result<(), GeneratorError> {
         context.validate().map_err(GeneratorError::InvalidContext)?;
+        let actor = context.actor().map_err(GeneratorError::InvalidContext)?;
+        self.validate_facts(
+            context.pot_bb,
+            actor.stack_remaining_bb,
+            actor.committed_this_street_bb,
+            context.current_bet_bb,
+            context.to_call_bb,
+        )
+    }
+
+    /// Invariants shared by live inference and stored Parquet observations.
+    fn validate_facts(
+        self,
+        pot_bb: f32,
+        stack_bb: f32,
+        actor_street_bb: f32,
+        current_bet_bb: f32,
+        to_call_bb: f32,
+    ) -> Result<(), GeneratorError> {
         if ![
-            self.fold,
-            self.check,
-            self.call,
-            self.bet.is_some(),
-            self.raise.is_some(),
+            pot_bb,
+            stack_bb,
+            actor_street_bb,
+            current_bet_bb,
+            to_call_bb,
         ]
-        .contains(&true)
+        .iter()
+        .all(|x| x.is_finite() && *x >= 0.0)
+            || stack_bb <= 0.0
+            || ![
+                self.fold,
+                self.check,
+                self.call,
+                self.bet.is_some(),
+                self.raise.is_some(),
+            ]
+            .contains(&true)
         {
-            return Err(GeneratorError::NoLegalActions);
-        }
-        if (self.bet.is_some() || self.raise.is_some()) && context.pot_bb <= 0.0 {
             return Err(GeneratorError::InvalidLegalActions);
         }
-        if self.check && context.to_call_bb != 0.0
-            || self.call && context.to_call_bb <= 0.0
-            || self.bet.is_some() && context.current_bet_bb != 0.0
-            || self.raise.is_some() && context.current_bet_bb <= 0.0
+        if (self.bet.is_some() || self.raise.is_some()) && pot_bb <= 0.0
+            || self.check && to_call_bb != 0.0
+            || self.call && to_call_bb <= 0.0
+            || self.bet.is_some() && current_bet_bb != 0.0
+            || self.raise.is_some() && current_bet_bb <= 0.0
         {
-            return Err(GeneratorError::InvalidLegalActions);
-        }
-        let stack = context
-            .actor()
-            .map_err(GeneratorError::InvalidContext)?
-            .stack_remaining_bb;
-        if stack <= 0.0 {
             return Err(GeneratorError::InvalidLegalActions);
         }
         for (kind, bounds) in [(ActionKind::Bet, self.bet), (ActionKind::Raise, self.raise)] {
             if let Some(bounds) = bounds {
-                bounds.ticks()?;
-                if (bounds.amount(bounds.ticks()?) - stack).abs() > 1e-4 * stack.max(1.0)
+                let count = bounds.ticks()?;
+                if !close(bounds.amount(count), stack_bb)
                     || (kind == ActionKind::Raise
-                        && context
-                            .actor()
-                            .map_err(GeneratorError::InvalidContext)?
-                            .committed_this_street_bb
-                            + bounds.amount(0)
-                            <= context.current_bet_bb)
+                        && actor_street_bb + bounds.amount(0) <= current_bet_bb)
                 {
                     return Err(GeneratorError::InvalidWagerBounds);
                 }
@@ -275,6 +291,110 @@ pub struct NeuralBehaviourGenerator {
     parameters: GeneratorParameters,
 }
 
+/// One subject decision read from the canonical behavioural features.
+/// The current action is kept out of the pre-decision tensor by construction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GeneratorObservation {
+    pub street: Street,
+    pub actor_position: Position,
+    pub context_values: [f32; PRE_ACTION_CONTEXT_WIDTH],
+    pub context_present: [u8; PRE_ACTION_CONTEXT_WIDTH],
+    pub observed: ObservedAction,
+}
+
+impl GeneratorObservation {
+    fn validated_facts(&self, legal: LegalActionSpace) -> Result<(f32, f32), GeneratorError> {
+        if self.context_present.iter().any(|&v| v != 0 && v != 1)
+            || self
+                .context_values
+                .iter()
+                .zip(&self.context_present)
+                .any(|(&v, &present)| !v.is_finite() || v < 0.0 || (present == 0 && v != 0.0))
+            || [0_usize, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13]
+                .iter()
+                .any(|&index| self.context_present[index] == 0)
+        {
+            return Err(GeneratorError::InvalidEncodedObservation);
+        }
+        let pot = self.context_values[0];
+        let stack = self.context_values[1];
+        let committed_street = self.context_values[2];
+        let bet = self.context_values[4];
+        let to_call = self.context_values[5];
+        legal.validate_facts(pot, stack, committed_street, bet, to_call)?;
+        if !legal.allowed(self.observed.kind) {
+            return Err(GeneratorError::IllegalObservedAction);
+        }
+        let amount = match (self.observed.kind, self.observed.sizing) {
+            (ActionKind::Fold, None) => 0.0,
+            (ActionKind::Check, Some(sizing))
+                if sizing.amount_over_pot_before == 0.0
+                    && sizing.amount_over_stack_before == 0.0
+                    && sizing.raise_increment_over_pot_before.is_none() =>
+            {
+                0.0
+            }
+            (ActionKind::Call, Some(sizing))
+                if sizing.raise_increment_over_pot_before.is_none() =>
+            {
+                let value = stack * sizing.amount_over_stack_before;
+                if !close(value, to_call.min(stack)) {
+                    return Err(GeneratorError::InvalidEncodedObservation);
+                }
+                value
+            }
+            (ActionKind::Bet, Some(sizing)) if sizing.raise_increment_over_pot_before.is_none() => {
+                stack * sizing.amount_over_stack_before
+            }
+            (ActionKind::Raise, Some(sizing))
+                if sizing.raise_increment_over_pot_before.is_some() =>
+            {
+                stack * sizing.amount_over_stack_before
+            }
+            _ => return Err(GeneratorError::InvalidEncodedObservation),
+        };
+        if !amount.is_finite()
+            || amount < 0.0
+            || amount > stack + 1e-4 * stack
+            || self.observed.is_all_in
+                != (matches!(
+                    self.observed.kind,
+                    ActionKind::Call | ActionKind::Bet | ActionKind::Raise
+                ) && close(amount, stack))
+        {
+            return Err(GeneratorError::InvalidEncodedObservation);
+        }
+        if let Some(ActionSizing {
+            amount_over_pot_before,
+            amount_over_stack_before,
+            raise_increment_over_pot_before,
+        }) = self.observed.sizing
+        {
+            if !amount_over_pot_before.is_finite()
+                || !amount_over_stack_before.is_finite()
+                || amount_over_pot_before < 0.0
+                || amount_over_stack_before < 0.0
+                || !close(amount, pot * amount_over_pot_before)
+            {
+                return Err(GeneratorError::InvalidEncodedObservation);
+            }
+            if self.observed.kind == ActionKind::Raise {
+                let increment = committed_street + amount - bet;
+                if increment <= 0.0
+                    || !raise_increment_over_pot_before
+                        .is_some_and(|ratio| ratio.is_finite() && close(increment, pot * ratio))
+                {
+                    return Err(GeneratorError::InvalidEncodedObservation);
+                }
+            }
+        }
+        if let Some(bounds) = legal.bounds(self.observed.kind) {
+            bounds.index(amount)?;
+        }
+        Ok((stack, to_call))
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ForwardPass {
     input: Vec<f64>,
@@ -340,14 +460,25 @@ impl NeuralBehaviourGenerator {
         context: &DecisionContext,
         legal: LegalActionSpace,
     ) -> Result<ForwardPass, GeneratorError> {
+        legal.validate(context)?;
+        self.forward_features(profile, context_features(context), legal)
+    }
+
+    fn forward_features(
+        &self,
+        profile: &BehaviourProfile,
+        mut input: Vec<f64>,
+        legal: LegalActionSpace,
+    ) -> Result<ForwardPass, GeneratorError> {
         if profile.dimension() != self.latent.dimension() {
             return Err(GeneratorError::WrongLatentDimension {
                 expected: self.latent.dimension(),
                 actual: profile.dimension(),
             });
         }
-        legal.validate(context)?;
-        let mut input = context_features(context);
+        if input.len() != GENERATOR_CONTEXT_WIDTH {
+            return Err(GeneratorError::InvalidEncodedObservation);
+        }
         input.extend(profile.as_slice().iter().map(|&x| f64::from(x)));
         let state = self
             .parameters
@@ -561,14 +692,22 @@ const KINDS: [ActionKind; ACTION_COUNT] = [
 ];
 
 fn context_features(ctx: &DecisionContext) -> Vec<f64> {
-    let mut values = vec![0.0; GENERATOR_CONTEXT_WIDTH];
-    values[usize::from(street_id(ctx.street))] = 1.0;
-    values[STREET_COUNT + usize::from(position_id(ctx.actor_position))] = 1.0;
-    let start = STREET_COUNT + POSITION_COUNT;
     let (numeric, mask) = encode_context(ctx);
+    encoded_context_features(ctx.street, ctx.actor_position, &numeric, &mask)
+}
+
+fn encoded_context_features(
+    street: Street,
+    position: Position,
+    numeric: &[f32; PRE_ACTION_CONTEXT_WIDTH],
+    mask: &[u8; PRE_ACTION_CONTEXT_WIDTH],
+) -> Vec<f64> {
+    let mut values = vec![0.0; GENERATOR_CONTEXT_WIDTH];
+    values[usize::from(street_id(street))] = 1.0;
+    values[STREET_COUNT + usize::from(position_id(position))] = 1.0;
+    let start = STREET_COUNT + POSITION_COUNT;
     for i in 0..PRE_ACTION_CONTEXT_WIDTH {
-        // All numeric public fields are nonnegative. Log compression prevents
-        // large stacks and historic timing from saturating the tanh MLP.
+        // Identical normalization for observed Parquet and live game contexts.
         values[start + i] = f64::from(numeric[i]).ln_1p();
         values[start + PRE_ACTION_CONTEXT_WIDTH + i] = f64::from(mask[i]);
     }
@@ -726,7 +865,52 @@ fn loss_gradients(
     if !legal.allowed(action.kind) {
         return Err(GeneratorError::IllegalObservedAction);
     }
-    let forward = model.forward(profile, context, legal)?;
+    legal.validate(context)?;
+    let actor = context.actor().map_err(GeneratorError::InvalidContext)?;
+    loss_gradients_features(
+        model,
+        profile,
+        context_features(context),
+        legal,
+        action,
+        actor.stack_remaining_bb,
+        context.to_call_bb,
+    )
+}
+
+fn loss_gradients_encoded(
+    model: &NeuralBehaviourGenerator,
+    profile: &BehaviourProfile,
+    observation: &GeneratorObservation,
+    legal: LegalActionSpace,
+) -> Result<(TrainingLoss, Gradients), GeneratorError> {
+    let (stack, to_call) = observation.validated_facts(legal)?;
+    loss_gradients_features(
+        model,
+        profile,
+        encoded_context_features(
+            observation.street,
+            observation.actor_position,
+            &observation.context_values,
+            &observation.context_present,
+        ),
+        legal,
+        &observation.observed,
+        stack,
+        to_call,
+    )
+}
+
+fn loss_gradients_features(
+    model: &NeuralBehaviourGenerator,
+    profile: &BehaviourProfile,
+    encoded: Vec<f64>,
+    legal: LegalActionSpace,
+    action: &ObservedAction,
+    actor_stack: f32,
+    to_call: f32,
+) -> Result<(TrainingLoss, Gradients), GeneratorError> {
+    let forward = model.forward_features(profile, encoded, legal)?;
     let k = usize::from(action_id(action.kind));
     let probability = forward.probabilities[k];
     if !probability.is_finite() || probability <= 0.0 {
@@ -745,12 +929,11 @@ fn loss_gradients(
             .backward(&forward.state, &logits_gradient, &mut grads.action),
     );
 
-    let actor = context.actor().map_err(GeneratorError::InvalidContext)?;
     let amount = match action.kind {
         ActionKind::Fold | ActionKind::Check => 0.0,
-        ActionKind::Call => context.to_call_bb.min(actor.stack_remaining_bb),
+        ActionKind::Call => to_call.min(actor_stack),
         ActionKind::Bet | ActionKind::Raise => {
-            actor.stack_remaining_bb
+            actor_stack
                 * action
                     .sizing
                     .ok_or(GeneratorError::InvalidObservedWager)?
@@ -773,8 +956,8 @@ fn loss_gradients(
 
     let mut timing_loss = 0.0;
     if let Some(ms) = action.decision_time_ms {
-        let fraction = if actor.stack_remaining_bb > 0.0 {
-            f64::from(amount / actor.stack_remaining_bb)
+        let fraction = if actor_stack > 0.0 {
+            f64::from(amount / actor_stack)
         } else {
             0.0
         };
@@ -1008,8 +1191,7 @@ impl Adam {
         })
     }
 
-    /// One observed decision: NLL, reverse-mode backprop, then one Adam update.
-    /// Latent Z is *not* silently optimized: its gradient is returned explicitly.
+    /// One raw game decision: NLL, reverse-mode backprop, then Adam.
     pub fn train_step(
         &mut self,
         model: &mut NeuralBehaviourGenerator,
@@ -1018,10 +1200,31 @@ impl Adam {
         legal: &LegalActionSpace,
         observed: &ObservedAction,
     ) -> Result<TrainingLoss, GeneratorError> {
+        let (loss, gradients) = loss_gradients(model, profile, context, *legal, observed)?;
+        self.apply(model, loss, gradients)
+    }
+
+    /// The same training path, fed by canonical pre-action Parquet tensors.
+    pub fn train_encoded(
+        &mut self,
+        model: &mut NeuralBehaviourGenerator,
+        profile: &BehaviourProfile,
+        observation: &GeneratorObservation,
+        legal: &LegalActionSpace,
+    ) -> Result<TrainingLoss, GeneratorError> {
+        let (loss, gradients) = loss_gradients_encoded(model, profile, observation, *legal)?;
+        self.apply(model, loss, gradients)
+    }
+
+    fn apply(
+        &mut self,
+        model: &mut NeuralBehaviourGenerator,
+        loss: TrainingLoss,
+        gradients: Gradients,
+    ) -> Result<TrainingLoss, GeneratorError> {
         if !self.moments.matches(&model.parameters) {
             return Err(GeneratorError::OptimizerModelMismatch);
         }
-        let (loss, gradients) = loss_gradients(model, profile, context, *legal, observed)?;
         let step = self
             .step
             .checked_add(1)
@@ -1044,6 +1247,16 @@ impl Adam {
         observed: &ObservedAction,
     ) -> Result<TrainingLoss, GeneratorError> {
         loss_gradients(model, profile, context, *legal, observed).map(|(loss, _)| loss)
+    }
+
+    pub fn evaluate_encoded(
+        &self,
+        model: &NeuralBehaviourGenerator,
+        profile: &BehaviourProfile,
+        observation: &GeneratorObservation,
+        legal: &LegalActionSpace,
+    ) -> Result<TrainingLoss, GeneratorError> {
+        loss_gradients_encoded(model, profile, observation, *legal).map(|(loss, _)| loss)
     }
 
     pub fn steps(&self) -> u64 {
@@ -1073,6 +1286,7 @@ pub enum GeneratorError {
     WrongLatentDimension { expected: usize, actual: usize },
     NoLegalActions,
     InvalidLegalActions,
+    InvalidEncodedObservation,
     InvalidWagerBounds,
     InvalidObservedWager,
     IllegalObservedAction,
@@ -1338,6 +1552,30 @@ mod tests {
                 reference.latent_gradient[i]
             );
         }
+    }
+
+    #[test]
+    fn parquet_features_and_live_context_have_identical_nll_and_latent_gradient() {
+        let game = ctx();
+        let observed = observed_bet(5.0);
+        let (numeric, mask) = encode_context(&game);
+        let encoded = GeneratorObservation {
+            street: game.street,
+            actor_position: game.actor_position,
+            context_values: numeric,
+            context_present: mask,
+            observed: observed.clone(),
+        };
+        let model = model();
+        let adam = Adam::new(&model, 0.001).unwrap();
+        let live = adam
+            .evaluate(&model, &profile(), &game, &legal(), &observed)
+            .unwrap();
+        let stored = adam
+            .evaluate_encoded(&model, &profile(), &encoded, &legal())
+            .unwrap();
+        assert!((live.total - stored.total).abs() < 1e-12);
+        assert_eq!(live.latent_gradient, stored.latent_gradient);
     }
 
     #[test]

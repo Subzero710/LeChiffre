@@ -9,10 +9,11 @@ use rs_poker::open_hand_history::{
 
 use crate::behavioural::{
     ActionHistory, ActionKind, BehaviourEvent, BehaviourEventError, BehaviourHistory,
-    BehaviourSequence, BehaviourSequenceError, ExactAction, HandId,
+    BehaviourSequence, BehaviourSequenceError, ExactAction, GeneratorError, HandId,
+    LegalActionSpace,
 };
 
-use super::rs_poker::{decision_context, position_for_index, to_bb};
+use super::rs_poker::{decision_context, exact_legal_actions, position_for_index, to_bb};
 use super::{AdaptedHand, ObservedPlayer, PlayerId};
 
 pub struct HandHistoryAdapter;
@@ -77,6 +78,28 @@ impl HandHistoryAdapter {
         }
 
         Ok(AdaptedHand::new(sequence, players))
+    }
+
+    /// Replay the original rules-engine states to recover the exact legal masks
+    /// and integral-chip bet/raise bounds for Parquet training. Keys match the
+    /// canonical IDs and decision sequence indexes produced by `adapt`.
+    pub fn exact_legality_index(
+        hand: &HandHistory,
+        rake: RakeConfig,
+    ) -> Result<HashMap<(HandId, u32), LegalActionSpace>, HandHistoryAdapterError> {
+        let replayed = replay_hand(hand, rake)?;
+        let hand_id = HandId::new(format!("{}:{}", hand.site_name, hand.game_number));
+        let mut legal = HashMap::new();
+        for (offset, step) in replayed.transitions().enumerate() {
+            let sequence_index =
+                u32::try_from(offset).map_err(|_| HandHistoryAdapterError::SequenceTooLong)?;
+            legal.insert(
+                (hand_id.clone(), sequence_index),
+                exact_legal_actions(&step.state_before)
+                    .map_err(HandHistoryAdapterError::InvalidExactLegality)?,
+            );
+        }
+        Ok(legal)
     }
 
     /// Builds a multi-hand behavioural history by exact source-observed
@@ -168,6 +191,7 @@ pub enum HandHistoryAdapterError {
     MissingPlayerIdentity { source_player_id: u64 },
     DuplicatePlayerIdentity { player_id: PlayerId },
     TimingCountMismatch { expected: usize, observed: usize },
+    InvalidExactLegality(GeneratorError),
     Replay(ReplayError),
     BehaviourEvent(BehaviourEventError),
     BehaviourSequence(BehaviourSequenceError),
@@ -205,6 +229,9 @@ impl fmt::Display for HandHistoryAdapterError {
                 f,
                 "timing count does not match replay decisions: expected {expected}, got {observed}"
             ),
+            Self::InvalidExactLegality(error) => {
+                write!(f, "invalid exact legality in replay: {error}")
+            }
             Self::Replay(error) => write!(f, "hand history replay failed: {error}"),
             Self::BehaviourEvent(error) => write!(f, "invalid behaviour event: {error}"),
             Self::BehaviourSequence(error) => write!(f, "invalid behaviour sequence: {error}"),
@@ -258,6 +285,29 @@ mod tests {
                 .iter()
                 .all(|event| event.action.decision_time_ms.is_none())
         );
+    }
+
+    #[test]
+    fn exact_legality_keys_match_the_observation_sequence() {
+        let hand = PokerStarsParser::default()
+            .parse(include_str!(
+                "../../vendor/rs-poker/tests/fixtures/rooms/pokerstars.txt"
+            ))
+            .unwrap()
+            .remove(0);
+        let indexed = HandHistoryAdapter::exact_legality_index(&hand, RakeConfig::none()).unwrap();
+        let adapted = HandHistoryAdapter::adapt(&hand, RakeConfig::none()).unwrap();
+        assert_eq!(indexed.len(), adapted.sequence().len());
+        for event in adapted.sequence().events() {
+            let legal = indexed[&(event.hand_id.clone(), event.sequence_index)];
+            assert!(match event.action.kind {
+                ActionKind::Fold => legal.fold,
+                ActionKind::Check => legal.check,
+                ActionKind::Call => legal.call,
+                ActionKind::Bet => legal.bet.is_some(),
+                ActionKind::Raise => legal.raise.is_some(),
+            });
+        }
     }
 
     #[test]

@@ -22,8 +22,8 @@ pub(crate) use featurizer::{FeaturizedHandData, continuous_feature_name, encode_
 pub use generator::{
     ACTION_COUNT, Adam, BehaviourPolicy, DenseLayer, GENERATOR_CONTEXT_WIDTH,
     GENERATOR_SIZING_WIDTH, GENERATOR_TIMING_WIDTH, GeneratorDraws, GeneratorError,
-    GeneratorParameters, LegalActionSpace, NeuralBehaviourGenerator, TimingDistribution,
-    TrainingLoss, WagerBounds,
+    GeneratorObservation, GeneratorParameters, LegalActionSpace, NeuralBehaviourGenerator,
+    TimingDistribution, TrainingLoss, WagerBounds,
 };
 pub use history::{BehaviourHistory, SubjectHand};
 pub use profile::{

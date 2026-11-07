@@ -74,15 +74,49 @@ Les cartes de densité, d'incertitude et de comportement sont distinctes des car
 4. La tête **timing** reçoit l'état caché, l'action et la fraction de stack engagée. Elle prédit une loi normale sur `log(1 + decision_time_ms)` ; l'échantillonnage produit un nombre de millisecondes non négatif.
 5. Le `GeneratorDraws` possède des tirages reproductibles distincts pour action, sizing, masse all-in et timing. `ObservedAction::from_exact` reconstruit les ratios et les streaks depuis le contexte, donc `Fold` garde un sizing absent et `Check` un sizing nul.
 6. `Adam::train_step` calcule la NLL masquée de l'action, la NLL du sizing discrétisé uniquement pour Bet/Raise, et la NLL du timing lorsqu'il est observé ; puis effectue une **rétropropagation analytique** (reverse-mode) dans les quatre couches et une mise à jour Adam. Les deux représentations des ratios du sizing ne constituent jamais deux cibles indépendantes.
-7. `TrainingLoss.latent_gradient` expose le gradient par rapport à Z, mais **n'optimise pas silencieusement Z**. Son apprentissage et celui de l'Analyzer restent des chantiers distincts.
+7. `TrainingLoss.latent_gradient` expose le gradient par rapport à Z. `GeneratorTrainer` l'utilise maintenant pour optimiser un vecteur Z par joueur, conjointement aux poids de G. L'Analyzer reste un chantier distinct.
 
 ### Contrats obligatoires
 
 - Le moteur externe fournit le masque exact et les bornes de chaque mise ou relance à chaque décision. Le Generator rejette une observation incompatible, plutôt que d'inférer des règles manquantes.
 - Les bounds utilisent des montants exacts en jetons entiers ; la conversion BB ne sert qu'à la représentation comportementale. Le montant max représente l'all-in. Pour le NLHE, il égale le stack disponible.
 - La loss temporelle est définie sur les millisecondes transformées par `log1p`, pas sur les millisecondes brutes.
-- L'optimiseur s'entraîne sur une décision à la fois. L'assemblage de batches, le raccordement à l'export Parquet et l'apprentissage de Z par joueur appartiennent à l'étape suivante.
+- L'optimiseur s'entraîne sur une décision à la fois. `GeneratorTrainer` parcourt les observations Parquet avec les features canoniques, sans recréer un deuxième réseau. Il entraîne G et le Z de chaque joueur sélectionné sur les mains de support et évalue les mains query sans gradients.
 - Le code d'apprentissage est en Rust standard : rétropropagation analytique et Adam, sans backend externe d'autodiff. Aucun blueprint ni Analyzer n'a été ajouté.
+
+## Entraînement conjoint de G et de Z depuis Parquet
+
+- `GeneratorObservation` relit le contexte *avant l'action* sans accéder aux
+  réponses courantes. Son encodage est identique à celui de l'inférence live ;
+  `Adam::train_encoded` et `Adam::evaluate_encoded` réutilisent la même loss et
+  la même rétropropagation que `Adam::train_step`.
+- `GeneratorTrainer` conserve un unique `NeuralBehaviourGenerator` et un vecteur
+  `BehaviourProfile` par sujet sélectionné. Les poids du modèle sont mis à jour
+  par Adam, Z par descente de gradient avec pénalité L2 explicitement choisie.
+  Le `subject_id` n'entre jamais dans les entrées du réseau ; il sert uniquement
+  à retrouver le vecteur optimisable du joueur.
+- `GeneratorHandSplit` fixe **une frontière de mains globale** dans le dataset.
+  Toute main de support a un index inférieur à cette frontière ; toute main
+  query a un index supérieur ou égal. Ce découpage évite qu'une main de test
+  d'un joueur apparaisse dans l'entraînement d'un autre joueur de cette table.
+  Les nombres de mains, les sujets et le cutoff sont choisis explicitement.
+- Les contraintes légales **ne sont pas présentes dans le Parquet actuel**.
+  `GeneratorTrainer::train_epoch` exige un `ExactLegalityProvider` indexé par
+  `HandId` et `sequence_index`. Pour une source de hand histories rejouable,
+  `HandHistoryAdapter::exact_legality_index` reconstruit cette table depuis les
+  états `rs-poker`, par `exact_legal_actions(&GameState)`. Les bounds utilisent
+  l'unité exacte du moteur, jamais un ratio arrondi pour inventer la légalité.
+  Sans cette provenance exacte, l'entraînement échoue, sans inventer de masque.
+- Une erreur dans les données ou le provider **annule toutes les mises à jour
+  de l'époque** sur l'objet trainer. Les query n'influencent pas G ni Z.
+  Les métriques de train et de query sont des sommes de NLL par décision.
+
+Une session d'entraînement doit fournir : un `BehaviourParquetDataset` validé,
+les IDs des sujets choisis, un `GeneratorHandSplit`, les hyperparamètres
+`GeneratorTrainingConfig`, un `Adam` et les données exactes de légalité issues
+du replay original. Le projet ne comporte pas encore de commande CLI autonome
+pour réunir ces sources ni de format de checkpoint des poids et Z ; l'API
+ne doit pas prétendre entraîner un dataset Parquet isolé sans elles.
 
 ## Contrôles requis
 
@@ -93,7 +127,7 @@ Les tests du Generator vérifient le masque légal, la normalisation, les incré
 ## Phases distinctes
 
 1. **Blueprint** : apprentissage externe de la stratégie de référence (non réalisé).
-2. **A/G** : construction du Generator entraînable réalisée ; apprentissage de Z et entraînement conjoint avec l'Analyzer non réalisés.
+2. **A/G** : entraînement de G et des Z propres aux sujets implémenté depuis les observations et les espaces légaux exacts ; Analyzer et entraînement cyclique non réalisés.
 3. **Inférence** : G transforme C et Z en distributions d'action, sizing et timing ; A reste à développer.
 
 Ce document décrit le contrat actuel, les capacités implémentées et les objectifs encore non réalisés.
