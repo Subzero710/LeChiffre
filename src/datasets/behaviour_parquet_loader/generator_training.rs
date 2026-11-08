@@ -14,10 +14,10 @@ use crate::behavioural::codebook::{
 };
 use crate::behavioural::{
     ACTION_COUNT, ActionKind, ActionSizing, Adam, AnalyzerAdam, AnalyzerError,
-    BehaviourLatentModel, BehaviourProfile, CategoricalFeature, ContinuousFeature, FeaturizedHand,
-    GeneratorError, GeneratorGradientBatch, GeneratorObservation, HandId, LegalActionSpace,
-    NeuralBehaviourAnalyzer, NeuralBehaviourGenerator, NoiseStream, ObservedAction,
-    PRE_ACTION_CONTEXT_WIDTH, TrainingLoss,
+    BaselineAdaptationError, BehaviourLatentModel, BehaviourProfile, CategoricalFeature,
+    ContinuousFeature, FeaturizedHand, GeneratorError, GeneratorGradientBatch,
+    GeneratorObservation, HandId, LegalActionSpace, NeuralBehaviourAnalyzer,
+    NeuralBehaviourGenerator, NoiseStream, ObservedAction, PRE_ACTION_CONTEXT_WIDTH, TrainingLoss,
 };
 use serde_json::{Value, json};
 
@@ -844,14 +844,14 @@ fn js_divergence(a: &[f64], b: &[f64]) -> Result<f64, GeneratorTrainingError> {
     Ok(js.max(0.0))
 }
 
-fn subject_decisions(hand: &FeaturizedHand) -> impl Iterator<Item = usize> + '_ {
+pub(super) fn subject_decisions(hand: &FeaturizedHand) -> impl Iterator<Item = usize> + '_ {
     hand.categorical()
         .iter()
         .enumerate()
         .filter(|(_, cat)| cat[CategoricalFeature::IsSubject as usize] == 1)
         .map(|(i, _)| i)
 }
-fn lookup<P: ExactLegalityProvider>(
+pub(super) fn lookup<P: ExactLegalityProvider>(
     provider: &mut P,
     id: u64,
     hand: &FeaturizedHand,
@@ -866,7 +866,7 @@ fn lookup<P: ExactLegalityProvider>(
         })
 }
 
-fn decode_decision(
+pub(super) fn decode_decision(
     hand: &FeaturizedHand,
     row: usize,
 ) -> Result<GeneratorObservation, GeneratorTrainingError> {
@@ -989,6 +989,7 @@ pub enum GeneratorTrainingError {
     NotTrained,
     Generator(GeneratorError),
     Analyzer(AnalyzerError),
+    BaselineAdaptation(BaselineAdaptationError),
     InvalidData {
         hand_id: HandId,
         sequence_index: u32,
@@ -1029,6 +1030,11 @@ impl std::error::Error for GeneratorTrainingError {}
 impl From<GeneratorError> for GeneratorTrainingError {
     fn from(err: GeneratorError) -> Self {
         Self::Generator(err)
+    }
+}
+impl From<BaselineAdaptationError> for GeneratorTrainingError {
+    fn from(err: BaselineAdaptationError) -> Self {
+        Self::BaselineAdaptation(err)
     }
 }
 impl From<AnalyzerError> for GeneratorTrainingError {
@@ -1322,6 +1328,78 @@ mod tests {
             Err(GeneratorTrainingError::PreviouslyTrainedSubject { subject_id: 42 })
         ));
     }
+    #[test]
+    fn z1_uses_only_past_hands_and_never_trains_generator() {
+        use crate::behavioural::{
+            BaselineAdaptationConfig, BehaviourBlueprint, PlayerBaselineAdapter,
+        };
+        let source = dataset();
+        let trainer = trainer();
+        let generator = trainer.model();
+        let weights_before = generator.parameters().clone();
+        let latent = generator.latent_config();
+        let blueprint = BehaviourBlueprint::new(
+            latent.profile(vec![0.2; latent.dimension()]).unwrap(),
+            vec![1.0; latent.dimension()],
+        )
+        .unwrap();
+        let adapter = PlayerBaselineAdapter::new(
+            blueprint.clone(),
+            BaselineAdaptationConfig::new(0.1, 0.2).unwrap(),
+        )
+        .unwrap();
+        let mut calls = 0_usize;
+        let empty = source
+            .adapt_baseline_before(42, 0, generator, &adapter, &mut |_,
+                                                                     _: &HandId,
+                                                                     _|
+             -> Result<
+                _,
+                &'static str,
+            > {
+                calls += 1;
+                Err("no replay should be required for future hands")
+            })
+            .unwrap();
+        assert_eq!(empty.baseline().observed_hands(), 0);
+        assert_eq!(empty.baseline().profile(), blueprint.centre());
+        assert_eq!(calls, 0);
+
+        let adapted = source
+            .adapt_baseline_before(42, 3, generator, &adapter, &mut |_,
+                                                                     _: &HandId,
+                                                                     _|
+             -> Result<
+                _,
+                &'static str,
+            > {
+                calls += 1;
+                Ok(legal())
+            })
+            .unwrap();
+        assert_eq!(calls, 3);
+        assert_eq!(adapted.baseline().observed_hands(), 3);
+        assert_eq!(adapted.observed_decisions(), 3);
+        assert_eq!(adapted.last_hand_index(), Some(2));
+        assert_eq!(generator.parameters(), &weights_before);
+
+        let mut changed_future = dataset();
+        changed_future.hands[7].decision_time_ms[0] = 99999;
+        changed_future.hands[7].continuous[0][ContinuousFeature::DecisionTimeMs as usize] = 99999.0;
+        let still_same = changed_future
+            .adapt_baseline_before(42, 3, generator, &adapter, &mut |_,
+                                                                     _: &HandId,
+                                                                     _|
+             -> Result<
+                _,
+                &'static str,
+            > {
+                Ok(legal())
+            })
+            .unwrap();
+        assert_eq!(adapted, still_same);
+    }
+
     #[test]
     fn three_partition_boundaries_must_be_strictly_ordered() {
         assert!(GeneratorHandSplit::new(5, 5, 1, 1, 1).is_err());
