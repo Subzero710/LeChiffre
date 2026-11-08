@@ -849,6 +849,183 @@ impl Gradients {
     }
 }
 
+/// Gradients accumulated against one immutable Generator parameter snapshot.
+/// No optimizer step occurs until `Adam::apply_batch` is called. Per-decision
+/// `TrainingLoss.latent_gradient` can be propagated to A before that update.
+#[derive(Debug, Clone)]
+pub struct GeneratorGradientBatch {
+    parameter_snapshot: GeneratorParameters,
+    gradients: Gradients,
+    observations: usize,
+    loss_total: f64,
+    loss_action: f64,
+    loss_sizing: f64,
+    loss_timing: f64,
+    latent_gradient_sum: Vec<f64>,
+}
+
+impl GeneratorGradientBatch {
+    pub fn new(model: &NeuralBehaviourGenerator) -> Self {
+        Self {
+            parameter_snapshot: model.parameters.clone(),
+            gradients: Gradients::new(&model.parameters),
+            observations: 0,
+            loss_total: 0.0,
+            loss_action: 0.0,
+            loss_sizing: 0.0,
+            loss_timing: 0.0,
+            latent_gradient_sum: vec![0.0; model.latent.dimension()],
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.observations
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.observations == 0
+    }
+
+    pub fn accumulate_encoded(
+        &mut self,
+        model: &NeuralBehaviourGenerator,
+        profile: &BehaviourProfile,
+        observation: &GeneratorObservation,
+        legal: &LegalActionSpace,
+    ) -> Result<TrainingLoss, GeneratorError> {
+        self.check_model(model)?;
+        let (loss, gradients) = loss_gradients_encoded(model, profile, observation, *legal)?;
+        self.add_loss_gradients(loss, gradients)
+    }
+
+    pub fn accumulate(
+        &mut self,
+        model: &NeuralBehaviourGenerator,
+        profile: &BehaviourProfile,
+        context: &DecisionContext,
+        legal: &LegalActionSpace,
+        observed: &ObservedAction,
+    ) -> Result<TrainingLoss, GeneratorError> {
+        self.check_model(model)?;
+        let (loss, gradients) = loss_gradients(model, profile, context, *legal, observed)?;
+        self.add_loss_gradients(loss, gradients)
+    }
+
+    fn check_model(&self, model: &NeuralBehaviourGenerator) -> Result<(), GeneratorError> {
+        if model.parameters != self.parameter_snapshot
+            || model.latent.dimension() != self.latent_gradient_sum.len()
+        {
+            return Err(GeneratorError::BatchModelChanged);
+        }
+        Ok(())
+    }
+
+    fn add_loss_gradients(
+        &mut self,
+        loss: TrainingLoss,
+        gradients: Gradients,
+    ) -> Result<TrainingLoss, GeneratorError> {
+        let observations = self
+            .observations
+            .checked_add(1)
+            .ok_or(GeneratorError::BatchCountOverflow)?;
+        let mut summed = self.gradients.clone();
+        fn sum_layer(target: &mut LayerGradients, source: &LayerGradients) {
+            for (total, delta) in target.weights.iter_mut().zip(&source.weights) {
+                *total += delta;
+            }
+            for (total, delta) in target.bias.iter_mut().zip(&source.bias) {
+                *total += delta;
+            }
+        }
+        sum_layer(&mut summed.state, &gradients.state);
+        sum_layer(&mut summed.action, &gradients.action);
+        sum_layer(&mut summed.sizing, &gradients.sizing);
+        sum_layer(&mut summed.timing, &gradients.timing);
+        let totals = [
+            self.loss_total + loss.total,
+            self.loss_action + loss.action,
+            self.loss_sizing + loss.sizing,
+            self.loss_timing + loss.timing,
+        ];
+        let next_latent = self
+            .latent_gradient_sum
+            .iter()
+            .zip(&loss.latent_gradient)
+            .map(|(&current, &delta)| current + f64::from(delta))
+            .collect::<Vec<_>>();
+        let finite_layer = |layer: &LayerGradients| {
+            layer
+                .weights
+                .iter()
+                .chain(&layer.bias)
+                .all(|value| value.is_finite())
+        };
+        if !totals.iter().all(|value| value.is_finite())
+            || !next_latent.iter().all(|value| value.is_finite())
+            || ![
+                &summed.state,
+                &summed.action,
+                &summed.sizing,
+                &summed.timing,
+            ]
+            .iter()
+            .all(|layer| finite_layer(layer))
+        {
+            return Err(GeneratorError::NonFiniteGradient);
+        }
+        self.gradients = summed;
+        self.observations = observations;
+        self.loss_total = totals[0];
+        self.loss_action = totals[1];
+        self.loss_sizing = totals[2];
+        self.loss_timing = totals[3];
+        self.latent_gradient_sum = next_latent;
+        Ok(loss)
+    }
+
+    pub fn mean_loss(&self) -> Result<TrainingLoss, GeneratorError> {
+        if self.observations == 0 {
+            return Err(GeneratorError::EmptyBatch);
+        }
+        let n = self.observations as f64;
+        let latent_gradient = self
+            .latent_gradient_sum
+            .iter()
+            .map(|&value| (value / n) as f32)
+            .collect::<Vec<_>>();
+        if latent_gradient.iter().any(|x| !x.is_finite()) {
+            return Err(GeneratorError::NonFiniteGradient);
+        }
+        Ok(TrainingLoss {
+            total: self.loss_total / n,
+            action: self.loss_action / n,
+            sizing: self.loss_sizing / n,
+            timing: self.loss_timing / n,
+            latent_gradient,
+        })
+    }
+
+    fn averaged_gradients(&self) -> Result<Gradients, GeneratorError> {
+        if self.observations == 0 {
+            return Err(GeneratorError::EmptyBatch);
+        }
+        let mut result = self.gradients.clone();
+        let n = self.observations as f64;
+        for layer in [
+            &mut result.state,
+            &mut result.action,
+            &mut result.sizing,
+            &mut result.timing,
+        ] {
+            for g in layer.weights.iter_mut().chain(&mut layer.bias) {
+                *g /= n;
+            }
+        }
+        Ok(result)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrainingLoss {
     pub total: f64,
@@ -1225,6 +1402,32 @@ impl Adam {
         self.apply(model, loss, gradients)
     }
 
+    /// Average all gradients at fixed G parameters and apply Adam exactly once.
+    pub fn apply_batch(
+        &mut self,
+        model: &mut NeuralBehaviourGenerator,
+        batch: GeneratorGradientBatch,
+    ) -> Result<TrainingLoss, GeneratorError> {
+        batch.check_model(model)?;
+        let loss = batch.mean_loss()?;
+        let gradients = batch.averaged_gradients()?;
+        self.apply(model, loss, gradients)
+    }
+
+    /// Convenience batch path for canonical Parquet decisions. The caller can
+    /// also use GeneratorGradientBatch directly to route each dL/dZ back to A.
+    pub fn train_encoded_batch(
+        &mut self,
+        model: &mut NeuralBehaviourGenerator,
+        observations: &[(&BehaviourProfile, &GeneratorObservation, &LegalActionSpace)],
+    ) -> Result<TrainingLoss, GeneratorError> {
+        let mut batch = GeneratorGradientBatch::new(model);
+        for (profile, observation, legal) in observations {
+            batch.accumulate_encoded(model, profile, observation, legal)?;
+        }
+        self.apply_batch(model, batch)
+    }
+
     fn apply(
         &mut self,
         model: &mut NeuralBehaviourGenerator,
@@ -1429,6 +1632,9 @@ pub enum GeneratorError {
     InvalidLearningRate,
     OptimizerStepOverflow,
     OptimizerModelMismatch,
+    BatchModelChanged,
+    BatchCountOverflow,
+    EmptyBatch,
 }
 impl fmt::Display for GeneratorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1512,6 +1718,58 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn batch_calculates_at_fixed_weights_and_applies_one_optimizer_step() {
+        let mut generator = model();
+        let mut adam = Adam::new(&generator, 0.001).unwrap();
+        let original = generator.parameters().clone();
+        let mut batch = GeneratorGradientBatch::new(&generator);
+        let first = batch
+            .accumulate(&generator, &profile(), &ctx(), &legal(), &observed_bet(5.0))
+            .unwrap();
+        let second = batch
+            .accumulate(&generator, &profile(), &ctx(), &legal(), &observed_bet(7.0))
+            .unwrap();
+        assert_eq!(batch.len(), 2);
+        assert_eq!(*generator.parameters(), original);
+        assert_eq!(adam.steps(), 0);
+        let avg = batch.mean_loss().unwrap();
+        assert!((avg.total - (first.total + second.total) / 2.0).abs() < 1e-12);
+        let result = adam.apply_batch(&mut generator, batch).unwrap();
+        assert!((result.total - avg.total).abs() < 1e-12);
+        assert_eq!(adam.steps(), 1);
+        assert_ne!(*generator.parameters(), original);
+    }
+
+    #[test]
+    fn batch_rejects_empty_or_mutated_generator() {
+        let mut generator = model();
+        let mut adam = Adam::new(&generator, 0.001).unwrap();
+        let batch = GeneratorGradientBatch::new(&generator);
+        assert!(matches!(
+            adam.apply_batch(&mut generator, batch),
+            Err(GeneratorError::EmptyBatch)
+        ));
+        let mut batch = GeneratorGradientBatch::new(&generator);
+        batch
+            .accumulate(&generator, &profile(), &ctx(), &legal(), &observed_bet(5.0))
+            .unwrap();
+        adam.train_step(
+            &mut generator,
+            &profile(),
+            &ctx(),
+            &legal(),
+            &observed_bet(5.0),
+        )
+        .unwrap();
+        let before = generator.parameters().clone();
+        assert!(matches!(
+            adam.apply_batch(&mut generator, batch),
+            Err(GeneratorError::BatchModelChanged)
+        ));
+        assert_eq!(*generator.parameters(), before);
     }
 
     #[test]

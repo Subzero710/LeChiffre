@@ -15,8 +15,9 @@ use crate::behavioural::codebook::{
 use crate::behavioural::{
     ACTION_COUNT, ActionKind, ActionSizing, Adam, AnalyzerAdam, AnalyzerError,
     BehaviourLatentModel, BehaviourProfile, CategoricalFeature, ContinuousFeature, FeaturizedHand,
-    GeneratorError, GeneratorObservation, HandId, LegalActionSpace, NeuralBehaviourAnalyzer,
-    NeuralBehaviourGenerator, NoiseStream, ObservedAction, PRE_ACTION_CONTEXT_WIDTH, TrainingLoss,
+    GeneratorError, GeneratorGradientBatch, GeneratorObservation, HandId, LegalActionSpace,
+    NeuralBehaviourAnalyzer, NeuralBehaviourGenerator, NoiseStream, ObservedAction,
+    PRE_ACTION_CONTEXT_WIDTH, TrainingLoss,
 };
 use serde_json::{Value, json};
 
@@ -398,13 +399,14 @@ impl GeneratorTrainer {
                 .sample(working.model.latent_config().dimension());
             let profile = posterior.sample(&epsilon)?;
             let mut latent_grads = vec![0.0; epsilon.len()];
+            let mut gradient_batch = GeneratorGradientBatch::new(&working.model);
             let mut decisions = 0_usize;
             for hand in &sample.query {
                 for row in subject_decisions(hand) {
                     let observation = decode_decision(hand, row)?;
                     let legal = lookup(provider, sample.id, hand, row)?;
-                    let loss = working.generator_adam.train_encoded(
-                        &mut working.model,
+                    let loss = gradient_batch.accumulate_encoded(
+                        &working.model,
                         &profile,
                         &observation,
                         &legal,
@@ -422,6 +424,11 @@ impl GeneratorTrainer {
             for gradient in &mut latent_grads {
                 *gradient /= decisions as f64;
             }
+            // G was held fixed for every query observation for this subject.
+            // Apply the mean G gradient once, after collecting all dL/dZ values.
+            working
+                .generator_adam
+                .apply_batch(&mut working.model, gradient_batch)?;
             working.analyzer_adam.train_step(
                 &mut working.analyzer,
                 &sample.support,
@@ -1101,6 +1108,7 @@ mod tests {
                 events_written: 9,
                 subject_hand_rows_written: 9,
                 dropped_hands_missing_timing: 0,
+                dropped_hands_invalid: 0,
             },
             hands,
             subjects: BTreeMap::from([(42, memberships)]),
@@ -1160,7 +1168,7 @@ mod tests {
         assert_eq!(report.held_out.decisions, 3);
         assert_eq!(report.prior.decisions, 3);
         assert_eq!(looked, 6);
-        assert_eq!(trainer.generator_optimizer_steps(), 3);
+        assert_eq!(trainer.generator_optimizer_steps(), 1);
         assert_eq!(trainer.analyzer_optimizer_steps(), 1);
         assert_ne!(trainer.model().parameters(), &before);
         assert!(report.mean_kl.is_finite());
@@ -1218,7 +1226,7 @@ mod tests {
             resumed.analyzer().parameters(),
             trainer.analyzer().parameters()
         );
-        assert_eq!(resumed.generator_optimizer_steps(), 3);
+        assert_eq!(resumed.generator_optimizer_steps(), 1);
         assert_eq!(resumed.analyzer_optimizer_steps(), 1);
         let report = resumed
             .train_epoch(&dataset(), &[42], split(), &mut |_,

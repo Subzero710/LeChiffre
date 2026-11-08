@@ -64,6 +64,7 @@ fn export_poker_with_the_boys_parquet(args: &[String]) {
     let mut source_accepted_hands = 0usize;
     let mut source_rejected_hands = 0usize;
     let mut timing_dropped_hands = 0usize;
+    let mut structurally_dropped_hands = 0usize;
 
     for pair in args[3..].as_chunks::<2>().0 {
         let path = &pair[0];
@@ -106,10 +107,22 @@ fn export_poker_with_the_boys_parquet(args: &[String]) {
             for hand_id in &report.dropped_hand_ids_missing_timing {
                 eprintln!("dropped hand missing timing: {hand_id}");
             }
+            structurally_dropped_hands = structurally_dropped_hands
+                .checked_add(report.dropped_hands_invalid.len())
+                .unwrap_or_else(|| {
+                    eprintln!("invalid-hand drop counter overflow");
+                    std::process::exit(1);
+                });
+            for dropped in &report.dropped_hands_invalid {
+                eprintln!(
+                    "dropped invalid hand {}: {}",
+                    dropped.hand_id, dropped.reason
+                );
+            }
         }
     }
 
-    if source_accepted_hands == 0 {
+    if writer.summary().hands_written == 0 {
         eprintln!("refusing to commit an empty behavioural dataset");
         std::process::exit(1);
     }
@@ -120,10 +133,11 @@ fn export_poker_with_the_boys_parquet(args: &[String]) {
     });
     println!(
         "source_accepted_hands={} source_rejected_hands={} timing_dropped_hands={} \
-         retained_hands={} unique_events={} subject_hand_rows={}",
+         structurally_dropped_hands={} retained_hands={} unique_events={} subject_hand_rows={}",
         source_accepted_hands,
         source_rejected_hands,
         timing_dropped_hands,
+        structurally_dropped_hands,
         summary.hands_written,
         summary.events_written,
         summary.subject_hand_rows_written
@@ -278,12 +292,14 @@ fn exact_source_legality(
     }
     for pair in args.as_chunks::<2>().0 {
         let imported = import_poker_with_the_boys_session(&pair[0], &pair[1]);
-        if !imported.rejected.is_empty() {
-            return Err(format!(
-                "source session {} contains {} rejected hands; review the source before training",
-                pair[1],
-                imported.rejected.len()
-            ));
+        // An import rejection is local to one source hand. The matching hand
+        // cannot occur in a committed dataset produced by the same importer.
+        // Every retained decision must still resolve to exact replay legality.
+        for rejection in &imported.rejected {
+            eprintln!(
+                "excluded source hand session={} hand={}: {}",
+                pair[1], rejection.source_hand_id, rejection.reason
+            );
         }
         for (key, legal) in imported.exact_legal_actions {
             match all.entry(key) {
@@ -562,9 +578,7 @@ async fn main() {
                 rejection.source_hand_id, rejection.reason
             );
         }
-        if !imported.rejected.is_empty() {
-            std::process::exit(1);
-        }
+        // Per-hand rejects are reported above; retained hands remain usable.
         return;
     }
 

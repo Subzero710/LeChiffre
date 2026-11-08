@@ -13,7 +13,7 @@ mod sequence;
 pub(crate) use analyzer::NoiseStream;
 pub use analyzer::{
     ANALYZER_EVENT_WIDTH, AnalyzerAdam, AnalyzerError, AnalyzerParameters, BehaviourPosterior,
-    NeuralBehaviourAnalyzer,
+    MomentaryBehaviour, NeuralBehaviourAnalyzer,
 };
 pub use event::{
     ActionHistory, ActionKind, ActionSizing, BehaviourEvent, BehaviourEventError, DecisionContext,
@@ -29,12 +29,13 @@ pub(crate) use featurizer::{FeaturizedHandData, continuous_feature_name, encode_
 pub use generator::{
     ACTION_COUNT, Adam, BehaviourPolicy, DenseLayer, GENERATOR_CONTEXT_WIDTH,
     GENERATOR_SIZING_WIDTH, GENERATOR_TIMING_WIDTH, GeneratorDraws, GeneratorError,
-    GeneratorObservation, GeneratorParameters, LegalActionSpace, NeuralBehaviourGenerator,
-    TimingDistribution, TrainingLoss, WagerBounds,
+    GeneratorGradientBatch, GeneratorObservation, GeneratorParameters, LegalActionSpace,
+    NeuralBehaviourGenerator, TimingDistribution, TrainingLoss, WagerBounds,
 };
 pub use history::{BehaviourHistory, SubjectHand};
 pub use profile::{
-    BehaviourLatentConfig, BehaviourLatentConfigError, BehaviourProfile, BehaviourProfileError,
+    BehaviourBlueprint, BehaviourLatentConfig, BehaviourLatentConfigError, BehaviourProfile,
+    BehaviourProfileError, PlayerBaseline,
 };
 pub use sequence::{BehaviourSequence, BehaviourSequenceError};
 

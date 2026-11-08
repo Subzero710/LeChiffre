@@ -1,5 +1,40 @@
 # Behavioral Engine — invariants et Generator
 
+## Refactoring Z0/Z1/Z2 (steps 1–4, trainer still transitional)
+
+The behavioural model has one shared Analyzer A and one shared Generator G.
+
+- `BehaviourBlueprint` stores the population blueprint Z0 and an explicitly supplied
+  prior standard-deviation vector. No population parameters are inferred by its constructor.
+- `PlayerBaseline::from_blueprint` creates Z1 with **zero observed hands** and
+  bit-for-bit equality `Z1 == Z0`. `set_estimate` records an estimate supplied
+  by a future personalization algorithm, with strictly increasing hand count.
+- `NeuralBehaviourAnalyzer::infer_action(context, observed, baseline)` computes
+  a decision-specific Z2 posterior. `prior(context, baseline)` shares the same
+  Analyzer parameters but never accepts a current action, sizing or timing.
+  `MomentaryBehaviour` exposes the prior, posterior and conditional KL.
+- The Generator still outputs the legal discrete action distribution and
+  conditional sizing/timing distributions, using one shared multidimensional Z.
+  `GeneratorGradientBatch` computes gradients at fixed model parameters; Adam
+  applies their mean once. The existing joint trainer now batches query decisions
+  **per subject** rather than updating G between those decisions.
+- Parser-rejected and structurally invalid hands are excluded *in full*. The
+  Parquet writer records a `dropped_hands_invalid` count alongside the existing
+  missing-timing count. A training decision missing exact source replay legality
+  is still fatal; no legal space is inferred from the target action.
+
+**Migration status:** The CLI joint training objective and `infer(support)` path
+still use one historical support-level Z per subject. They do **not** yet train
+Z0/Z1/Z2 as a hierarchy. Their replacement belongs to steps 5–6. The new
+prior/posterior path is initialized and tested for data flow, but not yet trained
+for predictive use. Prior checkpoints with the old Analyzer layer shape are
+rejected; checkpoint versioning and deployment migration belong to step 7.
+
+Datasets must be re-exported with the new per-hand-drop summary metadata; the
+loader validates this metadata strictly. Do not represent a green CI on the
+previous commit as validation of this unmerged refactor.
+
+
 Statut : **Generator différentiable, Analyzer probabiliste et entraînement variationnel conjoint implémentés ; aucun poids entraîné sur un dataset réel fourni**. Aucun blueprint de référence n'est disponible à ce stade. L'entraînement du blueprint est un chantier indépendant, et ne doit pas être confondu avec l'inférence effectuée par le Behavioral Engine.
 
 ## Objectif
@@ -81,8 +116,8 @@ Les cartes de densité, d'incertitude et de comportement sont distinctes des car
 - Le moteur externe fournit le masque exact et les bornes de chaque mise ou relance à chaque décision. Le Generator rejette une observation incompatible, plutôt que d'inférer des règles manquantes.
 - Les bounds utilisent des montants exacts en jetons entiers ; la conversion BB ne sert qu'à la représentation comportementale. Le montant max représente l'all-in. Pour le NLHE, il égale le stack disponible.
 - La loss temporelle est définie sur les millisecondes transformées par `log1p`, pas sur les millisecondes brutes.
-- G est optimisé par décision et A par sujet, avec deux optimiseurs Adam. Le trainer apprend depuis les mains query en inférant Z exclusivement depuis les mains de support, puis évalue sur une troisième partition future sans gradients.
-- Le code d’apprentissage est en Rust standard : rétropropagation analytique et Adam, sans backend externe d’autodiff. Aucun blueprint n’a été ajouté.
+- G est optimisé par lot de décisions d'un sujet et A par sujet, avec deux optimiseurs Adam. Le trainer apprend depuis les mains query en inférant Z exclusivement depuis les mains de support, puis évalue sur une troisième partition future sans gradients.
+- Le code d’apprentissage est en Rust standard : rétropropagation analytique et Adam, sans backend externe d’autodiff. Le type blueprint Z0 est présent, mais son préentraînement hiérarchique n'est pas encore implémenté.
 
 ## Analyzer probabiliste et entraînement A/G
 
@@ -135,7 +170,7 @@ cargo run --release -- --resume-behavioural model.json data/parquet model-next.j
 cargo run --release -- --evaluate-unseen-behavioural model.json data/parquet 3,4 session.csv session-id
 ```
 
-Plusieurs fichiers sources sont acceptés par couples `chemin session-id`. Les sources PokerNow sont rejouées pour obtenir les bornes légales exactes. Si une main source est rejetée, si une décision n'est pas retrouvée ou si les entrées ne sont pas cohérentes, l'entraînement s'arrête avec une erreur explicite. Les chemins de checkpoints existants ne sont jamais écrasés. Le fichier stocke A, G, les deux optimiseurs, leurs moments, l'état de l'aléatoire, les hyperparamètres, le découpage et la provenance déterministe du dataset.
+Plusieurs fichiers sources sont acceptés par couples `chemin session-id`. Les sources PokerNow sont rejouées pour obtenir les bornes légales exactes. Une main source rejetée est exclue en entier et signalée. Une décision conservée sans légalité source exacte, ou des entrées incohérentes déjà persistées, restent des erreurs bloquantes. Les chemins de checkpoints existants ne sont jamais écrasés. Le fichier stocke A, G, les deux optimiseurs, leurs moments, l'état de l'aléatoire, les hyperparamètres, le découpage et la provenance déterministe du dataset.
 
 **État de validation** : aucun entraînement réel ni résultat de performance n'est fourni avec ce changement. Les commandes ci-dessus ont besoin du Parquet et des sources réelles du projet. La CI doit vérifier la compilation, Clippy et les tests unitaires avant utilisation. Les diagnostics du latent ne remplacent pas une validation statistique sur plusieurs jeux de données et joueurs inédits.
 

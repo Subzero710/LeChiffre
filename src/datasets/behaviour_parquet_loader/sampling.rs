@@ -239,6 +239,7 @@ mod tests {
                 events_written: u64::try_from(hand_count).unwrap(),
                 subject_hand_rows_written: u64::try_from(hand_count).unwrap(),
                 dropped_hands_missing_timing: 0,
+                dropped_hands_invalid: 0,
             },
             hands,
             subjects: BTreeMap::from([(42, memberships)]),

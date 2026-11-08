@@ -135,9 +135,9 @@ impl BehaviourParquetDatasetWriter {
     /// pseudonymous `u64` for every observed player in every retained hand.
     /// Player names/IDs are never persisted in either Parquet table.
     ///
-    /// A hand with any missing `decision_time_ms` is dropped as a whole. All
-    /// other validation failures are hard errors; no values are guessed or
-    /// imputed.
+    /// A hand with missing timing or invalid per-hand structure is dropped
+    /// in full and reported. Global identity or dataset integrity errors remain
+    /// hard errors; no missing values are guessed or imputed.
     pub fn write_hands(
         &mut self,
         hands: &[AdaptedHand],
@@ -156,6 +156,7 @@ impl BehaviourParquetDatasetWriter {
         let mut batch_hand_ids = HashSet::with_capacity(hands.len());
         let mut retained = Vec::with_capacity(hands.len());
         let mut dropped_hand_ids_missing_timing = Vec::new();
+        let mut dropped_hands_invalid = Vec::new();
 
         for (offset, hand) in hands.iter().enumerate() {
             let offset = u64::try_from(offset)
@@ -169,10 +170,20 @@ impl BehaviourParquetDatasetWriter {
                 return Err(BehaviourParquetDatasetError::DuplicateHandId { hand_id });
             }
             if hand.sequence().is_empty() {
-                return Err(BehaviourParquetDatasetError::EmptyHand { hand_id });
+                dropped_hands_invalid.push(DroppedInvalidHand {
+                    hand_id,
+                    reason: "empty hand".to_owned(),
+                });
+                continue;
             }
 
-            validate_hand_structure(hand)?;
+            if let Err(error) = validate_hand_structure(hand) {
+                dropped_hands_invalid.push(DroppedInvalidHand {
+                    hand_id,
+                    reason: error.to_string(),
+                });
+                continue;
+            }
 
             if hand
                 .sequence()
@@ -234,6 +245,11 @@ impl BehaviourParquetDatasetWriter {
                 field: "dropped_hands_missing_timing",
             }
         })?;
+        let dropped_invalid_u64 = u64::try_from(dropped_hands_invalid.len()).map_err(|_| {
+            BehaviourParquetDatasetError::CounterOverflow {
+                field: "dropped_hands_invalid",
+            }
+        })?;
         let next_summary = BehaviourParquetDatasetSummary {
             hands_seen: checked_counter_add(self.summary.hands_seen, batch_len, "hands_seen")?,
             hands_written: checked_counter_add(
@@ -255,6 +271,11 @@ impl BehaviourParquetDatasetWriter {
                 self.summary.dropped_hands_missing_timing,
                 dropped_u64,
                 "dropped_hands_missing_timing",
+            )?,
+            dropped_hands_invalid: checked_counter_add(
+                self.summary.dropped_hands_invalid,
+                dropped_invalid_u64,
+                "dropped_hands_invalid",
             )?,
         };
 
@@ -300,6 +321,7 @@ impl BehaviourParquetDatasetWriter {
             events_written,
             subject_hand_rows_written,
             dropped_hand_ids_missing_timing,
+            dropped_hands_invalid,
         })
     }
 
@@ -452,6 +474,13 @@ pub struct BehaviourParquetDatasetSummary {
     pub events_written: u64,
     pub subject_hand_rows_written: u64,
     pub dropped_hands_missing_timing: u64,
+    pub dropped_hands_invalid: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DroppedInvalidHand {
+    pub hand_id: HandId,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -461,6 +490,7 @@ pub struct BehaviourParquetWriteReport {
     pub events_written: usize,
     pub subject_hand_rows_written: usize,
     pub dropped_hand_ids_missing_timing: Vec<HandId>,
+    pub dropped_hands_invalid: Vec<DroppedInvalidHand>,
 }
 
 fn finish_and_sync(writer: &mut ArrowWriter<File>) -> Result<(), BehaviourParquetDatasetError> {
@@ -520,6 +550,10 @@ fn append_final_metadata(writer: &mut ArrowWriter<File>, summary: BehaviourParqu
         (
             "lechiffre.dropped_hands_missing_timing",
             summary.dropped_hands_missing_timing,
+        ),
+        (
+            "lechiffre.dropped_hands_invalid",
+            summary.dropped_hands_invalid,
         ),
     ] {
         writer.append_key_value_metadata(KeyValue::new(key.to_string(), value.to_string()));
@@ -1162,6 +1196,32 @@ mod tests {
         writer.close().unwrap();
         fs::remove_dir_all(dir).unwrap();
     }
+    #[test]
+    fn structurally_invalid_hand_is_dropped_without_partial_rows() {
+        let dir = temp_dataset_dir("invalid-structure");
+        let mut writer = BehaviourParquetDatasetWriter::create(&dir).unwrap();
+        let valid = make_hand("valid", Some(100));
+        let original = make_hand("invalid", Some(200));
+        let invalid = AdaptedHand::new(
+            original.sequence().clone(),
+            original.players()[..1].to_vec(),
+        );
+        let report = writer
+            .write_hands(&[valid, invalid], &subject_ids())
+            .unwrap();
+        assert_eq!(report.hands_written, 1);
+        assert_eq!(report.dropped_hands_invalid.len(), 1);
+        assert_eq!(report.dropped_hands_invalid[0].hand_id.as_str(), "invalid");
+        assert_eq!(report.events_written, 2);
+        let summary = writer.close().unwrap();
+        assert_eq!(summary.hands_seen, 2);
+        assert_eq!(summary.dropped_hands_invalid, 1);
+        let loaded =
+            crate::datasets::behaviour_parquet_loader::BehaviourParquetDataset::open(&dir).unwrap();
+        assert_eq!(loaded.hand_count(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn duplicate_hand_is_rejected() {
         let dir = temp_dataset_dir("duplicate");

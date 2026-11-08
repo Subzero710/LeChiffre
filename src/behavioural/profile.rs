@@ -98,6 +98,8 @@ impl BehaviourProfile {
 pub enum BehaviourProfileError {
     DimensionMismatch { expected: usize, observed: usize },
     NonFiniteValue { index: usize },
+    InvalidUncertainty { index: usize },
+    NonIncreasingHandCount { previous: u64, new: u64 },
 }
 
 impl fmt::Display for BehaviourProfileError {
@@ -113,15 +115,154 @@ impl fmt::Display for BehaviourProfileError {
                     "behaviour profile contains a non-finite value at {index}"
                 )
             }
+            Self::InvalidUncertainty { index } => {
+                write!(f, "invalid latent uncertainty at {index}")
+            }
+            Self::NonIncreasingHandCount { previous, new } => {
+                write!(
+                    f,
+                    "baseline hand count must increase from {previous}, got {new}"
+                )
+            }
         }
     }
 }
 
 impl std::error::Error for BehaviourProfileError {}
 
+/// Learned population-level latent reference (Z0). Its dispersion is learned
+/// separately; Z0 is a centre, not a claim that all humans have one profile.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BehaviourBlueprint {
+    centre: BehaviourProfile,
+    prior_std: Vec<f32>,
+}
+
+impl BehaviourBlueprint {
+    pub fn new(
+        centre: BehaviourProfile,
+        prior_std: Vec<f32>,
+    ) -> Result<Self, BehaviourProfileError> {
+        validate_std(centre.dimension(), &prior_std)?;
+        Ok(Self { centre, prior_std })
+    }
+
+    pub fn centre(&self) -> &BehaviourProfile {
+        &self.centre
+    }
+
+    pub fn prior_std(&self) -> &[f32] {
+        &self.prior_std
+    }
+}
+
+/// Personal Z1 estimate, kept distinct from A/G weights and the Z2 posterior.
+/// Player identity is held by the caller; never injected into model features.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayerBaseline {
+    estimate: BehaviourProfile,
+    uncertainty_std: Vec<f32>,
+    observed_hands: u64,
+}
+
+impl PlayerBaseline {
+    /// Strict Z1(0) == Z0, including the initial uncertainty distribution.
+    pub fn from_blueprint(blueprint: &BehaviourBlueprint) -> Self {
+        Self {
+            estimate: blueprint.centre.clone(),
+            uncertainty_std: blueprint.prior_std.clone(),
+            observed_hands: 0,
+        }
+    }
+
+    pub fn profile(&self) -> &BehaviourProfile {
+        &self.estimate
+    }
+
+    pub fn uncertainty_std(&self) -> &[f32] {
+        &self.uncertainty_std
+    }
+
+    pub fn observed_hands(&self) -> u64 {
+        self.observed_hands
+    }
+
+    /// Store a new *learned* estimate; the optimization algorithm belongs to
+    /// the Z1 adaptation trainer, not this data contract.
+    pub fn set_estimate(
+        &mut self,
+        estimate: BehaviourProfile,
+        uncertainty_std: Vec<f32>,
+        observed_hands: u64,
+    ) -> Result<(), BehaviourProfileError> {
+        if observed_hands <= self.observed_hands {
+            return Err(BehaviourProfileError::NonIncreasingHandCount {
+                previous: self.observed_hands,
+                new: observed_hands,
+            });
+        }
+        if estimate.dimension() != self.estimate.dimension() {
+            return Err(BehaviourProfileError::DimensionMismatch {
+                expected: self.estimate.dimension(),
+                observed: estimate.dimension(),
+            });
+        }
+        validate_std(estimate.dimension(), &uncertainty_std)?;
+        self.estimate = estimate;
+        self.uncertainty_std = uncertainty_std;
+        self.observed_hands = observed_hands;
+        Ok(())
+    }
+}
+
+fn validate_std(dimension: usize, std: &[f32]) -> Result<(), BehaviourProfileError> {
+    if std.len() != dimension {
+        return Err(BehaviourProfileError::DimensionMismatch {
+            expected: dimension,
+            observed: std.len(),
+        });
+    }
+    if let Some(index) = std
+        .iter()
+        .position(|value| !value.is_finite() || *value <= 0.0)
+    {
+        return Err(BehaviourProfileError::InvalidUncertainty { index });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn z1_zero_hands_is_exactly_z0() {
+        let config = BehaviourLatentConfig::new(3).unwrap();
+        let z0 = config.profile(vec![0.4, -0.2, 1.2]).unwrap();
+        let blueprint = BehaviourBlueprint::new(z0, vec![0.7, 1.0, 0.3]).unwrap();
+        let z1 = PlayerBaseline::from_blueprint(&blueprint);
+        assert_eq!(z1.profile(), blueprint.centre());
+        assert_eq!(z1.uncertainty_std(), blueprint.prior_std());
+        assert_eq!(z1.observed_hands(), 0);
+    }
+
+    #[test]
+    fn z1_estimates_update_without_touching_blueprint() {
+        let config = BehaviourLatentConfig::new(2).unwrap();
+        let blueprint =
+            BehaviourBlueprint::new(config.profile(vec![0.3, 0.5]).unwrap(), vec![1.0, 1.0])
+                .unwrap();
+        let mut z1 = PlayerBaseline::from_blueprint(&blueprint);
+        z1.set_estimate(config.profile(vec![0.8, 0.0]).unwrap(), vec![0.4, 0.5], 10)
+            .unwrap();
+        assert_eq!(z1.observed_hands(), 10);
+        assert_eq!(blueprint.centre().as_slice(), &[0.3, 0.5]);
+        assert!(
+            z1.set_estimate(config.profile(vec![0.0, 0.0]).unwrap(), vec![1.0, 1.0], 9)
+                .is_err()
+        );
+        assert_eq!(z1.observed_hands(), 10);
+    }
 
     #[test]
     fn latent_config_rejects_zero_dimension() {

@@ -674,10 +674,16 @@ fn validate_metadata(
             &values,
             "lechiffre.dropped_hands_missing_timing",
         )?,
+        dropped_hands_invalid: parse_u64_metadata(
+            path,
+            &values,
+            "lechiffre.dropped_hands_invalid",
+        )?,
     };
     let reconstructed_seen = summary
         .hands_written
         .checked_add(summary.dropped_hands_missing_timing)
+        .and_then(|value| value.checked_add(summary.dropped_hands_invalid))
         .ok_or(BehaviourParquetLoadError::CountOverflow {
             field: "hands_seen",
         })?;
@@ -686,6 +692,7 @@ fn validate_metadata(
             hands_seen: summary.hands_seen,
             hands_written: summary.hands_written,
             dropped_hands_missing_timing: summary.dropped_hands_missing_timing,
+            dropped_hands_invalid: summary.dropped_hands_invalid,
         });
     }
     Ok(summary)
@@ -1141,6 +1148,7 @@ pub enum BehaviourParquetLoadError {
         hands_seen: u64,
         hands_written: u64,
         dropped_hands_missing_timing: u64,
+        dropped_hands_invalid: u64,
     },
     InvalidFileRowCount {
         table: &'static str,
@@ -1304,10 +1312,12 @@ impl fmt::Display for BehaviourParquetLoadError {
                 hands_seen,
                 hands_written,
                 dropped_hands_missing_timing,
+                dropped_hands_invalid,
             } => write!(
                 f,
                 "invalid dataset summary: hands_seen={hands_seen}, hands_written={hands_written}, \
-                 dropped_hands_missing_timing={dropped_hands_missing_timing}"
+                 dropped_hands_missing_timing={dropped_hands_missing_timing}, \
+                 dropped_hands_invalid={dropped_hands_invalid}"
             ),
             Self::InvalidFileRowCount { table, rows } => {
                 write!(
