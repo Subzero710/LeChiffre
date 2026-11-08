@@ -1,5 +1,7 @@
 //! Behavioural Engine data contracts and trainable conditional generator.
 
+mod analyzer;
+pub(crate) mod checkpoint;
 pub(crate) mod codebook;
 mod event;
 mod featurizer;
@@ -8,6 +10,11 @@ mod history;
 mod profile;
 mod sequence;
 
+pub(crate) use analyzer::NoiseStream;
+pub use analyzer::{
+    ANALYZER_EVENT_WIDTH, AnalyzerAdam, AnalyzerError, AnalyzerParameters, BehaviourPosterior,
+    NeuralBehaviourAnalyzer,
+};
 pub use event::{
     ActionHistory, ActionKind, ActionSizing, BehaviourEvent, BehaviourEventError, DecisionContext,
     ExactAction, HandId, ObservedAction, PlayerState, PlayerStatus, Position, PreviousAggression,
@@ -31,16 +38,23 @@ pub use profile::{
 };
 pub use sequence::{BehaviourSequence, BehaviourSequenceError};
 
+impl BehaviourAnalyzer for NeuralBehaviourAnalyzer {
+    type Error = AnalyzerError;
+    fn analyze(&self, support: &[FeaturizedHand]) -> Result<BehaviourPosterior, Self::Error> {
+        self.infer(support)
+    }
+}
+
 /// Common latent-space contract implemented by both sides of a behavioural model pair.
 pub trait BehaviourLatentModel {
     fn latent_config(&self) -> BehaviourLatentConfig;
 }
 
-/// Infers a behavioural profile from multiple real hands of the same subject.
+/// Infers a distribution over latent profiles from past hands of the same subject.
 pub trait BehaviourAnalyzer: BehaviourLatentModel {
     type Error;
 
-    fn analyze(&self, support: &[FeaturizedHand]) -> Result<BehaviourProfile, Self::Error>;
+    fn analyze(&self, support: &[FeaturizedHand]) -> Result<BehaviourPosterior, Self::Error>;
 }
 
 /// Predicts action, continuous sizing and timing distributions from (context, Z).
@@ -128,13 +142,9 @@ mod tests {
     }
 
     impl BehaviourAnalyzer for StubAnalyzer {
-        type Error = std::convert::Infallible;
-
-        fn analyze(&self, _support: &[FeaturizedHand]) -> Result<BehaviourProfile, Self::Error> {
-            Ok(self
-                .config
-                .profile(vec![0.0; self.config.dimension()])
-                .unwrap())
+        type Error = AnalyzerError;
+        fn analyze(&self, _support: &[FeaturizedHand]) -> Result<BehaviourPosterior, Self::Error> {
+            Err(AnalyzerError::NoSubjectDecisions)
         }
     }
 

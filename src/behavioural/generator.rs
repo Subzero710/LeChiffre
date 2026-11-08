@@ -7,6 +7,11 @@
 use std::f64::consts::PI;
 use std::fmt;
 
+use super::checkpoint::{
+    dense_from_value, dense_value, dimension, exact_keys, float_array, number, unsigned,
+};
+use serde_json::{Value, json};
+
 use super::codebook::{action_id, position_id, street_id};
 use super::featurizer::encode_context;
 use super::{
@@ -408,7 +413,11 @@ impl NeuralBehaviourGenerator {
         parameters: GeneratorParameters,
     ) -> Result<Self, GeneratorError> {
         let hidden = parameters.state.output;
-        if parameters.state.input != GENERATOR_CONTEXT_WIDTH + latent.dimension()
+        let input_width = GENERATOR_CONTEXT_WIDTH
+            .checked_add(latent.dimension())
+            .ok_or(GeneratorError::InvalidModelShape)?;
+        if latent.dimension() > 4096
+            || parameters.state.input != input_width
             || parameters.action.input != hidden
             || parameters.action.output != ACTION_COUNT
             || parameters.sizing.input != hidden + GENERATOR_SIZING_WIDTH
@@ -1261,6 +1270,130 @@ impl Adam {
 
     pub fn steps(&self) -> u64 {
         self.step
+    }
+}
+
+impl NeuralBehaviourGenerator {
+    /// Canonical encoded pre-action probabilities, without reading the target response.
+    pub fn action_probabilities_encoded(
+        &self,
+        profile: &BehaviourProfile,
+        observation: &GeneratorObservation,
+        legal: &LegalActionSpace,
+    ) -> Result<[f64; ACTION_COUNT], GeneratorError> {
+        if observation
+            .context_present
+            .iter()
+            .any(|&p| p != 0 && p != 1)
+            || observation
+                .context_values
+                .iter()
+                .zip(&observation.context_present)
+                .any(|(&v, &p)| !v.is_finite() || v < 0.0 || (p == 0 && v != 0.0))
+            || [0_usize, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13]
+                .iter()
+                .any(|&i| observation.context_present[i] == 0)
+        {
+            return Err(GeneratorError::InvalidEncodedObservation);
+        }
+        legal.validate_facts(
+            observation.context_values[0],
+            observation.context_values[1],
+            observation.context_values[2],
+            observation.context_values[4],
+            observation.context_values[5],
+        )?;
+        Ok(self
+            .forward_features(
+                profile,
+                encoded_context_features(
+                    observation.street,
+                    observation.actor_position,
+                    &observation.context_values,
+                    &observation.context_present,
+                ),
+                *legal,
+            )?
+            .probabilities)
+    }
+
+    pub(crate) fn checkpoint_value(&self) -> Value {
+        json!({"dimension":self.latent.dimension(),
+               "state":dense_value(&self.parameters.state),
+               "action":dense_value(&self.parameters.action),
+               "sizing":dense_value(&self.parameters.sizing),
+               "timing":dense_value(&self.parameters.timing)})
+    }
+
+    pub(crate) fn from_checkpoint(value: &Value) -> Result<Self, String> {
+        exact_keys(value, &["dimension", "state", "action", "sizing", "timing"])?;
+        let config = BehaviourLatentConfig::new(dimension(&value["dimension"])?)
+            .map_err(|e| e.to_string())?;
+        Self::new(
+            config,
+            GeneratorParameters {
+                state: dense_from_value(&value["state"])?,
+                action: dense_from_value(&value["action"])?,
+                sizing: dense_from_value(&value["sizing"])?,
+                timing: dense_from_value(&value["timing"])?,
+            },
+        )
+        .map_err(|e| e.to_string())
+    }
+}
+
+impl LayerMoments {
+    fn checkpoint_value(&self) -> Value {
+        json!({"mw":self.mw,"vw":self.vw,"mb":self.mb,"vb":self.vb})
+    }
+    fn from_checkpoint(value: &Value, layer: &DenseLayer) -> Result<Self, String> {
+        exact_keys(value, &["mw", "vw", "mb", "vb"])?;
+        let moments = Self {
+            mw: float_array(&value["mw"])?,
+            vw: float_array(&value["vw"])?,
+            mb: float_array(&value["mb"])?,
+            vb: float_array(&value["vb"])?,
+        };
+        if !moments.matches(layer) || moments.vw.iter().chain(&moments.vb).any(|v| *v < 0.0) {
+            return Err("invalid generator optimizer moments".into());
+        }
+        Ok(moments)
+    }
+}
+
+impl Adam {
+    pub(crate) fn checkpoint_value(&self) -> Value {
+        json!({"learning_rate":self.learning_rate,"steps":self.step,
+            "state":self.moments.state.checkpoint_value(),
+            "action":self.moments.action.checkpoint_value(),
+            "sizing":self.moments.sizing.checkpoint_value(),
+            "timing":self.moments.timing.checkpoint_value()})
+    }
+    pub(crate) fn from_checkpoint(
+        value: &Value,
+        model: &NeuralBehaviourGenerator,
+    ) -> Result<Self, String> {
+        exact_keys(
+            value,
+            &[
+                "learning_rate",
+                "steps",
+                "state",
+                "action",
+                "sizing",
+                "timing",
+            ],
+        )?;
+        let rate = number(&value["learning_rate"])?;
+        let mut optimizer = Self::new(model, rate).map_err(|e| e.to_string())?;
+        optimizer.step = unsigned(&value["steps"])?;
+        optimizer.moments = AdamMoments {
+            state: LayerMoments::from_checkpoint(&value["state"], &model.parameters.state)?,
+            action: LayerMoments::from_checkpoint(&value["action"], &model.parameters.action)?,
+            sizing: LayerMoments::from_checkpoint(&value["sizing"], &model.parameters.sizing)?,
+            timing: LayerMoments::from_checkpoint(&value["timing"], &model.parameters.timing)?,
+        };
+        Ok(optimizer)
     }
 }
 

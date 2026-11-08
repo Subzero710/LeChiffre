@@ -1528,6 +1528,35 @@ mod tests {
                 .iter()
                 .all(|event| event.action.decision_time_ms.is_some())
         );
+
+        // One genuinely source-observed timed hand exercises the complete A/G
+        // inference contract without fabricating additional training hands.
+        use crate::behavioural::{
+            BehaviourFeaturizer, BehaviourLatentConfig, NeuralBehaviourAnalyzer,
+            NeuralBehaviourGenerator,
+        };
+        let subject_id = PlayerId::from_source("test", "Arash");
+        let subject_hand = imported.hands[0].subject_hand(&subject_id).unwrap();
+        let features = BehaviourFeaturizer::new()
+            .featurize_hand(&subject_hand)
+            .unwrap()
+            .unwrap();
+        let latent = BehaviourLatentConfig::new(3).unwrap();
+        let analyzer = NeuralBehaviourAnalyzer::initialize(latent, 8, 91).unwrap();
+        let posterior = analyzer.infer(&[features]).unwrap();
+        let z = posterior.mean_profile().unwrap();
+        let generator = NeuralBehaviourGenerator::initialize(latent, 8, 92).unwrap();
+        let observed = events
+            .iter()
+            .find(|event| event.actor_position() == subject_hand.subject_position())
+            .unwrap();
+        let legal = imported
+            .exact_legal_actions
+            .get(&(observed.hand_id.clone(), observed.sequence_index))
+            .unwrap();
+        let policy = generator.predict(&z, &observed.context, legal).unwrap();
+        let probability_sum: f64 = policy.action_probabilities().iter().sum();
+        assert!((probability_sum - 1.0).abs() < 1e-10);
     }
 
     #[test]
