@@ -1,0 +1,359 @@
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+
+use rs_poker::arena::RakeConfig;
+use rs_poker::arena::action::AgentAction;
+use rs_poker::open_hand_history::{
+    HandHistory, ReplayError, ReplayStep, ReplayedHand, replay_hand,
+};
+
+use crate::behavioural::{
+    ActionHistory, ActionKind, BehaviourEvent, BehaviourEventError, BehaviourHistory,
+    BehaviourSequence, BehaviourSequenceError, ExactAction, GeneratorError, HandId,
+    LegalActionSpace,
+};
+
+use super::rs_poker::{decision_context, exact_legal_actions, position_for_index, to_bb};
+use super::{AdaptedHand, ObservedPlayer, PlayerId};
+
+pub struct HandHistoryAdapter;
+
+impl HandHistoryAdapter {
+    pub fn adapt(
+        hand: &HandHistory,
+        rake: RakeConfig,
+    ) -> Result<AdaptedHand, HandHistoryAdapterError> {
+        Self::adapt_inner(hand, rake, None, None)
+    }
+
+    pub(crate) fn adapt_with_observations(
+        hand: &HandHistory,
+        rake: RakeConfig,
+        decision_times_ms: &[Option<u32>],
+        player_ids: &HashMap<u64, PlayerId>,
+    ) -> Result<AdaptedHand, HandHistoryAdapterError> {
+        Self::adapt_inner(hand, rake, Some(decision_times_ms), Some(player_ids))
+    }
+
+    fn adapt_inner(
+        hand: &HandHistory,
+        rake: RakeConfig,
+        decision_times_ms: Option<&[Option<u32>]>,
+        player_ids: Option<&HashMap<u64, PlayerId>>,
+    ) -> Result<AdaptedHand, HandHistoryAdapterError> {
+        let replayed = replay_hand(hand, rake)?;
+        let players_at_table = replayed.initial_state.num_players;
+        if !(2..=6).contains(&players_at_table) {
+            return Err(HandHistoryAdapterError::UnsupportedPlayerCount {
+                players: players_at_table,
+            });
+        }
+
+        if let Some(times) = decision_times_ms
+            && times.len() != replayed.steps.len()
+        {
+            return Err(HandHistoryAdapterError::TimingCountMismatch {
+                expected: replayed.steps.len(),
+                observed: times.len(),
+            });
+        }
+
+        let hand_id = HandId::new(format!("{}:{}", hand.site_name, hand.game_number));
+        let players = observed_players(hand, &replayed, player_ids)?;
+        let mut sequence = BehaviourSequence::new(hand_id.clone());
+        let mut history = ActionHistory::new();
+
+        for (sequence_offset, step) in replayed.transitions().enumerate() {
+            let sequence_index = u32::try_from(sequence_offset)
+                .map_err(|_| HandHistoryAdapterError::SequenceTooLong)?;
+            let mut context = decision_context(&step.state_before);
+            history.prepare(&mut context);
+            let exact = exact_action(
+                step,
+                decision_times_ms.and_then(|times| times[sequence_offset]),
+            );
+            let action = history.record(&context, exact)?;
+            let event = BehaviourEvent::new(hand_id.clone(), sequence_index, context, action)?;
+            sequence.push(event)?;
+        }
+
+        Ok(AdaptedHand::new(sequence, players))
+    }
+
+    /// Replay the original rules-engine states to recover the exact legal masks
+    /// and integral-chip bet/raise bounds for Parquet training. Keys match the
+    /// canonical IDs and decision sequence indexes produced by `adapt`.
+    pub fn exact_legality_index(
+        hand: &HandHistory,
+        rake: RakeConfig,
+    ) -> Result<HashMap<(HandId, u32), LegalActionSpace>, HandHistoryAdapterError> {
+        let replayed = replay_hand(hand, rake)?;
+        let hand_id = HandId::new(format!("{}:{}", hand.site_name, hand.game_number));
+        let mut legal = HashMap::new();
+        for (offset, step) in replayed.transitions().enumerate() {
+            let sequence_index =
+                u32::try_from(offset).map_err(|_| HandHistoryAdapterError::SequenceTooLong)?;
+            legal.insert(
+                (hand_id.clone(), sequence_index),
+                exact_legal_actions(&step.state_before)
+                    .map_err(HandHistoryAdapterError::InvalidExactLegality)?,
+            );
+        }
+        Ok(legal)
+    }
+
+    /// Builds a multi-hand behavioural history by exact source-observed
+    /// `PlayerId` equality. No seat-based or heuristic identity matching occurs.
+    pub fn history_for(player_id: &PlayerId, hands: &[AdaptedHand]) -> BehaviourHistory {
+        let mut history = BehaviourHistory::new();
+        for hand in hands {
+            if let Some(subject_hand) = hand.subject_hand(player_id) {
+                history.push(subject_hand);
+            }
+        }
+        history
+    }
+}
+
+fn observed_players(
+    hand: &HandHistory,
+    replayed: &ReplayedHand,
+    supplied_player_ids: Option<&HashMap<u64, PlayerId>>,
+) -> Result<Vec<ObservedPlayer>, HandHistoryAdapterError> {
+    let mut identities = HashSet::new();
+    let mut players = Vec::with_capacity(replayed.player_ids.len());
+
+    for (index, source_player_id) in replayed.player_ids.iter().copied().enumerate() {
+        let source_player = hand
+            .players
+            .iter()
+            .find(|player| player.id == source_player_id)
+            .ok_or(HandHistoryAdapterError::MissingSourcePlayer { source_player_id })?;
+
+        let player_id = match supplied_player_ids {
+            Some(ids) => ids
+                .get(&source_player_id)
+                .cloned()
+                .ok_or(HandHistoryAdapterError::MissingPlayerIdentity { source_player_id })?,
+            None => PlayerId::from_source(&hand.site_name, &source_player.name),
+        };
+        if !identities.insert(player_id.clone()) {
+            return Err(HandHistoryAdapterError::DuplicatePlayerIdentity { player_id });
+        }
+
+        players.push(ObservedPlayer {
+            player_id,
+            position: position_for_index(
+                replayed.initial_state.num_players,
+                replayed.initial_state.dealer_idx,
+                index,
+            ),
+        });
+    }
+
+    Ok(players)
+}
+
+fn exact_action(step: &ReplayStep, decision_time_ms: Option<u32>) -> ExactAction {
+    let actor_index = step.state_before.to_act_idx();
+    let before_player_bet = step.state_before.current_round_player_bet(actor_index);
+    let after_player_bet = step.state_after.current_round_player_bet(actor_index);
+    let amount_added = after_player_bet - before_player_bet;
+    let starting_bet = step.state_before.current_round_bet();
+    let final_bet = step.state_after.current_round_bet();
+    let kind = if matches!(&step.action, AgentAction::Fold) {
+        ActionKind::Fold
+    } else if final_bet > starting_bet {
+        if starting_bet == 0 {
+            ActionKind::Bet
+        } else {
+            ActionKind::Raise
+        }
+    } else if amount_added > 0 {
+        ActionKind::Call
+    } else {
+        ActionKind::Check
+    };
+    ExactAction {
+        kind,
+        amount_added_bb: to_bb(amount_added, step.state_before.big_blind),
+        highest_bet_after_bb: to_bb(final_bet, step.state_before.big_blind),
+        is_all_in: step.state_after.player_all_in.get(actor_index),
+        decision_time_ms,
+    }
+}
+
+#[derive(Debug)]
+pub enum HandHistoryAdapterError {
+    UnsupportedPlayerCount { players: usize },
+    SequenceTooLong,
+    MissingSourcePlayer { source_player_id: u64 },
+    MissingPlayerIdentity { source_player_id: u64 },
+    DuplicatePlayerIdentity { player_id: PlayerId },
+    TimingCountMismatch { expected: usize, observed: usize },
+    InvalidExactLegality(GeneratorError),
+    Replay(ReplayError),
+    BehaviourEvent(BehaviourEventError),
+    BehaviourSequence(BehaviourSequenceError),
+}
+
+impl fmt::Display for HandHistoryAdapterError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedPlayerCount { players } => {
+                write!(
+                    f,
+                    "LeChiffre supports only 2..=6-max, got {players} players"
+                )
+            }
+            Self::SequenceTooLong => write!(f, "hand history has more than u32::MAX decisions"),
+            Self::MissingSourcePlayer { source_player_id } => {
+                write!(
+                    f,
+                    "replay references unknown source player {source_player_id}"
+                )
+            }
+            Self::MissingPlayerIdentity { source_player_id } => {
+                write!(
+                    f,
+                    "missing player identity for source player {source_player_id}"
+                )
+            }
+            Self::DuplicatePlayerIdentity { player_id } => {
+                write!(
+                    f,
+                    "duplicate source player identity {player_id} in one hand"
+                )
+            }
+            Self::TimingCountMismatch { expected, observed } => write!(
+                f,
+                "timing count does not match replay decisions: expected {expected}, got {observed}"
+            ),
+            Self::InvalidExactLegality(error) => {
+                write!(f, "invalid exact legality in replay: {error}")
+            }
+            Self::Replay(error) => write!(f, "hand history replay failed: {error}"),
+            Self::BehaviourEvent(error) => write!(f, "invalid behaviour event: {error}"),
+            Self::BehaviourSequence(error) => write!(f, "invalid behaviour sequence: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for HandHistoryAdapterError {}
+
+impl From<ReplayError> for HandHistoryAdapterError {
+    fn from(error: ReplayError) -> Self {
+        Self::Replay(error)
+    }
+}
+
+impl From<BehaviourEventError> for HandHistoryAdapterError {
+    fn from(error: BehaviourEventError) -> Self {
+        Self::BehaviourEvent(error)
+    }
+}
+
+impl From<BehaviourSequenceError> for HandHistoryAdapterError {
+    fn from(error: BehaviourSequenceError) -> Self {
+        Self::BehaviourSequence(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::behavioural::Position;
+    use rs_poker::open_hand_history::{HandHistoryParser, PokerStarsParser};
+
+    #[test]
+    fn adapts_parsed_room_history_without_inventing_timing() {
+        let hand = PokerStarsParser::default()
+            .parse(include_str!(
+                "../../vendor/rs-poker/tests/fixtures/rooms/pokerstars.txt"
+            ))
+            .unwrap()
+            .remove(0);
+
+        let adapted = HandHistoryAdapter::adapt(&hand, RakeConfig::none()).unwrap();
+        let sequence = adapted.sequence();
+
+        assert_eq!(sequence.hand_id().as_str(), "PokerStars:171562910425");
+        assert_eq!(sequence.len(), 14);
+        assert!(
+            sequence
+                .events()
+                .iter()
+                .all(|event| event.action.decision_time_ms.is_none())
+        );
+    }
+
+    #[test]
+    fn exact_legality_keys_match_the_observation_sequence() {
+        let hand = PokerStarsParser::default()
+            .parse(include_str!(
+                "../../vendor/rs-poker/tests/fixtures/rooms/pokerstars.txt"
+            ))
+            .unwrap()
+            .remove(0);
+        let indexed = HandHistoryAdapter::exact_legality_index(&hand, RakeConfig::none()).unwrap();
+        let adapted = HandHistoryAdapter::adapt(&hand, RakeConfig::none()).unwrap();
+        assert_eq!(indexed.len(), adapted.sequence().len());
+        for event in adapted.sequence().events() {
+            let legal = indexed[&(event.hand_id.clone(), event.sequence_index)];
+            assert!(match event.action.kind {
+                ActionKind::Fold => legal.fold,
+                ActionKind::Check => legal.check,
+                ActionKind::Call => legal.call,
+                ActionKind::Bet => legal.bet.is_some(),
+                ActionKind::Raise => legal.raise.is_some(),
+            });
+        }
+    }
+
+    #[test]
+    fn maps_real_six_max_fixture_to_canonical_positions() {
+        let hand = PokerStarsParser::default()
+            .parse(include_str!(
+                "../../vendor/rs-poker/tests/fixtures/rooms/pokerstars.txt"
+            ))
+            .unwrap()
+            .remove(0);
+
+        let adapted = HandHistoryAdapter::adapt(&hand, RakeConfig::none()).unwrap();
+
+        let expected = [
+            ("PokerStars:zelittle", Position::Cutoff),
+            ("PokerStars:yakka34", Position::Button),
+            ("PokerStars:Zaco7319", Position::SmallBlind),
+            ("PokerStars:Pat10man", Position::BigBlind),
+            ("PokerStars:jumpshotftw", Position::UnderTheGun),
+            ("PokerStars:Rihan2", Position::Hijack),
+        ];
+
+        for (id, position) in expected {
+            let player = adapted.player(&PlayerId::new(id)).unwrap();
+            assert_eq!(player.position, position);
+        }
+    }
+
+    #[test]
+    fn builds_history_only_from_exact_player_identity() {
+        let hand = PokerStarsParser::default()
+            .parse(include_str!(
+                "../../vendor/rs-poker/tests/fixtures/rooms/pokerstars.txt"
+            ))
+            .unwrap()
+            .remove(0);
+
+        let adapted = HandHistoryAdapter::adapt(&hand, RakeConfig::none()).unwrap();
+        let hands = vec![adapted];
+
+        let history = HandHistoryAdapter::history_for(&PlayerId::new("PokerStars:yakka34"), &hands);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.hands()[0].subject_position(), Position::Button);
+
+        let absent =
+            HandHistoryAdapter::history_for(&PlayerId::new("PokerStars:not-present"), &hands);
+        assert!(absent.is_empty());
+    }
+}
