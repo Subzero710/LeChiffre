@@ -1,14 +1,15 @@
 # Behavioral Engine — invariants et Generator
 
-## Refactoring Z0/Z1/Z2 (steps 1–4, trainer still transitional)
+## Refactoring Z0/Z1/Z2 (steps 1–5, trainer still transitional)
 
 The behavioural model has one shared Analyzer A and one shared Generator G.
 
 - `BehaviourBlueprint` stores the population blueprint Z0 and an explicitly supplied
   prior standard-deviation vector. No population parameters are inferred by its constructor.
 - `PlayerBaseline::from_blueprint` creates Z1 with **zero observed hands** and
-  bit-for-bit equality `Z1 == Z0`. `set_estimate` records an estimate supplied
-  by a future personalization algorithm, with strictly increasing hand count.
+  bit-for-bit equality `Z1 == Z0`. `PlayerBaselineAdapter` performs the
+  *step-5 implementation* of online Z1 personalization; its changes are
+  applied to the player embedding only, never to A/G weights.
 - `NeuralBehaviourAnalyzer::infer_action(context, observed, baseline)` computes
   a decision-specific Z2 posterior. `prior(context, baseline)` shares the same
   Analyzer parameters but never accepts a current action, sizing or timing.
@@ -23,9 +24,53 @@ The behavioural model has one shared Analyzer A and one shared Generator G.
   missing-timing count. A training decision missing exact source replay legality
   is still fatal; no legal space is inferred from the target action.
 
+### Step 5 — individual Z1 refinement (implemented, not globally trained)
+
+`PlayerBaselineAdapter` is a blueprint-bound, per-hand online updater. Its
+`initialize_player()` returns `Z1(0) == Z0` exactly. `adapt_hand()` receives
+all observed voluntary decisions of **one** subject from **one** retained hand,
+with the legal spaces recovered through exact game replay. It computes the
+Generator's full joint NLL and `dL/dZ` using **fixed G weights** at the **same
+pre-update Z1** for all decisions of that hand. It performs one mean-gradient
+update, and increments `observed_hands` only after successful completion.
+
+The update uses a diagonal empirical-Fisher *approximation* to precision. For
+each coordinate, per hand:
+
+```text
+I_hand = mean_over_decisions((dL/dZ)^2)
+precision_next = precision_previous + I_hand
+step = clip(-learning_rate * mean(dL/dZ) / precision_next,
+            +/- max_step_prior_std * Z0_prior_std)
+Z1_next = Z1_previous + step
+uncertainty_std_next = 1 / sqrt(precision_next)
+```
+
+The evidence can move Z1 **towards or away from Z0**, depending on observed
+behaviour. Accumulating information slows updates as evidence grows, but neither
+strict logarithmic distance to Z0 nor calibrated psychological confidence is
+assumed. These precisions are **not** an exact Bayesian posterior. Per-hand
+state updates are atomic; invalid sizing, missing exact legality, repeated or
+out-of-order global hand indexes, and dimension errors leave Z1 unchanged.
+
+`BehaviourParquetDataset::adapt_baseline_before(subject_id,
+before_hand_index, generator, adapter, provider)` is the replay-backed integration.
+The boundary is **exclusive and global**: no action at or after that hand index
+is read or supplied to the optimizer. Only the selected subject's actions
+are scored. Retained hands without the subject's voluntary decisions contribute
+no evidence and do not increment the observed-hand count. Other players' actions
+remain in the pre-decision context if they occurred earlier in the hand.
+
+The caller holds one `PlayerBaselineState` per player, keyed outside the model.
+Model weights, blueprint and other players' baselines are not changed. Stage 7
+will add the checkpoint format and managed storage for these states. Stage 6
+will train the global Z0/A/G hierarchy so that personalization has a learned
+latent geometry; **the existence of this update API is not evidence that Z1
+currently improves predictions**.
+
 **Migration status:** The CLI joint training objective and `infer(support)` path
 still use one historical support-level Z per subject. They do **not** yet train
-Z0/Z1/Z2 as a hierarchy. Their replacement belongs to steps 5–6. The new
+Z0/Z1/Z2 as a hierarchy. Their replacement belongs to step 6. The new
 prior/posterior path is initialized and tested for data flow, but not yet trained
 for predictive use. Prior checkpoints with the old Analyzer layer shape are
 rejected; checkpoint versioning and deployment migration belong to step 7.

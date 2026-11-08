@@ -1,6 +1,7 @@
 //! Behavioural Engine data contracts and trainable conditional generator.
 
 mod analyzer;
+mod baseline_adaptation;
 pub(crate) mod checkpoint;
 pub(crate) mod codebook;
 mod event;
@@ -14,6 +15,10 @@ pub(crate) use analyzer::NoiseStream;
 pub use analyzer::{
     ANALYZER_EVENT_WIDTH, AnalyzerAdam, AnalyzerError, AnalyzerParameters, BehaviourPosterior,
     MomentaryBehaviour, NeuralBehaviourAnalyzer,
+};
+pub use baseline_adaptation::{
+    BaselineAdaptationConfig, BaselineAdaptationError, BaselineHandReport, PlayerBaselineAdapter,
+    PlayerBaselineState,
 };
 pub use event::{
     ActionHistory, ActionKind, ActionSizing, BehaviourEvent, BehaviourEventError, DecisionContext,

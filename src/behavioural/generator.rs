@@ -1477,6 +1477,17 @@ impl Adam {
 }
 
 impl NeuralBehaviourGenerator {
+    /// Read-only joint NLL (action, conditional sizing, timing) and dL/dZ for
+    /// personalization of Z1. Does not update any Generator parameters.
+    pub fn evaluate_observation_encoded(
+        &self,
+        profile: &BehaviourProfile,
+        observation: &GeneratorObservation,
+        legal: &LegalActionSpace,
+    ) -> Result<TrainingLoss, GeneratorError> {
+        loss_gradients_encoded(self, profile, observation, *legal).map(|(loss, _)| loss)
+    }
+
     /// Canonical encoded pre-action probabilities, without reading the target response.
     pub fn action_probabilities_encoded(
         &self,
