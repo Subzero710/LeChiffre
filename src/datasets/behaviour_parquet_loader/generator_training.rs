@@ -228,11 +228,11 @@ pub struct GeneratorEpochReport {
 }
 
 #[derive(Debug, Clone)]
-struct SubjectSample {
-    id: u64,
-    support: Vec<FeaturizedHand>,
-    query: Vec<FeaturizedHand>,
-    validation: Vec<FeaturizedHand>,
+pub(super) struct SubjectSample {
+    pub(super) id: u64,
+    pub(super) support: Vec<FeaturizedHand>,
+    pub(super) query: Vec<FeaturizedHand>,
+    pub(super) validation: Vec<FeaturizedHand>,
 }
 
 #[derive(Debug, Clone)]
@@ -295,7 +295,7 @@ impl GeneratorTrainer {
         &self.last_subjects
     }
 
-    fn samples(
+    pub(super) fn samples(
         dataset: &BehaviourParquetDataset,
         selected: &[u64],
         split: GeneratorHandSplit,

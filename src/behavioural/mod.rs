@@ -13,8 +13,8 @@ mod sequence;
 
 pub(crate) use analyzer::NoiseStream;
 pub use analyzer::{
-    ANALYZER_EVENT_WIDTH, AnalyzerAdam, AnalyzerError, AnalyzerParameters, BehaviourPosterior,
-    MomentaryBehaviour, NeuralBehaviourAnalyzer,
+    ANALYZER_EVENT_WIDTH, AnalyzerAdam, AnalyzerError, AnalyzerGradientBatch, AnalyzerParameters,
+    BehaviourPosterior, MomentaryBehaviour, NeuralBehaviourAnalyzer,
 };
 pub use baseline_adaptation::{
     BaselineAdaptationConfig, BaselineAdaptationError, BaselineHandReport, PlayerBaselineAdapter,

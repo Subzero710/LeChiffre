@@ -1,8 +1,58 @@
 # Behavioral Engine — invariants et Generator
 
-## Refactoring Z0/Z1/Z2 (steps 1–5, trainer still transitional)
+## Architecture Z0/Z1/Z2 — entraînement hiérarchique en bibliothèque (étape 6)
 
 The behavioural model has one shared Analyzer A and one shared Generator G.
+
+### Étape 6 — `HierarchicalTrainer` (in-memory, distinct du CLI historique)
+
+`src/datasets/behaviour_parquet_loader/hierarchical_training.rs` définit
+`HierarchicalTrainer`, avec **trois phases explicites** et des snapshots fixes
+pendant chaque lot de gradients :
+
+1. `train_blueprint_epoch(dataset, subjects, split, legality)` ajuste le vecteur
+   explicite **Z0** et G sur les décisions humaines dont le `hand_index` précède
+   strictement `split.first_query_hand_index`. Le prior standard deviation est
+   *fourni explicitement* ; il n'est pas appris ni calibré à cette étape.
+2. `train_personalization_epoch(..., history_hands, legality)` initialise
+   strictement Z1 à Z0, l'adapte uniquement avec `history_hands` mains passées
+   et entraîne G sur les mains `query` postérieures. Le nombre de mains est un
+   paramètre strict, sans duplication ni substitution si l'historique manque.
+   On peut exécuter cette phase plusieurs fois avec différents nombres de
+   mains. Les paramètres A/G ne sont jamais personnalisés par identifiant.
+3. `train_momentary_epoch(..., history_hands, legality)` met à jour A et G en
+   utilisant **deux branches du même Analyzer** :
+   `p(Z2 | C,Z1)` avant action et `q(Z2 | C,O,Z1)` après action. La loss est
+   `(NLL_prior + NLL_posterior)/2 + beta_kl * KL(q||p)` ; G prédit l'action,
+   le sizing légal exact et le timing. La rétropropagation analytique de la KL
+   et de G passe par les deux branches de A. Les mêmes paramètres A sont utilisés
+   dans les deux calculs ; les updates de A et G sont atomiques par sujet.
+
+`NeuralBehaviourAnalyzer::prior_encoded` n'accède **jamais** à `ObservedAction`.
+`infer_encoded` utilise l'observation actuelle uniquement pour son posterior.
+Le moteur de règles fournit tous les espaces légaux exacts via
+`ExactLegalityProvider`; leur absence est bloquante.
+
+`HierarchicalTrainer::evaluate(...)` rapporte **séparément** la NLL future
+à Z0, à Z1, au prior Z2 (avant action), et la NLL reconstructive du posterior
+Z2 (après action). La NLL au posterior ne doit jamais être présentée comme
+une prédiction. Tous les profils de validation sont calculés avec les mains
+antérieures à la frontière globale d'évaluation ; aucune action future ne
+contribue aux gradients ou à Z1.
+
+**Validation scientifique non acquise :** un modèle ne devient pas fiable parce
+que sa loss baisse. La séparation Z0/Z1/Z2 reste partiellement non identifiable ;
+le KL évite certains raccourcis mais ne garantit pas l'absence d'effondrement
+latent. Il faudra mesurer les ablations sur des joueurs/mains non vus et calibrer
+les incertitudes. Les tests unitaires vérifient seulement les contrats et les
+transitions d'entraînement, pas une supériorité prédictive réelle.
+
+**Limites d'intégration :** l'ancien `GeneratorTrainer` et les commandes
+`--train-behavioural` / `--resume-behavioural` continuent d'utiliser le chemin
+historique à Z unique. Ils ne sont **pas** silencieusement redirigés vers le
+nouveau modèle. Versionner les checkpoints, migrer le CLI et sauvegarder les
+profils Z1 appartiennent à l'étape 7. Les poids anciens ne sont pas traités
+comme des poids hiérarchiques compatibles.
 
 - `BehaviourBlueprint` stores the population blueprint Z0 and an explicitly supplied
   prior standard-deviation vector. No population parameters are inferred by its constructor.
@@ -63,17 +113,16 @@ remain in the pre-decision context if they occurred earlier in the hand.
 
 The caller holds one `PlayerBaselineState` per player, keyed outside the model.
 Model weights, blueprint and other players' baselines are not changed. Stage 7
-will add the checkpoint format and managed storage for these states. Stage 6
-will train the global Z0/A/G hierarchy so that personalization has a learned
-latent geometry; **the existence of this update API is not evidence that Z1
-currently improves predictions**.
+will add the checkpoint format and managed storage for these states.
+Stage 6 introduces the global Z0/A/G hierarchy in the library ;
+**the existence of this update API is not evidence that Z1 improves predictions**.
 
 **Migration status:** The CLI joint training objective and `infer(support)` path
 still use one historical support-level Z per subject. They do **not** yet train
-Z0/Z1/Z2 as a hierarchy. Their replacement belongs to step 6. The new
-prior/posterior path is initialized and tested for data flow, but not yet trained
-for predictive use. Prior checkpoints with the old Analyzer layer shape are
-rejected; checkpoint versioning and deployment migration belong to step 7.
+Z0/Z1/Z2 as a hierarchy. A separate `HierarchicalTrainer` now implements
+this training in memory, but the historical CLI will be replaced in step 7.
+Prior checkpoints with the old Analyzer layer shape are rejected ; checkpoint
+versioning and deployment migration belong to step 7.
 
 Datasets must be re-exported with the new per-hand-drop summary metadata; the
 loader validates this metadata strictly. Do not represent a green CI on the

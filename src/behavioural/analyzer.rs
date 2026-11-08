@@ -16,7 +16,7 @@ use super::featurizer::encode_context;
 use super::{
     ACTION_COUNT, BehaviourLatentConfig, BehaviourLatentModel, BehaviourProfile,
     CategoricalFeature, ContinuousFeature, DecisionContext, DenseLayer, EVENT_CONTINUOUS_WIDTH,
-    FeaturizedHand, ObservedAction, PRE_ACTION_CONTEXT_WIDTH, PlayerBaseline,
+    FeaturizedHand, GeneratorObservation, ObservedAction, PRE_ACTION_CONTEXT_WIDTH, PlayerBaseline,
 };
 
 pub const ANALYZER_EVENT_WIDTH: usize = 4 + 7 + ACTION_COUNT + 1 + 2 * EVENT_CONTINUOUS_WIDTH;
@@ -140,6 +140,15 @@ struct AnalyzerPass {
     posterior: BehaviourPosterior,
 }
 
+#[derive(Debug)]
+struct DecisionPass {
+    features: Vec<f64>,
+    state: Vec<f64>,
+    input: Vec<f64>,
+    raw: Vec<f64>,
+    posterior: BehaviourPosterior,
+}
+
 impl NeuralBehaviourAnalyzer {
     pub fn new(
         latent: BehaviourLatentConfig,
@@ -225,14 +234,47 @@ impl NeuralBehaviourAnalyzer {
         baseline: &PlayerBaseline,
         observed: bool,
     ) -> Result<BehaviourPosterior, AnalyzerError> {
+        Ok(self
+            .decision_pass(features.to_vec(), baseline, observed)?
+            .posterior)
+    }
+
+    /// Z2 prior/posterior from the canonical Parquet observation. The prior uses
+    /// only context_values/context_present, street, position, and Z1; it cannot
+    /// read `observed` even though that field exists in the input record.
+    pub fn infer_encoded(
+        &self,
+        observation: &GeneratorObservation,
+        baseline: &PlayerBaseline,
+    ) -> Result<MomentaryBehaviour, AnalyzerError> {
+        let prior = self.prior_encoded(observation, baseline)?;
+        let features = encode_observation(observation, true)?;
+        let posterior = self.infer_features(&features, baseline, true)?;
+        Ok(MomentaryBehaviour { prior, posterior })
+    }
+
+    pub fn prior_encoded(
+        &self,
+        observation: &GeneratorObservation,
+        baseline: &PlayerBaseline,
+    ) -> Result<BehaviourPosterior, AnalyzerError> {
+        self.infer_features(&encode_observation(observation, false)?, baseline, false)
+    }
+
+    fn decision_pass(
+        &self,
+        features: Vec<f64>,
+        baseline: &PlayerBaseline,
+        observed: bool,
+    ) -> Result<DecisionPass, AnalyzerError> {
         if baseline.profile().dimension() != self.latent.dimension() {
             return Err(AnalyzerError::InvalidBaselineDimension);
         }
-        let state = dense_forward(&self.parameters.state, features)
+        let state = dense_forward(&self.parameters.state, &features)
             .into_iter()
             .map(f64::tanh)
             .collect::<Vec<_>>();
-        let mut input = state;
+        let mut input = state.clone();
         input.extend(baseline.profile().as_slice().iter().map(|&v| f64::from(v)));
         input.extend(
             baseline
@@ -242,7 +284,15 @@ impl NeuralBehaviourAnalyzer {
         );
         input.push((baseline.observed_hands() as f64).ln_1p());
         input.push(if observed { 1.0 } else { 0.0 });
-        self.posterior_from_raw(&dense_forward(&self.parameters.posterior, &input))
+        let raw = dense_forward(&self.parameters.posterior, &input);
+        let posterior = self.posterior_from_raw(&raw)?;
+        Ok(DecisionPass {
+            features,
+            state,
+            input,
+            raw,
+            posterior,
+        })
     }
 
     /// Historical support aggregation retained only for the current v1 trainer.
@@ -391,6 +441,67 @@ fn encode_decision(
     )
 }
 
+/// Build the identical encoded A input directly from Parquet-ready G features.
+/// The pre-action branch does not inspect any property of ObservedAction.
+fn encode_observation(
+    observation: &GeneratorObservation,
+    with_action: bool,
+) -> Result<Vec<f64>, AnalyzerError> {
+    let mut values = [0.0_f32; EVENT_CONTINUOUS_WIDTH];
+    let mut present = [0_u8; EVENT_CONTINUOUS_WIDTH];
+    values[..PRE_ACTION_CONTEXT_WIDTH].copy_from_slice(&observation.context_values);
+    present[..PRE_ACTION_CONTEXT_WIDTH].copy_from_slice(&observation.context_present);
+    let response = if with_action {
+        let action = &observation.observed;
+        let time = action
+            .decision_time_ms
+            .ok_or(AnalyzerError::MissingDecisionTiming)?;
+        if let Some(sizing) = action.sizing {
+            for (index, value) in [
+                (
+                    ContinuousFeature::AmountOverPot as usize,
+                    Some(sizing.amount_over_pot_before),
+                ),
+                (
+                    ContinuousFeature::AmountOverStack as usize,
+                    Some(sizing.amount_over_stack_before),
+                ),
+                (
+                    ContinuousFeature::RaiseIncrementOverPot as usize,
+                    sizing.raise_increment_over_pot_before,
+                ),
+            ] {
+                if let Some(value) = value {
+                    values[index] = value;
+                    present[index] = 1;
+                }
+            }
+        }
+        values[ContinuousFeature::ActorAggressionStreakAfter as usize] =
+            action.actor_aggression_streak_after as f32;
+        values[ContinuousFeature::TableAggressionStreakAfter as usize] =
+            action.table_aggression_streak_after as f32;
+        values[ContinuousFeature::DecisionTimeMs as usize] = time as f32;
+        for field in [
+            ContinuousFeature::ActorAggressionStreakAfter,
+            ContinuousFeature::TableAggressionStreakAfter,
+            ContinuousFeature::DecisionTimeMs,
+        ] {
+            present[field as usize] = 1;
+        }
+        Some((usize::from(action_id(action.kind)), action.is_all_in))
+    } else {
+        None
+    };
+    encode_row(
+        usize::from(street_id(observation.street)),
+        usize::from(position_id(observation.actor_position)),
+        response,
+        &values,
+        &present,
+    )
+}
+
 fn encode_row(
     street: usize,
     position: usize,
@@ -514,6 +625,153 @@ fn dense_backward(
         }
     }
     input_grad
+}
+
+/// Exact reverse-mode gradients of the per-action variational objective:
+/// (NLL_prior + NLL_posterior)/2 + beta * KL(q(Z2|C,O,Z1) || p(Z2|C,Z1)).
+/// The same A parameters are used for both branches. No step occurs while
+/// accumulating gradients, so both branches see a fixed parameter snapshot.
+#[derive(Debug, Clone)]
+pub struct AnalyzerGradientBatch {
+    snapshot: AnalyzerParameters,
+    state: MatrixGradient,
+    posterior: MatrixGradient,
+    observations: usize,
+    kl_sum: f64,
+}
+
+impl AnalyzerGradientBatch {
+    pub fn new(model: &NeuralBehaviourAnalyzer) -> Self {
+        Self {
+            snapshot: model.parameters.clone(),
+            state: MatrixGradient::zeros(&model.parameters.state),
+            posterior: MatrixGradient::zeros(&model.parameters.posterior),
+            observations: 0,
+            kl_sum: 0.0,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.observations
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.observations == 0
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn accumulate_encoded(
+        &mut self,
+        model: &NeuralBehaviourAnalyzer,
+        baseline: &PlayerBaseline,
+        observation: &GeneratorObservation,
+        prior_noise: &[f64],
+        posterior_noise: &[f64],
+        prior_latent_gradient: &[f32],
+        posterior_latent_gradient: &[f32],
+        beta_kl: f64,
+    ) -> Result<f64, AnalyzerError> {
+        let dim = model.latent.dimension();
+        if model.parameters != self.snapshot {
+            return Err(AnalyzerError::OptimizerModelMismatch);
+        }
+        if !beta_kl.is_finite()
+            || beta_kl <= 0.0
+            || [prior_noise, posterior_noise]
+                .iter()
+                .any(|v| v.len() != dim || v.iter().any(|x| !x.is_finite()))
+            || [prior_latent_gradient, posterior_latent_gradient]
+                .iter()
+                .any(|v| v.len() != dim || v.iter().any(|x| !x.is_finite()))
+        {
+            return Err(AnalyzerError::InvalidNoise);
+        }
+        let prior =
+            model.decision_pass(encode_observation(observation, false)?, baseline, false)?;
+        let posterior =
+            model.decision_pass(encode_observation(observation, true)?, baseline, true)?;
+        let kl = posterior.posterior.kl_to(&prior.posterior)?;
+        let mut state_gradient = MatrixGradient::zeros(&model.parameters.state);
+        let mut posterior_gradient = MatrixGradient::zeros(&model.parameters.posterior);
+        for (pass, noise, latent_gradient, is_posterior) in [
+            (&prior, prior_noise, prior_latent_gradient, false),
+            (&posterior, posterior_noise, posterior_latent_gradient, true),
+        ] {
+            let mut raw_gradient = vec![0.0; 2 * dim];
+            for i in 0..dim {
+                let mu_p = prior.posterior.mean[i];
+                let std_p = prior.posterior.std[i];
+                let mu_q = posterior.posterior.mean[i];
+                let std_q = posterior.posterior.std[i];
+                let grad = 0.5 * f64::from(latent_gradient[i]);
+                let (mean_grad, std_grad) = if is_posterior {
+                    (
+                        grad + beta_kl * (mu_q - mu_p) / std_p.powi(2),
+                        grad * noise[i] + beta_kl * (std_q / std_p.powi(2) - 1.0 / std_q),
+                    )
+                } else {
+                    (
+                        grad + beta_kl * (mu_p - mu_q) / std_p.powi(2),
+                        grad * noise[i]
+                            + beta_kl
+                                * (1.0 / std_p
+                                    - (std_q.powi(2) + (mu_q - mu_p).powi(2)) / std_p.powi(3)),
+                    )
+                };
+                raw_gradient[i] = mean_grad;
+                raw_gradient[dim + i] = std_grad
+                    * pass.posterior.std[i]
+                    * LOG_STD_RANGE
+                    * (1.0 - pass.raw[dim + i].tanh().powi(2));
+            }
+            let input_gradient = dense_backward(
+                &model.parameters.posterior,
+                &pass.input,
+                &raw_gradient,
+                &mut posterior_gradient,
+            );
+            let hidden_gradient = input_gradient[..pass.state.len()]
+                .iter()
+                .zip(&pass.state)
+                .map(|(&g, &s)| g * (1.0 - s * s))
+                .collect::<Vec<_>>();
+            let _ = dense_backward(
+                &model.parameters.state,
+                &pass.features,
+                &hidden_gradient,
+                &mut state_gradient,
+            );
+        }
+        let mut new_state = self.state.clone();
+        let mut new_posterior = self.posterior.clone();
+        fn add(a: &mut MatrixGradient, b: &MatrixGradient) {
+            for (dest, grad) in a.weights.iter_mut().zip(&b.weights) {
+                *dest += grad;
+            }
+            for (dest, grad) in a.bias.iter_mut().zip(&b.bias) {
+                *dest += grad;
+            }
+        }
+        add(&mut new_state, &state_gradient);
+        add(&mut new_posterior, &posterior_gradient);
+        let count = self
+            .observations
+            .checked_add(1)
+            .ok_or(AnalyzerError::StepOverflow)?;
+        let kl_sum = self.kl_sum + kl;
+        if !kl_sum.is_finite()
+            || [&new_state, &new_posterior]
+                .iter()
+                .any(|g| g.weights.iter().chain(&g.bias).any(|x| !x.is_finite()))
+        {
+            return Err(AnalyzerError::NonFiniteGradient);
+        }
+        self.observations = count;
+        self.kl_sum = kl_sum;
+        self.state = new_state;
+        self.posterior = new_posterior;
+        Ok(kl)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -705,6 +963,52 @@ impl AnalyzerAdam {
         moments.steps = step;
         *self = moments;
         Ok(pass.posterior.kl_to_standard_normal())
+    }
+
+    /// Apply a per-decision gradient batch in one atomic optimizer update.
+    pub fn apply_decision_batch(
+        &mut self,
+        model: &mut NeuralBehaviourAnalyzer,
+        batch: AnalyzerGradientBatch,
+    ) -> Result<f64, AnalyzerError> {
+        if model.parameters != batch.snapshot
+            || !self.state.matches(&model.parameters.state)
+            || !self.posterior.matches(&model.parameters.posterior)
+        {
+            return Err(AnalyzerError::OptimizerModelMismatch);
+        }
+        if batch.observations == 0 {
+            return Err(AnalyzerError::InvalidSupport);
+        }
+        let mut state_grad = batch.state;
+        let mut posterior_grad = batch.posterior;
+        let denom = batch.observations as f64;
+        for gradients in [&mut state_grad, &mut posterior_grad] {
+            for value in gradients.weights.iter_mut().chain(&mut gradients.bias) {
+                *value /= denom;
+            }
+        }
+        let step = self
+            .steps
+            .checked_add(1)
+            .ok_or(AnalyzerError::StepOverflow)?;
+        let mut optimizer = self.clone();
+        let state = optimizer.state.update(
+            &model.parameters.state,
+            &state_grad,
+            self.learning_rate,
+            step,
+        )?;
+        let posterior = optimizer.posterior.update(
+            &model.parameters.posterior,
+            &posterior_grad,
+            self.learning_rate,
+            step,
+        )?;
+        model.parameters = AnalyzerParameters { state, posterior };
+        optimizer.steps = step;
+        *self = optimizer;
+        Ok(batch.kl_sum / denom)
     }
 
     pub(crate) fn checkpoint_value(&self) -> Value {

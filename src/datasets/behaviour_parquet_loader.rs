@@ -47,6 +47,11 @@ pub use sampling::{
 };
 
 mod baseline_adaptation;
+mod hierarchical_training;
+pub use hierarchical_training::{
+    HierarchicalEpochReport, HierarchicalPhase, HierarchicalTrainer, HierarchicalTrainingError,
+    HierarchicalValidationReport,
+};
 
 mod generator_training;
 pub use generator_training::{
