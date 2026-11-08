@@ -2,8 +2,8 @@
 //! explicit exclusive global hand-index cutoff. Future observations cannot be
 //! read by this path, including for another subject in the same table hand.
 
-use super::generator_training::{decode_decision, lookup, subject_decisions};
-use super::{BehaviourParquetDataset, ExactLegalityProvider, GeneratorTrainingError};
+use super::training_data::{decode_decision, lookup, subject_decisions};
+use super::{BehaviourParquetDataset, ExactLegalityProvider, TrainingDataError};
 use crate::behavioural::{NeuralBehaviourGenerator, PlayerBaselineAdapter, PlayerBaselineState};
 
 impl BehaviourParquetDataset {
@@ -21,11 +21,41 @@ impl BehaviourParquetDataset {
         generator: &NeuralBehaviourGenerator,
         adapter: &PlayerBaselineAdapter,
         provider: &mut P,
-    ) -> Result<PlayerBaselineState, GeneratorTrainingError> {
+    ) -> Result<PlayerBaselineState, TrainingDataError> {
+        let mut state = adapter.initialize_player();
+        self.advance_baseline_before(
+            subject_id,
+            before_hand_index,
+            generator,
+            adapter,
+            &mut state,
+            provider,
+        )?;
+        Ok(state)
+    }
+
+    /// Advance an existing persisted Z1 without rereading already covered hands.
+    /// Fully atomic: an error in any new hand leaves the caller's state unchanged.
+    pub fn advance_baseline_before<P: ExactLegalityProvider>(
+        &self,
+        subject_id: u64,
+        before_hand_index: u64,
+        generator: &NeuralBehaviourGenerator,
+        adapter: &PlayerBaselineAdapter,
+        state: &mut PlayerBaselineState,
+        provider: &mut P,
+    ) -> Result<(), TrainingDataError> {
+        adapter
+            .validate_player_state(state)
+            .map_err(TrainingDataError::Baseline)?;
         let memberships = self
             .subjects
             .get(&subject_id)
-            .ok_or(GeneratorTrainingError::UnknownSubject { subject_id })?;
+            .ok_or(TrainingDataError::UnknownSubject { subject_id })?;
+        let start = state.processed_before_hand_index().unwrap_or(0);
+        if before_hand_index < start {
+            return Err(TrainingDataError::NonIncreasingCutoff);
+        }
         let mut earlier = memberships
             .iter()
             .map(|membership| {
@@ -34,23 +64,29 @@ impl BehaviourParquetDataset {
                     membership.subject_position,
                 )
             })
-            .filter(|(hand, _)| hand.hand_index < before_hand_index)
+            .filter(|(hand, _)| hand.hand_index >= start && hand.hand_index < before_hand_index)
             .collect::<Vec<_>>();
         earlier.sort_unstable_by_key(|(hand, _)| hand.hand_index);
-        let mut state = adapter.initialize_player();
+        let mut working = state.clone();
         for (hand, position) in earlier {
             let observed = hand.materialize(position);
             let mut decisions = Vec::new();
             for row in subject_decisions(&observed) {
-                let observation = decode_decision(&observed, row)?;
-                let legal = lookup(provider, subject_id, &observed, row)?;
-                decisions.push((observation, legal));
+                decisions.push((
+                    decode_decision(&observed, row)?,
+                    lookup(provider, subject_id, &observed, row)?,
+                ));
             }
-            if decisions.is_empty() {
-                continue;
+            if !decisions.is_empty() {
+                adapter
+                    .adapt_hand(&mut working, generator, hand.hand_index, &decisions)
+                    .map_err(TrainingDataError::Baseline)?;
             }
-            adapter.adapt_hand(&mut state, generator, hand.hand_index, &decisions)?;
         }
-        Ok(state)
+        working
+            .mark_processed_before(before_hand_index)
+            .map_err(TrainingDataError::Baseline)?;
+        *state = working;
+        Ok(())
     }
 }

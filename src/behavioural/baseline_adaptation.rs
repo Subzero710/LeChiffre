@@ -6,7 +6,12 @@
 //!
 //! The uncertainty update is a **diagonal empirical-Fisher approximation**,
 //! not an exact Bayesian posterior or a calibrated confidence certificate.
+use super::checkpoint::{exact_keys, float_array, unsigned};
+use serde_json::{Value, json};
 use std::fmt;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use super::{
     BehaviourBlueprint, BehaviourLatentModel, BehaviourProfileError, GeneratorError,
@@ -40,6 +45,12 @@ impl BaselineAdaptationConfig {
             max_step_prior_std,
         })
     }
+    pub fn learning_rate(&self) -> f64 {
+        self.learning_rate
+    }
+    pub fn max_step_prior_std(&self) -> f64 {
+        self.max_step_prior_std
+    }
 }
 
 /// Z1 and its streaming optimization statistics for exactly one subject.
@@ -51,6 +62,7 @@ pub struct PlayerBaselineState {
     precision: Vec<f64>,
     last_hand_index: Option<u64>,
     observed_decisions: u64,
+    processed_before_hand_index: Option<u64>,
 }
 
 impl PlayerBaselineState {
@@ -64,6 +76,216 @@ impl PlayerBaselineState {
 
     pub fn observed_decisions(&self) -> u64 {
         self.observed_decisions
+    }
+
+    /// All hands with global index strictly below this value have been processed.
+    pub fn processed_before_hand_index(&self) -> Option<u64> {
+        self.processed_before_hand_index
+    }
+
+    /// Used only after a complete, successful incremental dataset scan.
+    pub(crate) fn mark_processed_before(
+        &mut self,
+        cutoff: u64,
+    ) -> Result<(), BaselineAdaptationError> {
+        if self
+            .processed_before_hand_index
+            .is_some_and(|old| cutoff < old)
+            || self.last_hand_index.is_some_and(|last| cutoff <= last)
+        {
+            return Err(BaselineAdaptationError::NonIncreasingProcessedCutoff);
+        }
+        self.processed_before_hand_index = Some(cutoff);
+        Ok(())
+    }
+
+    /// Persist a complete Z1 optimizer state. The saved model id binds its latent geometry
+    /// to precisely one Z0/A/G snapshot, without writing any player id into model features.
+    pub fn save_checkpoint(
+        &self,
+        path: impl AsRef<Path>,
+        subject_id: u64,
+        model_id: &str,
+    ) -> Result<(), BaselineStateStorageError> {
+        if model_id.is_empty() {
+            return Err(BaselineStateStorageError::InvalidState(
+                "empty model id".into(),
+            ));
+        }
+        self.validate_state()?;
+        let value = json!({
+            "format":"lechiffre.player_baseline.v1",
+            "model_id":model_id,
+            "subject_id":subject_id,
+            "profile":self.baseline.profile().as_slice(),
+            "uncertainty_std":self.baseline.uncertainty_std(),
+            "precision":self.precision,
+            "observed_hands":self.baseline.observed_hands(),
+            "observed_decisions":self.observed_decisions,
+            "last_hand_index":self.last_hand_index,
+            "processed_before_hand_index":self.processed_before_hand_index,
+        });
+        let destination = path.as_ref();
+        if destination.exists() {
+            return Err(BaselineStateStorageError::AlreadyExists(
+                destination.to_path_buf(),
+            ));
+        }
+        let mut name = destination.as_os_str().to_os_string();
+        name.push(".inprogress");
+        let temporary = PathBuf::from(name);
+        let result = (|| -> Result<(), BaselineStateStorageError> {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)?;
+            serde_json::to_writer_pretty(&mut file, &value)?;
+            file.write_all(b"\n")?;
+            file.sync_all()?;
+            fs::hard_link(&temporary, destination)?;
+            fs::remove_file(&temporary)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
+
+    pub fn load_checkpoint(
+        path: impl AsRef<Path>,
+        subject_id: u64,
+        model_id: &str,
+        adapter: &PlayerBaselineAdapter,
+    ) -> Result<Self, BaselineStateStorageError> {
+        let v: Value = serde_json::from_reader(File::open(path)?)?;
+        exact_keys(
+            &v,
+            &[
+                "format",
+                "model_id",
+                "subject_id",
+                "profile",
+                "uncertainty_std",
+                "precision",
+                "observed_hands",
+                "observed_decisions",
+                "last_hand_index",
+                "processed_before_hand_index",
+            ],
+        )
+        .map_err(BaselineStateStorageError::InvalidState)?;
+        if v["format"].as_str() != Some("lechiffre.player_baseline.v1") {
+            return Err(BaselineStateStorageError::InvalidState(
+                "unknown baseline format".into(),
+            ));
+        }
+        if v["subject_id"].as_u64() != Some(subject_id) || v["model_id"].as_str() != Some(model_id)
+        {
+            return Err(BaselineStateStorageError::ModelOrSubjectMismatch);
+        }
+        let floats = |field: &Value| -> Result<Vec<f32>, BaselineStateStorageError> {
+            float_array(field)
+                .map_err(BaselineStateStorageError::InvalidState)?
+                .into_iter()
+                .map(|v| {
+                    let x = v as f32;
+                    if !x.is_finite() {
+                        Err(BaselineStateStorageError::InvalidState(
+                            "float outside f32 range".into(),
+                        ))
+                    } else {
+                        Ok(x)
+                    }
+                })
+                .collect()
+        };
+        let value = floats(&v["profile"])?;
+        let std = floats(&v["uncertainty_std"])?;
+        let precision =
+            float_array(&v["precision"]).map_err(BaselineStateStorageError::InvalidState)?;
+        let hands =
+            unsigned(&v["observed_hands"]).map_err(BaselineStateStorageError::InvalidState)?;
+        let decisions =
+            unsigned(&v["observed_decisions"]).map_err(BaselineStateStorageError::InvalidState)?;
+        let last = if v["last_hand_index"].is_null() {
+            None
+        } else {
+            Some(unsigned(&v["last_hand_index"]).map_err(BaselineStateStorageError::InvalidState)?)
+        };
+        let processed = if v["processed_before_hand_index"].is_null() {
+            None
+        } else {
+            Some(
+                unsigned(&v["processed_before_hand_index"])
+                    .map_err(BaselineStateStorageError::InvalidState)?,
+            )
+        };
+        let mut state = adapter.initialize_player();
+        if hands > 0 {
+            let estimate = adapter.blueprint.centre().dimension();
+            let profile = super::BehaviourLatentConfig::new(estimate)
+                .map_err(|e| BaselineStateStorageError::InvalidState(e.to_string()))?
+                .profile(value)
+                .map_err(|e| BaselineStateStorageError::InvalidState(e.to_string()))?;
+            state
+                .baseline
+                .set_estimate(profile, std, hands)
+                .map_err(|e| BaselineStateStorageError::InvalidState(e.to_string()))?;
+        } else if value.as_slice() != adapter.blueprint.centre().as_slice()
+            || std.as_slice() != adapter.blueprint.prior_std()
+        {
+            return Err(BaselineStateStorageError::InvalidState(
+                "zero-hand Z1 must equal Z0".into(),
+            ));
+        }
+        state.precision = precision;
+        state.observed_decisions = decisions;
+        state.last_hand_index = last;
+        state.processed_before_hand_index = processed;
+        state.validate_state()?;
+        Ok(state)
+    }
+
+    fn validate_state(&self) -> Result<(), BaselineStateStorageError> {
+        let dim = self.blueprint.centre().dimension();
+        let hands = self.baseline.observed_hands();
+        if self.baseline.profile().dimension() != dim
+            || self.baseline.uncertainty_std().len() != dim
+            || self.precision.len() != dim
+            || self.observed_decisions < hands
+            || (hands > 0 && self.last_hand_index.is_none())
+            || (hands == 0 && (self.observed_decisions != 0 || self.last_hand_index.is_some()))
+            || self
+                .last_hand_index
+                .zip(self.processed_before_hand_index)
+                .is_some_and(|(last, cutoff)| last >= cutoff)
+            || self
+                .precision
+                .iter()
+                .zip(self.baseline.uncertainty_std())
+                .any(|(&prec, &std)| {
+                    !prec.is_finite()
+                        || prec <= 0.0
+                        || !std.is_finite()
+                        || std <= 0.0
+                        || (1.0 / prec.sqrt() - f64::from(std)).abs()
+                            > 1e-6 * f64::from(std).max(1.0)
+                })
+        {
+            return Err(BaselineStateStorageError::InvalidState(
+                "inconsistent baseline state".into(),
+            ));
+        }
+        if hands == 0
+            && (self.baseline.profile() != self.blueprint.centre()
+                || self.baseline.uncertainty_std() != self.blueprint.prior_std())
+        {
+            return Err(BaselineStateStorageError::InvalidState(
+                "zero-hand Z1 must equal Z0".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -119,11 +341,24 @@ impl PlayerBaselineAdapter {
             precision: self.initial_precision.clone(),
             last_hand_index: None,
             observed_decisions: 0,
+            processed_before_hand_index: None,
         }
     }
 
     pub fn blueprint(&self) -> &BehaviourBlueprint {
         &self.blueprint
+    }
+
+    pub fn validate_player_state(
+        &self,
+        state: &PlayerBaselineState,
+    ) -> Result<(), BaselineAdaptationError> {
+        if state.blueprint != self.blueprint
+            || state.precision.len() != self.initial_precision.len()
+        {
+            return Err(BaselineAdaptationError::BlueprintMismatch);
+        }
+        Ok(())
     }
 
     /// Update Z1 **after** a complete past hand. `hand_index` must come from
@@ -145,6 +380,12 @@ impl PlayerBaselineAdapter {
         }
         if generator.latent_config().dimension() != self.blueprint.centre().dimension() {
             return Err(BaselineAdaptationError::LatentDimensionMismatch);
+        }
+        if state
+            .processed_before_hand_index
+            .is_some_and(|cutoff| hand_index < cutoff)
+        {
+            return Err(BaselineAdaptationError::NonIncreasingProcessedCutoff);
         }
         if let Some(previous) = state.last_hand_index
             && hand_index <= previous
@@ -263,6 +504,7 @@ pub enum BaselineAdaptationError {
     NonIncreasingHandIndex { previous: u64, observed: u64 },
     NoSubjectDecisions,
     CountOverflow,
+    NonIncreasingProcessedCutoff,
     NonFiniteUpdate,
     Profile(BehaviourProfileError),
     Generator(GeneratorError),
@@ -283,6 +525,39 @@ impl From<GeneratorError> for BaselineAdaptationError {
 impl From<BehaviourProfileError> for BaselineAdaptationError {
     fn from(value: BehaviourProfileError) -> Self {
         Self::Profile(value)
+    }
+}
+
+#[derive(Debug)]
+pub enum BaselineStateStorageError {
+    Io(io::Error),
+    Json(serde_json::Error),
+    AlreadyExists(PathBuf),
+    ModelOrSubjectMismatch,
+    InvalidState(String),
+}
+impl fmt::Display for BaselineStateStorageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "baseline I/O: {e}"),
+            Self::Json(e) => write!(f, "baseline JSON: {e}"),
+            Self::AlreadyExists(path) => write!(f, "baseline already exists: {}", path.display()),
+            Self::ModelOrSubjectMismatch => {
+                write!(f, "baseline belongs to another model or subject")
+            }
+            Self::InvalidState(s) => write!(f, "invalid baseline: {s}"),
+        }
+    }
+}
+impl std::error::Error for BaselineStateStorageError {}
+impl From<io::Error> for BaselineStateStorageError {
+    fn from(e: io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+impl From<serde_json::Error> for BaselineStateStorageError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::Json(e)
     }
 }
 
@@ -415,6 +690,7 @@ mod tests {
         adapter
             .adapt_hand(&mut state, &generator, 20, &[decision()])
             .unwrap();
+        assert_eq!(state.processed_before_hand_index(), None);
         let saved = state.clone();
         let error = adapter
             .adapt_hand(&mut state, &generator, 20, &[decision()])
@@ -499,5 +775,37 @@ mod tests {
             other.adapt_hand(&mut state, &generator, 1, &[decision()]),
             Err(BaselineAdaptationError::BlueprintMismatch)
         ));
+    }
+
+    #[test]
+    fn baseline_checkpoint_roundtrips_and_rejects_other_model_or_subject() {
+        let (adapter, generator) = fixtures();
+        let mut state = adapter.initialize_player();
+        adapter
+            .adapt_hand(&mut state, &generator, 4, &[decision()])
+            .unwrap();
+        let model_id = "hierarchical-v1-example";
+        let path = std::env::temp_dir().join(format!(
+            "lechiffre-baseline-{}-{}.json",
+            std::process::id(),
+            model_id
+        ));
+        let _ = std::fs::remove_file(&path);
+        state.save_checkpoint(&path, 42, model_id).unwrap();
+        let loaded = PlayerBaselineState::load_checkpoint(&path, 42, model_id, &adapter).unwrap();
+        assert_eq!(state, loaded);
+        assert!(matches!(
+            state.save_checkpoint(&path, 42, model_id),
+            Err(BaselineStateStorageError::AlreadyExists(_))
+        ));
+        assert!(matches!(
+            PlayerBaselineState::load_checkpoint(&path, 43, model_id, &adapter),
+            Err(BaselineStateStorageError::ModelOrSubjectMismatch)
+        ));
+        assert!(matches!(
+            PlayerBaselineState::load_checkpoint(&path, 42, "different", &adapter),
+            Err(BaselineStateStorageError::ModelOrSubjectMismatch)
+        ));
+        std::fs::remove_file(&path).unwrap();
     }
 }

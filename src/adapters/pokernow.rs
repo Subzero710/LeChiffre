@@ -1532,8 +1532,8 @@ mod tests {
         // One genuinely source-observed timed hand exercises the complete A/G
         // inference contract without fabricating additional training hands.
         use crate::behavioural::{
-            BehaviourFeaturizer, BehaviourLatentConfig, NeuralBehaviourAnalyzer,
-            NeuralBehaviourGenerator,
+            BehaviourBlueprint, BehaviourFeaturizer, BehaviourLatentConfig,
+            NeuralBehaviourAnalyzer, NeuralBehaviourGenerator, PlayerBaseline,
         };
         let subject_id = PlayerId::from_source("test", "Arash");
         let subject_hand = imported.hands[0].subject_hand(&subject_id).unwrap();
@@ -1542,14 +1542,24 @@ mod tests {
             .unwrap()
             .unwrap();
         let latent = BehaviourLatentConfig::new(3).unwrap();
+        assert!(features.sequence_len() > 0);
         let analyzer = NeuralBehaviourAnalyzer::initialize(latent, 8, 91).unwrap();
-        let posterior = analyzer.infer(&[features]).unwrap();
-        let z = posterior.mean_profile().unwrap();
+        let blueprint = BehaviourBlueprint::new(
+            latent.profile(vec![0.0; latent.dimension()]).unwrap(),
+            vec![1.0; latent.dimension()],
+        )
+        .unwrap();
+        let baseline = PlayerBaseline::from_blueprint(&blueprint);
         let generator = NeuralBehaviourGenerator::initialize(latent, 8, 92).unwrap();
         let observed = events
             .iter()
             .find(|event| event.actor_position() == subject_hand.subject_position())
             .unwrap();
+        // Z2 posterior is retrospective: the target action has already been observed.
+        let momentary = analyzer
+            .infer_action(&observed.context, &observed.action, &baseline)
+            .unwrap();
+        let z = momentary.posterior().mean_profile().unwrap();
         let legal = imported
             .exact_legal_actions
             .get(&(observed.hand_id.clone(), observed.sequence_index))

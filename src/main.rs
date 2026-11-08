@@ -173,107 +173,212 @@ fn print_behaviour_dataset_stats(args: &[String]) {
     print_dataset_statistics(&stats);
 }
 
+/// Strict hierarchical run specification. No compatibility with the old A/G config.
 struct BehaviourRunConfig {
-    split: lechiffre::datasets::behaviour_parquet_loader::GeneratorHandSplit,
-    training: lechiffre::datasets::behaviour_parquet_loader::GeneratorTrainingConfig,
+    split: lechiffre::datasets::behaviour_parquet_loader::HierarchicalHandSplit,
     latent_dimension: usize,
     generator_hidden: usize,
     analyzer_hidden: usize,
     generator_lr: f64,
     analyzer_lr: f64,
-    epochs: usize,
-    subjects: Vec<u64>,
+    blueprint_lr: f64,
+    baseline_lr: f64,
+    baseline_max_step_prior_std: f64,
+    beta_kl: f64,
     seed: u64,
+    z0_initial: Vec<f32>,
+    z0_prior_std: Vec<f32>,
+    blueprint_epochs: usize,
+    personalization_history_hands: Vec<usize>,
+    momentary_history_hands: usize,
+    momentary_epochs: usize,
+    subjects: Vec<u64>,
 }
 
-/// Strict, explicit run configuration. No omitted hyperparameter receives a default.
-fn run_configuration(path: &str) -> Result<BehaviourRunConfig, String> {
-    use lechiffre::datasets::behaviour_parquet_loader::{
-        GeneratorHandSplit, GeneratorTrainingConfig,
-    };
-    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+fn configuration_object(path: &str) -> Result<serde_json::Value, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("config {path}: {e}"))?;
+    serde_json::from_str(&text).map_err(|e| format!("config {path}: {e}"))
+}
+
+fn require_exact_keys(value: &serde_json::Value, keys: &[&str]) -> Result<(), String> {
     let object = value
         .as_object()
         .ok_or("configuration must be a JSON object")?;
+    if object.len() != keys.len() || keys.iter().any(|key| !object.contains_key(*key)) {
+        return Err(format!("configuration keys must be exactly: {keys:?}"));
+    }
+    Ok(())
+}
+fn config_u64(v: &serde_json::Value, key: &str) -> Result<u64, String> {
+    v[key]
+        .as_u64()
+        .ok_or_else(|| format!("{key}: expected unsigned integer"))
+}
+fn config_usize(v: &serde_json::Value, key: &str) -> Result<usize, String> {
+    usize::try_from(config_u64(v, key)?).map_err(|_| format!("{key}: integer overflow"))
+}
+fn config_float(v: &serde_json::Value, key: &str) -> Result<f64, String> {
+    v[key]
+        .as_f64()
+        .filter(|x| x.is_finite())
+        .ok_or_else(|| format!("{key}: expected finite number"))
+}
+fn config_unsigned_list(v: &serde_json::Value, key: &str) -> Result<Vec<u64>, String> {
+    v[key]
+        .as_array()
+        .ok_or_else(|| format!("{key}: expected array"))?
+        .iter()
+        .map(|x| {
+            x.as_u64()
+                .ok_or_else(|| format!("{key}: expected unsigned ids"))
+        })
+        .collect()
+}
+fn config_sizes(v: &serde_json::Value, key: &str) -> Result<Vec<usize>, String> {
+    config_unsigned_list(v, key)?
+        .into_iter()
+        .map(|x| usize::try_from(x).map_err(|_| format!("{key}: index overflow")))
+        .collect()
+}
+fn config_f32_vec(v: &serde_json::Value, key: &str) -> Result<Vec<f32>, String> {
+    v[key]
+        .as_array()
+        .ok_or_else(|| format!("{key}: expected array"))?
+        .iter()
+        .map(|x| {
+            let f = x
+                .as_f64()
+                .filter(|f| f.is_finite())
+                .ok_or_else(|| format!("{key}: expected finite numbers"))?;
+            let f = f as f32;
+            if !f.is_finite() {
+                Err(format!("{key}: float32 range exceeded"))
+            } else {
+                Ok(f)
+            }
+        })
+        .collect()
+}
+fn run_configuration(path: &str) -> Result<BehaviourRunConfig, String> {
+    use lechiffre::datasets::behaviour_parquet_loader::HierarchicalHandSplit;
+    let v = configuration_object(path)?;
     let keys = [
         "latent_dimension",
         "generator_hidden",
         "analyzer_hidden",
         "generator_lr",
         "analyzer_lr",
+        "blueprint_lr",
+        "baseline_lr",
+        "baseline_max_step_prior_std",
         "beta_kl",
         "seed",
-        "validation_draws",
-        "continuity_delta",
+        "z0_initial",
+        "z0_prior_std",
         "first_query_hand_index",
         "first_evaluation_hand_index",
         "support_hands",
         "query_hands",
         "evaluation_hands",
-        "epochs",
+        "blueprint_epochs",
+        "personalization_history_hands",
+        "momentary_history_hands",
+        "momentary_epochs",
         "subject_ids",
     ];
-    if object.len() != keys.len() || keys.iter().any(|k| !object.contains_key(*k)) {
-        return Err(format!("configuration keys must be exactly: {keys:?}"));
-    }
-    let int = |key: &str| -> Result<u64, String> {
-        value[key]
-            .as_u64()
-            .ok_or_else(|| format!("{key}: expected unsigned integer"))
-    };
-    let size = |key: &str| -> Result<usize, String> {
-        usize::try_from(int(key)?).map_err(|_| format!("{key}: integer overflow"))
-    };
-    let float = |key: &str| -> Result<f64, String> {
-        value[key]
-            .as_f64()
-            .filter(|x| x.is_finite())
-            .ok_or_else(|| format!("{key}: expected finite number"))
-    };
-    let subjects = value["subject_ids"]
-        .as_array()
-        .ok_or("subject_ids: expected array")?
+    require_exact_keys(&v, &keys)?;
+    let split = HierarchicalHandSplit::new(
+        config_u64(&v, "first_query_hand_index")?,
+        config_u64(&v, "first_evaluation_hand_index")?,
+        config_usize(&v, "support_hands")?,
+        config_usize(&v, "query_hands")?,
+        config_usize(&v, "evaluation_hands")?,
+    )
+    .map_err(|e| e.to_string())?;
+    let history = config_sizes(&v, "personalization_history_hands")?;
+    let momentary_history = config_usize(&v, "momentary_history_hands")?;
+    let dim = config_usize(&v, "latent_dimension")?;
+    let initial = config_f32_vec(&v, "z0_initial")?;
+    let std = config_f32_vec(&v, "z0_prior_std")?;
+    let subjects = config_unsigned_list(&v, "subject_ids")?;
+    if config_usize(&v, "blueprint_epochs")? == 0
+        || history.is_empty()
+        || config_usize(&v, "momentary_epochs")? == 0
+        || dim == 0
+        || initial.len() != dim
+        || std.len() != dim
+        || subjects.is_empty()
+        || history.iter().any(|&n| n > split.support_hands)
+        || momentary_history > split.support_hands
+        || std.iter().any(|s| *s <= 0.0)
+        || [
+            "generator_lr",
+            "analyzer_lr",
+            "blueprint_lr",
+            "baseline_lr",
+            "baseline_max_step_prior_std",
+            "beta_kl",
+        ]
         .iter()
-        .map(|x| {
-            x.as_u64()
-                .ok_or_else(|| "subject_ids: each ID must be unsigned integer".to_string())
+        .any(|field| match config_float(&v, field) {
+            Ok(x) => x <= 0.0,
+            Err(_) => true,
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    if subjects.is_empty()
-        || size("epochs")? == 0
-        || float("generator_lr")? <= 0.0
-        || float("analyzer_lr")? <= 0.0
     {
-        return Err("epochs, selected subjects and optimizer rates must be positive".into());
+        return Err("invalid hierarchical configuration: all phases, model dimensions, and rates are strictly required".into());
     }
-    let split = GeneratorHandSplit::new(
-        int("first_query_hand_index")?,
-        int("first_evaluation_hand_index")?,
-        size("support_hands")?,
-        size("query_hands")?,
-        size("evaluation_hands")?,
-    )
-    .map_err(|e| e.to_string())?;
-    let train = GeneratorTrainingConfig::new(
-        float("beta_kl")?,
-        int("seed")?,
-        size("validation_draws")?,
-        float("continuity_delta")?,
-    )
-    .map_err(|e| e.to_string())?;
     Ok(BehaviourRunConfig {
         split,
-        training: train,
-        latent_dimension: size("latent_dimension")?,
-        generator_hidden: size("generator_hidden")?,
-        analyzer_hidden: size("analyzer_hidden")?,
-        generator_lr: float("generator_lr")?,
-        analyzer_lr: float("analyzer_lr")?,
-        epochs: size("epochs")?,
+        latent_dimension: dim,
+        generator_hidden: config_usize(&v, "generator_hidden")?,
+        analyzer_hidden: config_usize(&v, "analyzer_hidden")?,
+        generator_lr: config_float(&v, "generator_lr")?,
+        analyzer_lr: config_float(&v, "analyzer_lr")?,
+        blueprint_lr: config_float(&v, "blueprint_lr")?,
+        baseline_lr: config_float(&v, "baseline_lr")?,
+        baseline_max_step_prior_std: config_float(&v, "baseline_max_step_prior_std")?,
+        beta_kl: config_float(&v, "beta_kl")?,
+        seed: config_u64(&v, "seed")?,
+        z0_initial: initial,
+        z0_prior_std: std,
+        blueprint_epochs: config_usize(&v, "blueprint_epochs")?,
+        personalization_history_hands: history,
+        momentary_history_hands: momentary_history,
+        momentary_epochs: config_usize(&v, "momentary_epochs")?,
         subjects,
-        seed: int("seed")?,
     })
+}
+
+struct ResumeConfig {
+    blueprint_extra_epochs: usize,
+    personalization_history_hands: Vec<usize>,
+    momentary_history_hands: usize,
+    momentary_extra_epochs: usize,
+}
+fn resume_configuration(path: &str) -> Result<ResumeConfig, String> {
+    let v = configuration_object(path)?;
+    require_exact_keys(
+        &v,
+        &[
+            "blueprint_extra_epochs",
+            "personalization_history_hands",
+            "momentary_history_hands",
+            "momentary_extra_epochs",
+        ],
+    )?;
+    let result = ResumeConfig {
+        blueprint_extra_epochs: config_usize(&v, "blueprint_extra_epochs")?,
+        personalization_history_hands: config_sizes(&v, "personalization_history_hands")?,
+        momentary_history_hands: config_usize(&v, "momentary_history_hands")?,
+        momentary_extra_epochs: config_usize(&v, "momentary_extra_epochs")?,
+    };
+    if result.blueprint_extra_epochs == 0
+        && result.personalization_history_hands.is_empty()
+        && result.momentary_extra_epochs == 0
+    {
+        return Err("resume configuration requests no additional training".into());
+    }
+    Ok(result)
 }
 
 fn exact_source_legality(
@@ -321,189 +426,304 @@ fn exact_source_legality(
     Ok(all)
 }
 
-fn print_ag_report(
-    report: &lechiffre::datasets::behaviour_parquet_loader::GeneratorEpochReport,
-) -> Result<(), String> {
+fn print_hierarchical_epoch(
+    r: &lechiffre::datasets::behaviour_parquet_loader::HierarchicalEpochReport,
+) {
     println!(
-        "epoch={} subjects={} trained_decisions={} validation_decisions={}",
-        report.epoch, report.subjects, report.train.decisions, report.held_out.decisions
+        "phase={:?} decisions={} mean_nll={:.8} conditional_KL={:?}",
+        r.phase, r.decisions, r.mean_nll, r.mean_conditional_kl
     );
-    if report.train.decisions > 0 {
-        println!(
-            "query_train_nll_per_decision={:.8} action_nll={:.8} sizing_nll={:.8} timing_nll={:.8}",
-            report.train.mean_nll().map_err(|e| e.to_string())?,
-            report.train.action_nll / report.train.decisions as f64,
-            report.train.sizing_nll / report.train.decisions as f64,
-            report.train.timing_nll / report.train.decisions as f64
-        );
+}
+fn print_hierarchical_validation(
+    r: &lechiffre::datasets::behaviour_parquet_loader::HierarchicalValidationReport,
+) {
+    println!(
+        "validation_decisions={} z0_predictive_nll={:.8} z1_predictive_nll={:.8} z2_prior_predictive_nll={:.8} z2_posterior_RECONSTRUCTION_nll={:.8} mean_KL={:.8}",
+        r.decisions,
+        r.z0_predictive_nll,
+        r.z1_predictive_nll,
+        r.z2_prior_predictive_nll,
+        r.z2_posterior_reconstruction_nll,
+        r.mean_conditional_kl
+    );
+}
+
+type ExactReplayMap = std::collections::HashMap<
+    (lechiffre::behavioural::HandId, u32),
+    lechiffre::behavioural::LegalActionSpace,
+>;
+
+fn replay_provider<'a>(
+    exact: &'a ExactReplayMap,
+) -> impl FnMut(
+    u64,
+    &lechiffre::behavioural::HandId,
+    u32,
+) -> Result<lechiffre::behavioural::LegalActionSpace, String>
++ 'a {
+    move |_, hand, seq| {
+        exact
+            .get(&(hand.clone(), seq))
+            .copied()
+            .ok_or_else(|| format!("exact replay decision not found: {hand}:{seq}"))
     }
-    println!(
-        "future_validation_nll_per_decision={:.8} neutral_z_nll_per_decision={:.8} marginal_mc_nll_per_decision={:.8}",
-        report.held_out.mean_nll().map_err(|e| e.to_string())?,
-        report.prior.mean_nll().map_err(|e| e.to_string())?,
-        report.marginal_validation_nll / report.held_out.decisions as f64
-    );
-    println!(
-        "mean_KL={:.8} posterior_std_mean={:.8} posterior_action_variance={:.10} action_ECE={:.8} continuity_JS={:.10} diversity_JS={:?}",
-        report.mean_kl,
-        report.posterior_std_mean,
-        report.posterior_action_variance,
-        report.action_ece,
-        report.continuity_js,
-        report.policy_diversity_js
-    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_phases(
+    trainer: &mut lechiffre::datasets::behaviour_parquet_loader::HierarchicalTrainer,
+    dataset: &lechiffre::datasets::behaviour_parquet_loader::BehaviourParquetDataset,
+    split: lechiffre::datasets::behaviour_parquet_loader::HierarchicalHandSplit,
+    subjects: &[u64],
+    blueprint_epochs: usize,
+    personalization_histories: &[usize],
+    momentary_history: usize,
+    momentary_epochs: usize,
+    exact: &ExactReplayMap,
+) -> Result<(), String> {
+    for _ in 0..blueprint_epochs {
+        let report = trainer
+            .train_blueprint_epoch(dataset, subjects, split, &mut replay_provider(exact))
+            .map_err(|e| e.to_string())?;
+        print_hierarchical_epoch(&report);
+    }
+    for &history in personalization_histories {
+        let report = trainer
+            .train_personalization_epoch(
+                dataset,
+                subjects,
+                split,
+                history,
+                &mut replay_provider(exact),
+            )
+            .map_err(|e| e.to_string())?;
+        print_hierarchical_epoch(&report);
+    }
+    for _ in 0..momentary_epochs {
+        let report = trainer
+            .train_momentary_epoch(
+                dataset,
+                subjects,
+                split,
+                momentary_history,
+                &mut replay_provider(exact),
+            )
+            .map_err(|e| e.to_string())?;
+        print_hierarchical_epoch(&report);
+    }
     Ok(())
 }
 
-fn train_ag(args: &[String]) -> Result<(), String> {
+fn train_hierarchical(args: &[String]) -> Result<(), String> {
     use lechiffre::behavioural::{
-        Adam, AnalyzerAdam, BehaviourLatentConfig, NeuralBehaviourAnalyzer,
-        NeuralBehaviourGenerator,
+        Adam, AnalyzerAdam, BaselineAdaptationConfig, BehaviourBlueprint, BehaviourLatentConfig,
+        NeuralBehaviourAnalyzer, NeuralBehaviourGenerator,
     };
     use lechiffre::datasets::behaviour_parquet_loader::{
-        BehaviourParquetDataset, GeneratorTrainer,
+        BehaviourParquetDataset, HierarchicalTrainer,
     };
     if args.len() < 7 || !(args.len() - 5).is_multiple_of(2) {
-        return Err("usage: --train-behavioural <config.json> <parquet-dir> <checkpoint-out.json> <source.csv|.json> <session-id> ...".into());
+        return Err("usage: --train-behavioural <hierarchical-config.json> <parquet-dir> <checkpoint-out.json> <source.csv|.json> <session-id> ...".into());
     }
     let run = run_configuration(&args[2])?;
     let dataset = BehaviourParquetDataset::open(&args[3]).map_err(|e| e.to_string())?;
     let exact = exact_source_legality(&args[5..])?;
     let latent = BehaviourLatentConfig::new(run.latent_dimension).map_err(|e| e.to_string())?;
-    let generator = NeuralBehaviourGenerator::initialize(latent, run.generator_hidden, run.seed)
-        .map_err(|e| e.to_string())?;
-    let analyzer_seed = run.seed.checked_add(1).ok_or("seed overflow")?;
-    let analyzer = NeuralBehaviourAnalyzer::initialize(latent, run.analyzer_hidden, analyzer_seed)
-        .map_err(|e| e.to_string())?;
-    let generator_adam = Adam::new(&generator, run.generator_lr).map_err(|e| e.to_string())?;
-    let analyzer_adam = AnalyzerAdam::new(&analyzer, run.analyzer_lr).map_err(|e| e.to_string())?;
-    let mut trainer = GeneratorTrainer::new(
-        generator,
-        analyzer,
-        generator_adam,
-        analyzer_adam,
-        run.training,
+    let blueprint = BehaviourBlueprint::new(
+        latent.profile(run.z0_initial).map_err(|e| e.to_string())?,
+        run.z0_prior_std,
     )
     .map_err(|e| e.to_string())?;
-    for _ in 0..run.epochs {
-        let report = trainer
-            .train_epoch(
-                &dataset,
-                &run.subjects,
-                run.split,
-                &mut |_, hand: &lechiffre::behavioural::HandId, seq| {
-                    exact
-                        .get(&(hand.clone(), seq))
-                        .copied()
-                        .ok_or_else(|| format!("source decision not found: {hand}:{seq}"))
-                },
-            )
-            .map_err(|e| e.to_string())?;
-        print_ag_report(&report)?;
-    }
-    trainer
-        .save_checkpoint(&args[4])
+    let g = NeuralBehaviourGenerator::initialize(latent, run.generator_hidden, run.seed)
         .map_err(|e| e.to_string())?;
-    println!("checkpoint={}", args[4]);
-    Ok(())
-}
-
-fn resume_ag(args: &[String]) -> Result<(), String> {
-    use lechiffre::datasets::behaviour_parquet_loader::{
-        BehaviourParquetDataset, GeneratorTrainer,
-    };
-    if args.len() < 8 || !(args.len() - 6).is_multiple_of(2) {
-        return Err("usage: --resume-behavioural <checkpoint-in.json> <parquet-dir> <checkpoint-out.json> <extra-epochs> <source.csv|.json> <session-id> ...".into());
-    }
-    let mut trainer = GeneratorTrainer::load_checkpoint(&args[2]).map_err(|e| e.to_string())?;
-    let dataset = BehaviourParquetDataset::open(&args[3]).map_err(|e| e.to_string())?;
-    let split = trainer
-        .training_split()
-        .ok_or("checkpoint has no training split")?;
-    let subjects = trainer.training_subjects().to_vec();
-    let extra = args[5]
-        .parse::<usize>()
-        .map_err(|_| "invalid extra-epochs")?;
-    if extra == 0 {
-        return Err("extra-epochs must be positive".into());
-    }
-    let exact = exact_source_legality(&args[6..])?;
-    for _ in 0..extra {
-        let report = trainer
-            .train_epoch(
-                &dataset,
-                &subjects,
-                split,
-                &mut |_, hand: &lechiffre::behavioural::HandId, seq| {
-                    exact
-                        .get(&(hand.clone(), seq))
-                        .copied()
-                        .ok_or_else(|| format!("source decision not found: {hand}:{seq}"))
-                },
-            )
-            .map_err(|e| e.to_string())?;
-        print_ag_report(&report)?;
-    }
-    trainer
-        .save_checkpoint(&args[4])
+    let a_seed = run.seed.checked_add(1).ok_or("seed overflow")?;
+    let noise_seed = run.seed.checked_add(2).ok_or("seed overflow")?;
+    let a = NeuralBehaviourAnalyzer::initialize(latent, run.analyzer_hidden, a_seed)
         .map_err(|e| e.to_string())?;
-    println!("checkpoint={}", args[4]);
-    Ok(())
-}
-
-fn evaluate_ag(args: &[String]) -> Result<(), String> {
-    use lechiffre::datasets::behaviour_parquet_loader::{
-        BehaviourParquetDataset, GeneratorTrainer,
-    };
-    if args.len() < 6 || !(args.len() - 4).is_multiple_of(2) {
-        return Err("usage: --evaluate-behavioural <checkpoint.json> <parquet-dir> <source.csv|.json> <session-id> ...".into());
-    }
-    let trainer = GeneratorTrainer::load_checkpoint(&args[2]).map_err(|e| e.to_string())?;
-    let dataset = BehaviourParquetDataset::open(&args[3]).map_err(|e| e.to_string())?;
-    let exact = exact_source_legality(&args[4..])?;
+    let go = Adam::new(&g, run.generator_lr).map_err(|e| e.to_string())?;
+    let ao = AnalyzerAdam::new(&a, run.analyzer_lr).map_err(|e| e.to_string())?;
+    let baseline = BaselineAdaptationConfig::new(run.baseline_lr, run.baseline_max_step_prior_std)
+        .map_err(|e| e.to_string())?;
+    let mut trainer = HierarchicalTrainer::new(
+        blueprint,
+        g,
+        a,
+        go,
+        ao,
+        baseline,
+        run.blueprint_lr,
+        run.beta_kl,
+        noise_seed,
+    )
+    .map_err(|e| e.to_string())?;
+    execute_phases(
+        &mut trainer,
+        &dataset,
+        run.split,
+        &run.subjects,
+        run.blueprint_epochs,
+        &run.personalization_history_hands,
+        run.momentary_history_hands,
+        run.momentary_epochs,
+        &exact,
+    )?;
     let report = trainer
-        .evaluate(&dataset, &mut |_,
-                                  hand: &lechiffre::behavioural::HandId,
-                                  seq| {
-            exact
-                .get(&(hand.clone(), seq))
-                .copied()
-                .ok_or_else(|| format!("source decision not found: {hand}:{seq}"))
-        })
-        .map_err(|e| e.to_string())?;
-    print_ag_report(&report)
-}
-
-fn evaluate_unseen_ag(args: &[String]) -> Result<(), String> {
-    use lechiffre::datasets::behaviour_parquet_loader::{
-        BehaviourParquetDataset, GeneratorTrainer,
-    };
-    if args.len() < 7 || !(args.len() - 5).is_multiple_of(2) {
-        return Err("usage: --evaluate-unseen-behavioural <checkpoint.json> <parquet-dir> <subject-id,subject-id,...> <source.csv|.json> <session-id> ...".into());
-    }
-    let trainer = GeneratorTrainer::load_checkpoint(&args[2]).map_err(|e| e.to_string())?;
-    let dataset = BehaviourParquetDataset::open(&args[3]).map_err(|e| e.to_string())?;
-    let ids = args[4]
-        .split(',')
-        .map(|s| {
-            s.parse::<u64>()
-                .map_err(|_| format!("invalid unseen subject-id {s}"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let exact = exact_source_legality(&args[5..])?;
-    let report = trainer
-        .evaluate_unseen(
+        .evaluate(
             &dataset,
-            &ids,
-            &mut |_, hand: &lechiffre::behavioural::HandId, seq| {
-                exact
-                    .get(&(hand.clone(), seq))
-                    .copied()
-                    .ok_or_else(|| format!("source decision not found: {hand}:{seq}"))
-            },
+            &run.subjects,
+            run.split,
+            &mut replay_provider(&exact),
         )
         .map_err(|e| e.to_string())?;
-    print_ag_report(&report)
+    print_hierarchical_validation(&report);
+    trainer
+        .save_checkpoint(&args[4])
+        .map_err(|e| e.to_string())?;
+    println!(
+        "checkpoint={} model_id={}",
+        args[4],
+        trainer.model_id().map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
+fn resume_hierarchical(args: &[String]) -> Result<(), String> {
+    use lechiffre::datasets::behaviour_parquet_loader::{
+        BehaviourParquetDataset, HierarchicalTrainer,
+    };
+    if args.len() < 8 || !(args.len() - 6).is_multiple_of(2) {
+        return Err("usage: --resume-behavioural <checkpoint-in.json> <parquet-dir> <checkpoint-out.json> <resume-config.json> <source.csv|.json> <session-id> ...".into());
+    }
+    let mut trainer = HierarchicalTrainer::load_checkpoint(&args[2]).map_err(|e| e.to_string())?;
+    let dataset = BehaviourParquetDataset::open(&args[3]).map_err(|e| e.to_string())?;
+    let config = resume_configuration(&args[5])?;
+    let split = trainer
+        .training_split()
+        .ok_or("checkpoint missing chronological split")?;
+    let subjects = trainer.training_subjects().to_vec();
+    let exact = exact_source_legality(&args[6..])?;
+    execute_phases(
+        &mut trainer,
+        &dataset,
+        split,
+        &subjects,
+        config.blueprint_extra_epochs,
+        &config.personalization_history_hands,
+        config.momentary_history_hands,
+        config.momentary_extra_epochs,
+        &exact,
+    )?;
+    if trainer.completed_epochs().2 > 0 {
+        let report = trainer
+            .evaluate(&dataset, &subjects, split, &mut replay_provider(&exact))
+            .map_err(|e| e.to_string())?;
+        print_hierarchical_validation(&report);
+    }
+    trainer
+        .save_checkpoint(&args[4])
+        .map_err(|e| e.to_string())?;
+    println!(
+        "checkpoint={} model_id={}",
+        args[4],
+        trainer.model_id().map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
+fn evaluate_hierarchical(args: &[String], unseen: bool) -> Result<(), String> {
+    use lechiffre::datasets::behaviour_parquet_loader::{
+        BehaviourParquetDataset, HierarchicalTrainer,
+    };
+    let start = if unseen { 5 } else { 4 };
+    if args.len() < start + 2 || !(args.len() - start).is_multiple_of(2) {
+        return Err(if unseen {
+            "usage: --evaluate-unseen-behavioural <checkpoint.json> <parquet-dir> <subject-ids-comma-separated> <source.csv|.json> <session-id> ..."
+        } else {
+            "usage: --evaluate-behavioural <checkpoint.json> <parquet-dir> <source.csv|.json> <session-id> ..."
+        }.into());
+    }
+    let trainer = HierarchicalTrainer::load_checkpoint(&args[2]).map_err(|e| e.to_string())?;
+    let dataset = BehaviourParquetDataset::open(&args[3]).map_err(|e| e.to_string())?;
+    let split = trainer.training_split().ok_or("checkpoint missing split")?;
+    let subjects = if unseen {
+        args[4]
+            .split(',')
+            .map(|id| {
+                id.parse::<u64>()
+                    .map_err(|_| format!("invalid subject id {id}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        trainer.training_subjects().to_vec()
+    };
+    let exact = exact_source_legality(&args[start..])?;
+    let report = if unseen {
+        trainer.evaluate_unseen(&dataset, &subjects, split, &mut replay_provider(&exact))
+    } else {
+        trainer.evaluate(&dataset, &subjects, split, &mut replay_provider(&exact))
+    }
+    .map_err(|e| e.to_string())?;
+    print_hierarchical_validation(&report);
+    Ok(())
+}
+
+fn player_baseline_cli(args: &[String], advance: bool) -> Result<(), String> {
+    use lechiffre::behavioural::{PlayerBaselineAdapter, PlayerBaselineState};
+    use lechiffre::datasets::behaviour_parquet_loader::{
+        BehaviourParquetDataset, HierarchicalTrainer,
+    };
+    let source_start = if advance { 8 } else { 7 };
+    if args.len() < source_start + 2 || !(args.len() - source_start).is_multiple_of(2) {
+        return Err(if advance {
+            "usage: --advance-player-baseline <model-checkpoint.json> <parquet-dir> <subject-id> <before-hand-index> <baseline-in.json> <baseline-out.json> <source.csv|.json> <session-id> ..."
+        } else {
+            "usage: --create-player-baseline <model-checkpoint.json> <parquet-dir> <subject-id> <before-hand-index> <baseline-out.json> <source.csv|.json> <session-id> ..."
+        }.into());
+    }
+    let trainer = HierarchicalTrainer::load_checkpoint(&args[2]).map_err(|e| e.to_string())?;
+    if trainer.completed_epochs().2 == 0 {
+        return Err("model requires completed momentary training".into());
+    }
+    let dataset = BehaviourParquetDataset::open(&args[3]).map_err(|e| e.to_string())?;
+    let subject = args[4].parse::<u64>().map_err(|_| "invalid subject id")?;
+    let cutoff = args[5]
+        .parse::<u64>()
+        .map_err(|_| "invalid before-hand-index")?;
+    let model_id = trainer.model_id().map_err(|e| e.to_string())?;
+    let adapter =
+        PlayerBaselineAdapter::new(trainer.blueprint().clone(), trainer.baseline_config())
+            .map_err(|e| e.to_string())?;
+    let mut state = if advance {
+        PlayerBaselineState::load_checkpoint(&args[6], subject, &model_id, &adapter)
+            .map_err(|e| e.to_string())?
+    } else {
+        adapter.initialize_player()
+    };
+    let exact = exact_source_legality(&args[source_start..])?;
+    dataset
+        .advance_baseline_before(
+            subject,
+            cutoff,
+            trainer.generator(),
+            &adapter,
+            &mut state,
+            &mut replay_provider(&exact),
+        )
+        .map_err(|e| e.to_string())?;
+    let out = if advance { &args[7] } else { &args[6] };
+    state
+        .save_checkpoint(out, subject, &model_id)
+        .map_err(|e| e.to_string())?;
+    println!(
+        "baseline={} subject={} model_id={} observed_hands={} observed_decisions={} covered_before={:?}",
+        out,
+        subject,
+        model_id,
+        state.baseline().observed_hands(),
+        state.observed_decisions(),
+        state.processed_before_hand_index()
+    );
+    Ok(())
 }
 
 #[tokio::main]
@@ -511,10 +731,12 @@ async fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 {
         let result = match args[1].as_str() {
-            "--train-behavioural" => Some(train_ag(&args)),
-            "--resume-behavioural" => Some(resume_ag(&args)),
-            "--evaluate-behavioural" => Some(evaluate_ag(&args)),
-            "--evaluate-unseen-behavioural" => Some(evaluate_unseen_ag(&args)),
+            "--train-behavioural" => Some(train_hierarchical(&args)),
+            "--resume-behavioural" => Some(resume_hierarchical(&args)),
+            "--evaluate-behavioural" => Some(evaluate_hierarchical(&args, false)),
+            "--evaluate-unseen-behavioural" => Some(evaluate_hierarchical(&args, true)),
+            "--create-player-baseline" => Some(player_baseline_cli(&args, false)),
+            "--advance-player-baseline" => Some(player_baseline_cli(&args, true)),
             _ => None,
         };
         if let Some(result) = result {
@@ -582,6 +804,11 @@ async fn main() {
         return;
     }
 
+    if args.len() > 1 && args[1] != "--simulate-random" {
+        eprintln!("unknown or obsolete command: {}", args[1]);
+        std::process::exit(2);
+    }
+
     let game_state = GameStateBuilder::new()
         .num_players_with_stack(2, 100)
         .blinds(2, 1)
@@ -628,4 +855,33 @@ async fn main() {
     println!("Random vs Random completed");
     println!("Behavioural events: {}", sequence.len());
     println!("Final stacks: {:?}", simulation.game_state.stacks);
+}
+
+#[cfg(test)]
+mod hierarchical_cli_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_obsolete_and_incomplete_configs() {
+        let p = std::env::temp_dir().join(format!(
+            "lechiffre-hierarchical-cli-{}.json",
+            std::process::id()
+        ));
+        let original: serde_json::Value =
+            serde_json::from_str(include_str!("../configs/hierarchical.example.json")).unwrap();
+        std::fs::write(&p, serde_json::to_vec(&original).unwrap()).unwrap();
+        assert!(run_configuration(p.to_str().unwrap()).is_ok());
+        let mut missing = original.clone();
+        missing.as_object_mut().unwrap().remove("z0_initial");
+        std::fs::write(&p, serde_json::to_vec(&missing).unwrap()).unwrap();
+        assert!(run_configuration(p.to_str().unwrap()).is_err());
+        let mut obsolete = original;
+        obsolete
+            .as_object_mut()
+            .unwrap()
+            .insert("validation_draws".into(), serde_json::json!(16));
+        std::fs::write(&p, serde_json::to_vec(&obsolete).unwrap()).unwrap();
+        assert!(run_configuration(p.to_str().unwrap()).is_err());
+        std::fs::remove_file(p).unwrap();
+    }
 }

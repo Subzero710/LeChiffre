@@ -17,8 +17,8 @@ pub use analyzer::{
     BehaviourPosterior, MomentaryBehaviour, NeuralBehaviourAnalyzer,
 };
 pub use baseline_adaptation::{
-    BaselineAdaptationConfig, BaselineAdaptationError, BaselineHandReport, PlayerBaselineAdapter,
-    PlayerBaselineState,
+    BaselineAdaptationConfig, BaselineAdaptationError, BaselineHandReport,
+    BaselineStateStorageError, PlayerBaselineAdapter, PlayerBaselineState,
 };
 pub use event::{
     ActionHistory, ActionKind, ActionSizing, BehaviourEvent, BehaviourEventError, DecisionContext,
@@ -44,23 +44,9 @@ pub use profile::{
 };
 pub use sequence::{BehaviourSequence, BehaviourSequenceError};
 
-impl BehaviourAnalyzer for NeuralBehaviourAnalyzer {
-    type Error = AnalyzerError;
-    fn analyze(&self, support: &[FeaturizedHand]) -> Result<BehaviourPosterior, Self::Error> {
-        self.infer(support)
-    }
-}
-
 /// Common latent-space contract implemented by both sides of a behavioural model pair.
 pub trait BehaviourLatentModel {
     fn latent_config(&self) -> BehaviourLatentConfig;
-}
-
-/// Infers a distribution over latent profiles from past hands of the same subject.
-pub trait BehaviourAnalyzer: BehaviourLatentModel {
-    type Error;
-
-    fn analyze(&self, support: &[FeaturizedHand]) -> Result<BehaviourPosterior, Self::Error>;
 }
 
 /// Predicts action, continuous sizing and timing distributions from (context, Z).
@@ -95,7 +81,7 @@ pub fn validate_latent_dimensions<A, G>(
     generator: &G,
 ) -> Result<BehaviourLatentConfig, BehaviourLatentDimensionError>
 where
-    A: BehaviourAnalyzer,
+    A: BehaviourLatentModel,
     G: BehaviourGenerator,
 {
     let analyzer_config = analyzer.latent_config();
@@ -144,13 +130,6 @@ mod tests {
     impl BehaviourLatentModel for StubAnalyzer {
         fn latent_config(&self) -> BehaviourLatentConfig {
             self.config
-        }
-    }
-
-    impl BehaviourAnalyzer for StubAnalyzer {
-        type Error = AnalyzerError;
-        fn analyze(&self, _support: &[FeaturizedHand]) -> Result<BehaviourPosterior, Self::Error> {
-            Err(AnalyzerError::NoSubjectDecisions)
         }
     }
 

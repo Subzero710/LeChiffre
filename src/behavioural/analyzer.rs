@@ -1,7 +1,6 @@
 //! One shared behavioural Analyzer: per-decision Z2 inference conditional on Z1.
 //! The pre-action prior cannot observe the current action; the post-action
-//! posterior can. A legacy support-history training path remains isolated until
-//! the joint trainer is migrated to decision-level learning (training step 6).
+//! posterior can. No aggregated-history inference path exists.
 //! No cards, player identities, or hidden opponent information enter A.
 use std::f64::consts::PI;
 use std::fmt;
@@ -14,9 +13,9 @@ use super::checkpoint::{
 use super::codebook::{action_id, position_id, street_id};
 use super::featurizer::encode_context;
 use super::{
-    ACTION_COUNT, BehaviourLatentConfig, BehaviourLatentModel, BehaviourProfile,
-    CategoricalFeature, ContinuousFeature, DecisionContext, DenseLayer, EVENT_CONTINUOUS_WIDTH,
-    FeaturizedHand, GeneratorObservation, ObservedAction, PRE_ACTION_CONTEXT_WIDTH, PlayerBaseline,
+    ACTION_COUNT, BehaviourLatentConfig, BehaviourLatentModel, BehaviourProfile, ContinuousFeature,
+    DecisionContext, DenseLayer, EVENT_CONTINUOUS_WIDTH, GeneratorObservation, ObservedAction,
+    PRE_ACTION_CONTEXT_WIDTH, PlayerBaseline,
 };
 
 pub const ANALYZER_EVENT_WIDTH: usize = 4 + 7 + ACTION_COUNT + 1 + 2 * EVENT_CONTINUOUS_WIDTH;
@@ -86,14 +85,6 @@ impl BehaviourPosterior {
         }
         Ok(kl.max(0.0))
     }
-
-    pub fn kl_to_standard_normal(&self) -> f64 {
-        self.mean
-            .iter()
-            .zip(&self.std)
-            .map(|(&m, &s)| 0.5 * (m * m + s * s - 1.0 - 2.0 * s.ln()))
-            .sum()
-    }
 }
 
 /// Decision-specific Z2, including its pre-action prior for training and
@@ -128,16 +119,6 @@ pub struct AnalyzerParameters {
 pub struct NeuralBehaviourAnalyzer {
     latent: BehaviourLatentConfig,
     parameters: AnalyzerParameters,
-}
-
-#[derive(Debug)]
-struct AnalyzerPass {
-    events: Vec<Vec<f64>>,
-    states: Vec<Vec<f64>>,
-    pooled: Vec<f64>,
-    posterior_input: Vec<f64>,
-    raw: Vec<f64>,
-    posterior: BehaviourPosterior,
 }
 
 #[derive(Debug)]
@@ -295,12 +276,6 @@ impl NeuralBehaviourAnalyzer {
         })
     }
 
-    /// Historical support aggregation retained only for the current v1 trainer.
-    /// This is not the Z2 inference API; step 6 replaces this training path.
-    pub fn infer(&self, support: &[FeaturizedHand]) -> Result<BehaviourPosterior, AnalyzerError> {
-        Ok(self.pass(support)?.posterior)
-    }
-
     fn posterior_from_raw(&self, raw: &[f64]) -> Result<BehaviourPosterior, AnalyzerError> {
         let mut mean = Vec::with_capacity(self.latent.dimension());
         let mut std = Vec::with_capacity(self.latent.dimension());
@@ -314,41 +289,6 @@ impl NeuralBehaviourAnalyzer {
             return Err(AnalyzerError::NonFiniteOutput);
         }
         Ok(BehaviourPosterior { mean, std })
-    }
-
-    fn pass(&self, support: &[FeaturizedHand]) -> Result<AnalyzerPass, AnalyzerError> {
-        let events = encode_support(support)?;
-        let states: Vec<_> = events
-            .iter()
-            .map(|event| {
-                dense_forward(&self.parameters.state, event)
-                    .into_iter()
-                    .map(f64::tanh)
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        let mut pooled = vec![0.0; self.parameters.state.output_width()];
-        for state in &states {
-            for (p, &value) in pooled.iter_mut().zip(state) {
-                *p += value / events.len() as f64;
-            }
-        }
-        let mut posterior_input = pooled.clone();
-        // Historical path: neutral Z1, unit prior std and zero observed hands.
-        // This is not the personalized decision inference path.
-        posterior_input.extend(std::iter::repeat_n(0.0, 2 * self.latent.dimension()));
-        posterior_input.push(0.0);
-        posterior_input.push(1.0);
-        let raw = dense_forward(&self.parameters.posterior, &posterior_input);
-        let posterior = self.posterior_from_raw(&raw)?;
-        Ok(AnalyzerPass {
-            events,
-            states,
-            pooled,
-            posterior_input,
-            raw,
-            posterior,
-        })
     }
 
     pub(crate) fn checkpoint_value(&self) -> Value {
@@ -530,57 +470,6 @@ fn encode_row(
         features[start + EVENT_CONTINUOUS_WIDTH + i] = f64::from(present);
     }
     Ok(features)
-}
-
-fn encode_support(support: &[FeaturizedHand]) -> Result<Vec<Vec<f64>>, AnalyzerError> {
-    let mut observations = Vec::new();
-    for hand in support {
-        let len = hand.sequence_len();
-        if hand.categorical().len() != len
-            || hand.continuous().len() != len
-            || hand.continuous_present().len() != len
-            || hand.sequence_indexes().len() != len
-            || hand.decision_time_ms().len() != len
-        {
-            return Err(AnalyzerError::InvalidSupport);
-        }
-        for row in 0..len {
-            let cat = hand.categorical()[row];
-            let expected_subject = i64::from(position_id(hand.subject_position()))
-                == cat[CategoricalFeature::ActorPosition as usize];
-            match (
-                cat[CategoricalFeature::IsSubject as usize],
-                expected_subject,
-            ) {
-                (0, false) => continue,
-                (1, true) => {}
-                _ => return Err(AnalyzerError::InvalidSupport),
-            }
-            let street = usize::try_from(cat[CategoricalFeature::Street as usize])
-                .map_err(|_| AnalyzerError::InvalidSupport)?;
-            let position = usize::try_from(cat[CategoricalFeature::ActorPosition as usize])
-                .map_err(|_| AnalyzerError::InvalidSupport)?;
-            let action = usize::try_from(cat[CategoricalFeature::Action as usize])
-                .map_err(|_| AnalyzerError::InvalidSupport)?;
-            let allin = cat[CategoricalFeature::IsAllIn as usize];
-            if street >= 4 || position >= 7 || action >= ACTION_COUNT || !(0..=1).contains(&allin) {
-                return Err(AnalyzerError::InvalidSupport);
-            }
-            let features = encode_row(
-                street,
-                position,
-                Some((action, allin != 0)),
-                &hand.continuous()[row],
-                &hand.continuous_present()[row],
-            )
-            .map_err(|_| AnalyzerError::InvalidSupport)?;
-            observations.push(features);
-        }
-    }
-    if observations.is_empty() {
-        return Err(AnalyzerError::NoSubjectDecisions);
-    }
-    Ok(observations)
 }
 
 fn dense_forward(layer: &DenseLayer, input: &[f64]) -> Vec<f64> {
@@ -884,87 +773,6 @@ impl AnalyzerAdam {
         self.steps
     }
 
-    /// Update A using the gradient of query NLL w.r.t. the sampled z and the KL prior penalty.
-    pub fn train_step(
-        &mut self,
-        model: &mut NeuralBehaviourAnalyzer,
-        support: &[FeaturizedHand],
-        epsilon: &[f64],
-        latent_gradient: &[f64],
-        beta: f64,
-    ) -> Result<f64, AnalyzerError> {
-        if !beta.is_finite()
-            || beta < 0.0
-            || latent_gradient.len() != model.latent.dimension()
-            || epsilon.len() != model.latent.dimension()
-            || latent_gradient
-                .iter()
-                .chain(epsilon)
-                .any(|x| !x.is_finite())
-        {
-            return Err(AnalyzerError::InvalidNoise);
-        }
-        if !self.state.matches(&model.parameters.state)
-            || !self.posterior.matches(&model.parameters.posterior)
-        {
-            return Err(AnalyzerError::OptimizerModelMismatch);
-        }
-        let pass = model.pass(support)?;
-        let d = model.latent.dimension();
-        let mut output_grad = vec![0.0; d * 2];
-        for i in 0..d {
-            let mean = pass.posterior.mean[i];
-            let sigma = pass.posterior.std[i];
-            output_grad[i] = latent_gradient[i] + beta * mean;
-            let raw = pass.raw[d + i];
-            let log_std_grad =
-                latent_gradient[i] * sigma * epsilon[i] + beta * (sigma * sigma - 1.0);
-            output_grad[d + i] = log_std_grad * LOG_STD_RANGE * (1.0 - raw.tanh().powi(2));
-        }
-        let mut posterior_gradient = MatrixGradient::zeros(&model.parameters.posterior);
-        let pooled_gradient = dense_backward(
-            &model.parameters.posterior,
-            &pass.posterior_input,
-            &output_grad,
-            &mut posterior_gradient,
-        );
-        let mut state_gradient = MatrixGradient::zeros(&model.parameters.state);
-        for (event, state) in pass.events.iter().zip(&pass.states) {
-            let gradients = pooled_gradient[..pass.pooled.len()]
-                .iter()
-                .zip(state)
-                .map(|(&g, &s)| g / pass.events.len() as f64 * (1.0 - s * s))
-                .collect::<Vec<_>>();
-            let _ = dense_backward(
-                &model.parameters.state,
-                event,
-                &gradients,
-                &mut state_gradient,
-            );
-        }
-        let step = self
-            .steps
-            .checked_add(1)
-            .ok_or(AnalyzerError::StepOverflow)?;
-        let mut moments = self.clone();
-        let state = moments.state.update(
-            &model.parameters.state,
-            &state_gradient,
-            self.learning_rate,
-            step,
-        )?;
-        let posterior = moments.posterior.update(
-            &model.parameters.posterior,
-            &posterior_gradient,
-            self.learning_rate,
-            step,
-        )?;
-        model.parameters = AnalyzerParameters { state, posterior };
-        moments.steps = step;
-        *self = moments;
-        Ok(pass.posterior.kl_to_standard_normal())
-    }
-
     /// Apply a per-decision gradient batch in one atomic optimizer update.
     pub fn apply_decision_batch(
         &mut self,
@@ -978,7 +786,7 @@ impl AnalyzerAdam {
             return Err(AnalyzerError::OptimizerModelMismatch);
         }
         if batch.observations == 0 {
-            return Err(AnalyzerError::InvalidSupport);
+            return Err(AnalyzerError::EmptyDecisionBatch);
         }
         let mut state_grad = batch.state;
         let mut posterior_grad = batch.posterior;
@@ -1060,11 +868,10 @@ impl NoiseStream {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnalyzerError {
-    InvalidSupport,
     InvalidObservation,
+    EmptyDecisionBatch,
     MissingDecisionTiming,
     InvalidBaselineDimension,
-    NoSubjectDecisions,
     InvalidNoise,
     InvalidShape,
     InvalidInitialization,
@@ -1084,22 +891,7 @@ impl std::error::Error for AnalyzerError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::behavioural::{EVENT_CATEGORICAL_WIDTH, FeaturizedHandData, HandId, Position};
-    fn support() -> Vec<FeaturizedHand> {
-        let mut categorical = [0; EVENT_CATEGORICAL_WIDTH];
-        categorical[CategoricalFeature::IsSubject as usize] = 1;
-        categorical[CategoricalFeature::ActorPosition as usize] =
-            i64::from(position_id(Position::Button));
-        vec![FeaturizedHand::from_data(FeaturizedHandData {
-            hand_id: HandId::new("support"),
-            subject_position: Position::Button,
-            sequence_indexes: vec![0],
-            categorical: vec![categorical],
-            continuous: vec![[0.0; EVENT_CONTINUOUS_WIDTH]],
-            continuous_present: vec![[1; EVENT_CONTINUOUS_WIDTH]],
-            decision_time_ms: vec![100],
-        })]
-    }
+    use crate::behavioural::Position;
     fn decision_context() -> DecisionContext {
         use crate::behavioural::{PlayerState, PlayerStatus, Street};
         DecisionContext {
@@ -1175,90 +967,29 @@ mod tests {
     }
 
     #[test]
-    fn posterior_is_finite_stochastic_and_kl_nonnegative() {
+    fn prior_and_posterior_maintain_positive_uncertainty() {
+        use crate::behavioural::BehaviourBlueprint;
         let config = BehaviourLatentConfig::new(3).unwrap();
         let analyzer = NeuralBehaviourAnalyzer::initialize(config, 8, 17).unwrap();
-        let posterior = analyzer.infer(&support()).unwrap();
+        let blueprint =
+            BehaviourBlueprint::new(config.profile(vec![0.0; 3]).unwrap(), vec![1.0; 3]).unwrap();
+        let baseline = PlayerBaseline::from_blueprint(&blueprint);
+        let posterior = analyzer.prior(&decision_context(), &baseline).unwrap();
         assert_eq!(posterior.mean().len(), 3);
         assert!(posterior.std().iter().all(|x| *x > 0.0));
-        assert!(posterior.kl_to_standard_normal() >= -1e-12);
+        assert!(posterior.kl_to(&posterior).unwrap() < 1e-12);
         assert_ne!(
             posterior.sample(&[1.0, 0.0, 0.0]).unwrap(),
             posterior.mean_profile().unwrap()
         );
     }
+
     #[test]
-    fn analyzer_optimizer_updates_and_is_checkpointable() {
-        let config = BehaviourLatentConfig::new(2).unwrap();
-        let mut model = NeuralBehaviourAnalyzer::initialize(config, 8, 17).unwrap();
-        let mut adam = AnalyzerAdam::new(&model, 0.01).unwrap();
-        let before = model.parameters().clone();
-        adam.train_step(&mut model, &support(), &[0.3, -0.2], &[0.7, -0.5], 0.01)
-            .unwrap();
-        assert_ne!(*model.parameters(), before);
-        assert_eq!(adam.steps(), 1);
-        let loaded = AnalyzerAdam::from_checkpoint(&adam.checkpoint_value(), &model).unwrap();
-        assert_eq!(loaded.steps(), 1);
-    }
-    #[test]
-    fn reparameterized_posterior_gradients_match_finite_differences() {
-        let model =
-            NeuralBehaviourAnalyzer::initialize(BehaviourLatentConfig::new(2).unwrap(), 8, 41)
-                .unwrap();
-        let epsilon = [0.3, -0.8];
-        let latent_gradient = [0.7, -0.5];
-        let beta = 0.04;
-        let score = |model: &NeuralBehaviourAnalyzer| {
-            let posterior = model.infer(&support()).unwrap();
-            latent_gradient
-                .iter()
-                .zip(posterior.mean())
-                .zip(posterior.std())
-                .zip(epsilon)
-                .map(|(((&gradient, &mu), &std), eps)| gradient * (mu + std * eps))
-                .sum::<f64>()
-                + beta * posterior.kl_to_standard_normal()
-        };
-        let pass = model.pass(&support()).unwrap();
-        let h = 1e-4;
-        for index in [0, 2] {
-            let change = |direction: f32| {
-                let mut changed = model.clone();
-                let layer = &model.parameters.posterior;
-                let mut bias = layer.biases().to_vec();
-                bias[index] += direction;
-                changed.parameters.posterior = DenseLayer::new(
-                    layer.input_width(),
-                    layer.output_width(),
-                    layer.weights().to_vec(),
-                    bias,
-                )
-                .unwrap();
-                changed
-            };
-            let numeric = (score(&change(h as f32)) - score(&change(-(h as f32)))) / (2.0 * h);
-            let analytic = if index == 0 {
-                latent_gradient[0] + beta * pass.posterior.mean[0]
-            } else {
-                let sigma = pass.posterior.std[0];
-                (latent_gradient[0] * sigma * epsilon[0] + beta * (sigma * sigma - 1.0))
-                    * LOG_STD_RANGE
-                    * (1.0 - pass.raw[2].tanh().powi(2))
-            };
-            assert!(
-                (numeric - analytic).abs() < 0.002,
-                "numerical gradient {numeric} vs {analytic}"
-            );
-        }
-    }
-    #[test]
-    fn without_subject_actions_is_rejected() {
-        let model =
-            NeuralBehaviourAnalyzer::initialize(BehaviourLatentConfig::new(2).unwrap(), 8, 2)
-                .unwrap();
-        assert_eq!(
-            model.infer(&[]).unwrap_err(),
-            AnalyzerError::NoSubjectDecisions
-        );
+    fn decision_optimizer_roundtrips_moments() {
+        let latent = BehaviourLatentConfig::new(2).unwrap();
+        let model = NeuralBehaviourAnalyzer::initialize(latent, 8, 17).unwrap();
+        let adam = AnalyzerAdam::new(&model, 0.001).unwrap();
+        let read = AnalyzerAdam::from_checkpoint(&adam.checkpoint_value(), &model).unwrap();
+        assert_eq!(read.steps(), 0);
     }
 }

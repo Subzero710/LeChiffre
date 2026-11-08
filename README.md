@@ -315,3 +315,7 @@ Avoids the O(N!) complexity of traditional ICM by simulating all-in confrontatio
 
 Apache-2.0
 
+
+## Entraînement comportemental Z₀/Z₁/Z₂
+
+L'interface d'entraînement est exclusivement hiérarchique. Les anciens checkpoints A/G ne sont pas acceptés. Voir [docs/BEHAVIOURAL_ENGINE.md](docs/BEHAVIOURAL_ENGINE.md) pour la CLI, les configurations strictes, la reprise et la persistance des Z₁ individuels.

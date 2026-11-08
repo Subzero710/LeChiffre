@@ -2,15 +2,19 @@
 //!
 //! Training is deliberately divided into explicit phases. No profile is used
 //! before its observations exist, and G/A gradients use one fixed model snapshot
-//! per batch. This module is an in-memory trainer: versioned checkpoints/CLI
-//! are part of deployment stage 7, not silently compatible with v1 checkpoints.
+//! per batch. Versioned hierarchical checkpoints reject all obsolete A/G formats.
+use crate::behavioural::checkpoint::{exact_keys, float_array, number, unsigned};
+use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::fmt;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use super::BehaviourParquetDataset;
-use super::generator_training::{
-    ExactLegalityProvider, GeneratorHandSplit, GeneratorTrainingError, SubjectSample,
-    decode_decision, lookup, subject_decisions,
+use super::training_data::{
+    ExactLegalityProvider, HierarchicalHandSplit, SubjectSample, TrainingDataError,
+    dataset_fingerprint, decode_decision, lookup, sample_subjects, subject_decisions,
 };
 use crate::behavioural::{
     Adam, AnalyzerAdam, AnalyzerError, AnalyzerGradientBatch, BaselineAdaptationConfig,
@@ -48,7 +52,7 @@ pub struct HierarchicalValidationReport {
 }
 
 /// Contains one global blueprint, one shared A and G, and their optimizers.
-/// Z1 is ephemeral, keyed by a subject only during sequential adaptation.
+/// Individual Z1 persistence is separate from shared A/G/Z0 checkpoints.
 #[derive(Debug, Clone)]
 pub struct HierarchicalTrainer {
     blueprint: BehaviourBlueprint,
@@ -63,6 +67,9 @@ pub struct HierarchicalTrainer {
     blueprint_epochs: u64,
     personalization_epochs: u64,
     momentary_epochs: u64,
+    last_split: Option<HierarchicalHandSplit>,
+    last_subjects: Vec<u64>,
+    dataset_fingerprint: Option<String>,
 }
 
 impl HierarchicalTrainer {
@@ -107,6 +114,9 @@ impl HierarchicalTrainer {
             blueprint_epochs: 0,
             personalization_epochs: 0,
             momentary_epochs: 0,
+            last_split: None,
+            last_subjects: Vec::new(),
+            dataset_fingerprint: None,
         })
     }
 
@@ -127,6 +137,246 @@ impl HierarchicalTrainer {
         )
     }
 
+    pub fn baseline_config(&self) -> BaselineAdaptationConfig {
+        self.baseline_config
+    }
+    pub fn training_split(&self) -> Option<HierarchicalHandSplit> {
+        self.last_split
+    }
+    pub fn training_subjects(&self) -> &[u64] {
+        &self.last_subjects
+    }
+
+    fn bind_training_context(
+        &mut self,
+        dataset: &BehaviourParquetDataset,
+        subjects: &[u64],
+        split: HierarchicalHandSplit,
+    ) -> Result<(), HierarchicalTrainingError> {
+        let fingerprint = dataset_fingerprint(dataset);
+        if let Some(expected) = &self.dataset_fingerprint {
+            if expected != &fingerprint {
+                return Err(HierarchicalTrainingError::DatasetChanged);
+            }
+            if self.last_split != Some(split) || self.last_subjects != subjects {
+                return Err(HierarchicalTrainingError::TrainingPartitionChanged);
+            }
+        } else {
+            selected_subjects(dataset, subjects)?;
+            self.dataset_fingerprint = Some(fingerprint);
+            self.last_split = Some(split);
+            self.last_subjects = subjects.to_vec();
+        }
+        Ok(())
+    }
+
+    fn check_evaluation_dataset(
+        &self,
+        dataset: &BehaviourParquetDataset,
+        split: HierarchicalHandSplit,
+    ) -> Result<(), HierarchicalTrainingError> {
+        if self.momentary_epochs == 0 {
+            return Err(HierarchicalTrainingError::NotTrained);
+        }
+        if self.dataset_fingerprint.as_deref() != Some(dataset_fingerprint(dataset).as_str()) {
+            return Err(HierarchicalTrainingError::DatasetChanged);
+        }
+        if self.last_split != Some(split) {
+            return Err(HierarchicalTrainingError::TrainingPartitionChanged);
+        }
+        Ok(())
+    }
+
+    /// Stable identifier for the exact shared learned model (Z0, A, G and adaptation policy).
+    /// FNV-128 detects accidental model mismatches; it is not a cryptographic signature.
+    pub fn model_id(&self) -> Result<String, HierarchicalTrainingError> {
+        let data = serde_json::to_vec(&json!({
+            "format":"lechiffre.hierarchical.model.v1",
+            "z0":self.blueprint.centre().as_slice(),
+            "prior_std":self.blueprint.prior_std(),
+            "generator":self.generator.checkpoint_value(),
+            "analyzer":self.analyzer.checkpoint_value(),
+            "baseline_learning_rate":self.baseline_config.learning_rate(),
+            "baseline_max_step":self.baseline_config.max_step_prior_std(),
+        }))?;
+        let mut hash = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d_u128;
+        const PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
+        for byte in data {
+            hash = (hash ^ u128::from(byte)).wrapping_mul(PRIME);
+        }
+        Ok(format!("hierarchical-v1-{hash:032x}"))
+    }
+
+    /// Hierarchical-only checkpoint. Exact model, optimizer, RNG, phase, and dataset provenance.
+    pub fn save_checkpoint(&self, path: impl AsRef<Path>) -> Result<(), HierarchicalTrainingError> {
+        if self.blueprint_epochs == 0 {
+            return Err(HierarchicalTrainingError::NotTrained);
+        }
+        let value = json!({
+            "format":"lechiffre.hierarchical.checkpoint.v1",
+            "model_id":self.model_id()?,
+            "blueprint":{"centre":self.blueprint.centre().as_slice(),
+                         "prior_std":self.blueprint.prior_std()},
+            "generator":self.generator.checkpoint_value(),
+            "analyzer":self.analyzer.checkpoint_value(),
+            "generator_adam":self.generator_adam.checkpoint_value(),
+            "analyzer_adam":self.analyzer_adam.checkpoint_value(),
+            "baseline_config":{"learning_rate":self.baseline_config.learning_rate(),
+                               "max_step_prior_std":self.baseline_config.max_step_prior_std()},
+            "blueprint_learning_rate":self.blueprint_learning_rate,
+            "beta_kl":self.beta_kl,
+            "rng_state":self.noise.state,
+            "epochs":{"blueprint":self.blueprint_epochs,"personalization":self.personalization_epochs,
+                      "momentary":self.momentary_epochs},
+            "split":self.last_split.ok_or(HierarchicalTrainingError::NotTrained)?.checkpoint_value(),
+            "subjects":self.last_subjects,
+            "dataset_fingerprint":self.dataset_fingerprint.as_ref().ok_or(HierarchicalTrainingError::NotTrained)?,
+        });
+        let destination = path.as_ref();
+        if destination.exists() {
+            return Err(HierarchicalTrainingError::CheckpointAlreadyExists(
+                destination.to_path_buf(),
+            ));
+        }
+        let mut temporary = destination.as_os_str().to_os_string();
+        temporary.push(".inprogress");
+        let temporary = PathBuf::from(temporary);
+        let result = (|| -> Result<(), HierarchicalTrainingError> {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)?;
+            serde_json::to_writer_pretty(&mut file, &value)?;
+            file.write_all(b"\n")?;
+            file.sync_all()?;
+            fs::hard_link(&temporary, destination)?;
+            fs::remove_file(&temporary)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
+
+    pub fn load_checkpoint(path: impl AsRef<Path>) -> Result<Self, HierarchicalTrainingError> {
+        let value: Value = serde_json::from_reader(File::open(path)?)?;
+        let bad = HierarchicalTrainingError::InvalidCheckpoint;
+        exact_keys(
+            &value,
+            &[
+                "format",
+                "model_id",
+                "blueprint",
+                "generator",
+                "analyzer",
+                "generator_adam",
+                "analyzer_adam",
+                "baseline_config",
+                "blueprint_learning_rate",
+                "beta_kl",
+                "rng_state",
+                "epochs",
+                "split",
+                "subjects",
+                "dataset_fingerprint",
+            ],
+        )
+        .map_err(bad)?;
+        if value["format"].as_str() != Some("lechiffre.hierarchical.checkpoint.v1") {
+            return Err(bad(
+                "obsolete or unknown checkpoint format: hierarchical v1 required".into(),
+            ));
+        }
+        exact_keys(&value["blueprint"], &["centre", "prior_std"]).map_err(bad)?;
+        exact_keys(
+            &value["baseline_config"],
+            &["learning_rate", "max_step_prior_std"],
+        )
+        .map_err(bad)?;
+        exact_keys(
+            &value["epochs"],
+            &["blueprint", "personalization", "momentary"],
+        )
+        .map_err(bad)?;
+        let generator =
+            NeuralBehaviourGenerator::from_checkpoint(&value["generator"]).map_err(bad)?;
+        let analyzer = NeuralBehaviourAnalyzer::from_checkpoint(&value["analyzer"]).map_err(bad)?;
+        let config = generator.latent_config();
+        let floats = |field: &Value| -> Result<Vec<f32>, HierarchicalTrainingError> {
+            float_array(field)
+                .map_err(bad)?
+                .into_iter()
+                .map(|v| {
+                    let v = v as f32;
+                    if !v.is_finite() {
+                        Err(bad("latent value outside f32 range".into()))
+                    } else {
+                        Ok(v)
+                    }
+                })
+                .collect()
+        };
+        let blueprint = BehaviourBlueprint::new(
+            config.profile(floats(&value["blueprint"]["centre"])?)?,
+            floats(&value["blueprint"]["prior_std"])?,
+        )?;
+        let gopt = Adam::from_checkpoint(&value["generator_adam"], &generator).map_err(bad)?;
+        let aopt =
+            AnalyzerAdam::from_checkpoint(&value["analyzer_adam"], &analyzer).map_err(bad)?;
+        let baseline_config = BaselineAdaptationConfig::new(
+            number(&value["baseline_config"]["learning_rate"]).map_err(bad)?,
+            number(&value["baseline_config"]["max_step_prior_std"]).map_err(bad)?,
+        )?;
+        let mut trainer = Self::new(
+            blueprint,
+            generator,
+            analyzer,
+            gopt,
+            aopt,
+            baseline_config,
+            number(&value["blueprint_learning_rate"]).map_err(bad)?,
+            number(&value["beta_kl"]).map_err(bad)?,
+            unsigned(&value["rng_state"]).map_err(bad)?,
+        )?;
+        let epochs = &value["epochs"];
+        trainer.blueprint_epochs = unsigned(&epochs["blueprint"]).map_err(bad)?;
+        trainer.personalization_epochs = unsigned(&epochs["personalization"]).map_err(bad)?;
+        trainer.momentary_epochs = unsigned(&epochs["momentary"]).map_err(bad)?;
+        trainer.last_split =
+            Some(HierarchicalHandSplit::from_checkpoint(&value["split"]).map_err(bad)?);
+        trainer.last_subjects = value["subjects"]
+            .as_array()
+            .ok_or_else(|| bad("subjects must be an array".into()))?
+            .iter()
+            .map(|v| unsigned(v).map_err(bad))
+            .collect::<Result<Vec<_>, _>>()?;
+        trainer.dataset_fingerprint = Some(
+            value["dataset_fingerprint"]
+                .as_str()
+                .filter(|s| s.len() == 32 && s.bytes().all(|c| c.is_ascii_hexdigit()))
+                .ok_or_else(|| bad("invalid dataset fingerprint".into()))?
+                .to_owned(),
+        );
+        if trainer.blueprint_epochs == 0
+            || (trainer.momentary_epochs > 0 && trainer.personalization_epochs == 0)
+            || trainer.last_subjects.is_empty()
+            || trainer
+                .last_subjects
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>()
+                .len()
+                != trainer.last_subjects.len()
+        {
+            return Err(bad("inconsistent training progress".into()));
+        }
+        if value["model_id"].as_str() != Some(trainer.model_id()?.as_str()) {
+            return Err(bad("shared model fingerprint mismatch".into()));
+        }
+        Ok(trainer)
+    }
+
     /// Population pretraining: only hands before the global query boundary
     /// contribute. Update Z0 as an explicit learned latent vector alongside G.
     /// The prior standard deviation remains an explicitly supplied hyperparameter,
@@ -135,10 +385,14 @@ impl HierarchicalTrainer {
         &mut self,
         dataset: &BehaviourParquetDataset,
         subjects: &[u64],
-        split: GeneratorHandSplit,
+        split: HierarchicalHandSplit,
         provider: &mut P,
     ) -> Result<HierarchicalEpochReport, HierarchicalTrainingError> {
+        if self.personalization_epochs > 0 || self.momentary_epochs > 0 {
+            return Err(HierarchicalTrainingError::TrainingPhaseCompleted);
+        }
         let mut working = self.clone();
+        working.bind_training_context(dataset, subjects, split)?;
         let selected = selected_subjects(dataset, subjects)?;
         let mut batch = GeneratorGradientBatch::new(&working.generator);
         for id in selected {
@@ -208,16 +462,19 @@ impl HierarchicalTrainer {
         &mut self,
         dataset: &BehaviourParquetDataset,
         subjects: &[u64],
-        split: GeneratorHandSplit,
+        split: HierarchicalHandSplit,
         history_hands: usize,
         provider: &mut P,
     ) -> Result<HierarchicalEpochReport, HierarchicalTrainingError> {
-        if self.blueprint_epochs == 0 || history_hands > split.support_hands {
+        if self.blueprint_epochs == 0
+            || self.momentary_epochs > 0
+            || history_hands > split.support_hands
+        {
             return Err(HierarchicalTrainingError::InvalidPhaseOrHistory);
         }
-        let samples =
-            super::generator_training::GeneratorTrainer::samples(dataset, subjects, split)?;
+        let samples = sample_subjects(dataset, subjects, split)?;
         let mut working = self.clone();
+        working.bind_training_context(dataset, subjects, split)?;
         let mut sum_nll = 0.0;
         let mut count = 0usize;
         for sample in &samples {
@@ -274,7 +531,7 @@ impl HierarchicalTrainer {
         &mut self,
         dataset: &BehaviourParquetDataset,
         subjects: &[u64],
-        split: GeneratorHandSplit,
+        split: HierarchicalHandSplit,
         history_hands: usize,
         provider: &mut P,
     ) -> Result<HierarchicalEpochReport, HierarchicalTrainingError> {
@@ -284,9 +541,9 @@ impl HierarchicalTrainer {
         {
             return Err(HierarchicalTrainingError::InvalidPhaseOrHistory);
         }
-        let samples =
-            super::generator_training::GeneratorTrainer::samples(dataset, subjects, split)?;
+        let samples = sample_subjects(dataset, subjects, split)?;
         let mut working = self.clone();
+        working.bind_training_context(dataset, subjects, split)?;
         let mut nll_sum = 0.0;
         let mut kl_sum = 0.0;
         let mut decisions = 0usize;
@@ -418,6 +675,22 @@ impl HierarchicalTrainer {
         Ok(state.baseline().clone())
     }
 
+    pub fn evaluate_unseen<P: ExactLegalityProvider>(
+        &self,
+        dataset: &BehaviourParquetDataset,
+        unseen_subjects: &[u64],
+        split: HierarchicalHandSplit,
+        provider: &mut P,
+    ) -> Result<HierarchicalValidationReport, HierarchicalTrainingError> {
+        if let Some(&id) = unseen_subjects
+            .iter()
+            .find(|id| self.last_subjects.contains(*id))
+        {
+            return Err(HierarchicalTrainingError::PreviouslyTrainedSubject(id));
+        }
+        self.evaluate(dataset, unseen_subjects, split, provider)
+    }
+
     /// Evaluation is read-only and strictly after `first_evaluation_hand_index`.
     /// Z1 is allowed to use all earlier hands, including query training hands,
     /// but never a validation decision. Posterior NLL is labelled reconstruction.
@@ -425,11 +698,11 @@ impl HierarchicalTrainer {
         &self,
         dataset: &BehaviourParquetDataset,
         subjects: &[u64],
-        split: GeneratorHandSplit,
+        split: HierarchicalHandSplit,
         provider: &mut P,
     ) -> Result<HierarchicalValidationReport, HierarchicalTrainingError> {
-        let samples =
-            super::generator_training::GeneratorTrainer::samples(dataset, subjects, split)?;
+        self.check_evaluation_dataset(dataset, split)?;
+        let samples = sample_subjects(dataset, subjects, split)?;
         let adapter = PlayerBaselineAdapter::new(self.blueprint.clone(), self.baseline_config)?;
         let mut sum = [0.0_f64; 4];
         let mut kl = 0.0;
@@ -527,6 +800,15 @@ fn collect_query<P: ExactLegalityProvider>(
 pub enum HierarchicalTrainingError {
     InvalidConfiguration,
     InvalidPhaseOrHistory,
+    TrainingPhaseCompleted,
+    TrainingPartitionChanged,
+    DatasetChanged,
+    NotTrained,
+    PreviouslyTrainedSubject(u64),
+    InvalidCheckpoint(String),
+    CheckpointAlreadyExists(PathBuf),
+    Io(io::Error),
+    Json(serde_json::Error),
     LatentDimensionMismatch,
     UnknownSubject(u64),
     DuplicateSubject(u64),
@@ -543,14 +825,32 @@ pub enum HierarchicalTrainingError {
     Analyzer(AnalyzerError),
     Baseline(BaselineAdaptationError),
     Profile(BehaviourProfileError),
-    Data(GeneratorTrainingError),
+    Data(TrainingDataError),
 }
 impl fmt::Display for HierarchicalTrainingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::InvalidCheckpoint(message) => write!(f, "checkpoint rejected: {message}"),
+            Self::CheckpointAlreadyExists(path) => {
+                write!(f, "checkpoint already exists: {}", path.display())
+            }
+            Self::Io(source) => write!(f, "I/O: {source}"),
+            Self::Json(source) => write!(f, "JSON: {source}"),
+            other => write!(f, "{other:?}"),
+        }
     }
 }
 impl std::error::Error for HierarchicalTrainingError {}
+impl From<io::Error> for HierarchicalTrainingError {
+    fn from(v: io::Error) -> Self {
+        Self::Io(v)
+    }
+}
+impl From<serde_json::Error> for HierarchicalTrainingError {
+    fn from(v: serde_json::Error) -> Self {
+        Self::Json(v)
+    }
+}
 impl From<GeneratorError> for HierarchicalTrainingError {
     fn from(value: GeneratorError) -> Self {
         Self::Generator(value)
@@ -571,8 +871,8 @@ impl From<BehaviourProfileError> for HierarchicalTrainingError {
         Self::Profile(value)
     }
 }
-impl From<GeneratorTrainingError> for HierarchicalTrainingError {
-    fn from(value: GeneratorTrainingError) -> Self {
+impl From<TrainingDataError> for HierarchicalTrainingError {
+    fn from(value: TrainingDataError) -> Self {
         Self::Data(value)
     }
 }
@@ -714,7 +1014,7 @@ mod tests {
     #[test]
     fn three_training_phases_preserve_global_future_partition() {
         let dataset = dataset();
-        let split = GeneratorHandSplit::new(3, 6, 3, 3, 3).unwrap();
+        let split = HierarchicalHandSplit::new(3, 6, 3, 3, 3).unwrap();
         let mut trainer = trainer();
         let seen = std::cell::RefCell::new(Vec::<String>::new());
         let mut legal_source = |_: u64,
@@ -847,5 +1147,75 @@ mod tests {
         assert!(matches!(error, HierarchicalTrainingError::Generator(_)));
         assert_eq!(&before_g, trainer.generator.parameters());
         assert_eq!(&before_a, trainer.analyzer.parameters());
+    }
+
+    #[test]
+    fn hierarchical_checkpoint_roundtrips_all_state_and_rejects_legacy() {
+        let source = dataset();
+        let split = HierarchicalHandSplit::new(3, 6, 3, 3, 3).unwrap();
+        let mut trainer = trainer();
+        let mut provider = |_: u64,
+                            _: &crate::behavioural::HandId,
+                            _: u32|
+         -> Result<_, &'static str> { Ok(decision(600).1) };
+        trainer
+            .train_blueprint_epoch(&source, &[42], split, &mut provider)
+            .unwrap();
+        trainer
+            .train_personalization_epoch(&source, &[42], split, 2, &mut provider)
+            .unwrap();
+        trainer
+            .train_momentary_epoch(&source, &[42], split, 2, &mut provider)
+            .unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "lechiffre-hierarchical-{}-{}.json",
+            std::process::id(),
+            trainer.model_id().unwrap()
+        ));
+        let _ = std::fs::remove_file(&path);
+        trainer.save_checkpoint(&path).unwrap();
+        assert!(matches!(
+            trainer.save_checkpoint(&path),
+            Err(HierarchicalTrainingError::CheckpointAlreadyExists(_))
+        ));
+        let mut restored = HierarchicalTrainer::load_checkpoint(&path).unwrap();
+        assert_eq!(trainer.model_id().unwrap(), restored.model_id().unwrap());
+        assert_eq!(trainer.completed_epochs(), restored.completed_epochs());
+        assert_eq!(trainer.training_subjects(), restored.training_subjects());
+        restored
+            .train_momentary_epoch(&source, &[42], split, 2, &mut provider)
+            .unwrap();
+        assert_eq!(restored.completed_epochs(), (1, 1, 2));
+        let mut obsolete: Value = serde_json::from_reader(File::open(&path).unwrap()).unwrap();
+        obsolete["format"] = json!("lechiffre.ag.checkpoint");
+        let invalid_path = path.with_extension("obsolete.json");
+        std::fs::write(&invalid_path, serde_json::to_vec(&obsolete).unwrap()).unwrap();
+        assert!(matches!(
+            HierarchicalTrainer::load_checkpoint(&invalid_path),
+            Err(HierarchicalTrainingError::InvalidCheckpoint(_))
+        ));
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(&invalid_path).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_resume_rejects_replaced_dataset() {
+        let source = dataset();
+        let split = HierarchicalHandSplit::new(3, 6, 3, 3, 3).unwrap();
+        let mut trainer = trainer();
+        let mut provider = |_: u64,
+                            _: &crate::behavioural::HandId,
+                            _: u32|
+         -> Result<_, &'static str> { Ok(decision(600).1) };
+        trainer
+            .train_blueprint_epoch(&source, &[42], split, &mut provider)
+            .unwrap();
+        let mut changed = dataset();
+        changed.hands[0].continuous[0][0] += 1.0;
+        assert!(matches!(
+            trainer.train_blueprint_epoch(&changed, &[42], split, &mut provider),
+            Err(HierarchicalTrainingError::DatasetChanged)
+        ));
+        assert_eq!(trainer.completed_epochs(), (1, 0, 0));
     }
 }

@@ -47,16 +47,13 @@ pub use sampling::{
 };
 
 mod baseline_adaptation;
+mod training_data;
+pub use training_data::{ExactLegalityProvider, HierarchicalHandSplit, TrainingDataError};
+
 mod hierarchical_training;
 pub use hierarchical_training::{
     HierarchicalEpochReport, HierarchicalPhase, HierarchicalTrainer, HierarchicalTrainingError,
     HierarchicalValidationReport,
-};
-
-mod generator_training;
-pub use generator_training::{
-    ExactLegalityProvider, GeneratorEpochReport, GeneratorHandSplit, GeneratorLossSummary,
-    GeneratorTrainer, GeneratorTrainingConfig, GeneratorTrainingError,
 };
 
 mod training_episode;
