@@ -1,0 +1,63 @@
+# Docker Compose V2. Always prepare .env with: sh docker/init.sh
+x-runtime: &runtime
+  image: lechiffre-runtime:local
+  build:
+    context: .
+    target: runtime
+  working_dir: /workspace/runs
+  user: "${LOCAL_UID:?Run sh docker/init.sh}:${LOCAL_GID:?Run sh docker/init.sh}"
+  init: true
+  volumes:
+    - ./inputs:/workspace/inputs:ro
+    - ./data:/workspace/data
+    - ./models:/workspace/models
+    - ./runs:/workspace/runs
+    - ./configs:/workspace/configs:ro
+    - ./agents:/workspace/agents:ro
+
+services:
+  app:
+    <<: *runtime
+    entrypoint: ["/usr/local/bin/lechiffre"]
+    command: ["--simulate-random"]
+
+  behavioural:
+    <<: *runtime
+    entrypoint: ["/usr/local/bin/lechiffre"]
+    # Explicit CLI arguments supplied to `compose run` replace this diagnostic.
+    command: ["--behaviour-dataset-stats", "/workspace/data/parquet"]
+
+  poker:
+    <<: *runtime
+    entrypoint: ["/usr/local/bin/rsp"]
+    command: ["--help"]
+
+  test:
+    image: lechiffre-toolchain:local
+    build:
+      context: .
+      target: toolchain
+    working_dir: /workspace
+    entrypoint: ["/bin/sh", "/workspace/docker/verify.sh"]
+    volumes:
+      - .:/workspace:ro
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-target:/cargo-target
+
+  format:
+    image: lechiffre-toolchain:local
+    build:
+      context: .
+      target: toolchain
+    profiles: ["dev"]
+    working_dir: /workspace
+    user: "${LOCAL_UID:?Run sh docker/init.sh}:${LOCAL_GID:?Run sh docker/init.sh}"
+    environment:
+      HOME: /tmp
+    entrypoint: ["cargo", "fmt", "--all"]
+    volumes:
+      - .:/workspace
+
+volumes:
+  cargo-registry:
+  cargo-target:

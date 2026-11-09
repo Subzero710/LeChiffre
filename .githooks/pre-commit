@@ -1,40 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(git rev-parse --show-toplevel)"
-cd "$repo_root"
-
-# Never let rustfmt rewrite unstaged Rust work behind the user's back.
-if ! git diff --quiet -- '*.rs'; then
-    echo "pre-commit: unstaged Rust changes detected." >&2
-    echo "Stage or stash them before committing so rustfmt cannot mix changes." >&2
-    exit 1
-fi
-
-staged_files="$(mktemp)"
-trap 'rm -f "$staged_files"' EXIT
-
-git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' > "$staged_files"
-
-# Nothing Rust-related is staged, so formatting cannot affect this commit.
-if [[ ! -s "$staged_files" ]]; then
-    exit 0
-fi
-
-echo "pre-commit: cargo fmt --all"
-cargo fmt --all
-
-# Re-stage only Rust files that were already staged before rustfmt ran.
-while IFS= read -r -d '' file; do
-    git add -- "$file"
-done < "$staged_files"
-
-# Assert the exact same formatting rule as CI.
-cargo fmt --all -- --check
-
-if ! git diff --cached --check; then
-    echo "pre-commit: staged diff contains whitespace errors." >&2
-    exit 1
-fi
-
-echo "pre-commit: formatting OK"
+# Hooks must work on machines without Docker, sudo or a Rust toolchain.
+# Validate only staged whitespace; Rust formatting, Clippy and tests run in CI.
+cd "$(git rev-parse --show-toplevel)"
+git diff --cached --check
