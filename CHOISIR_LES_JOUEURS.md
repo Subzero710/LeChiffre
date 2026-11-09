@@ -1,3 +1,9 @@
+# Nouveau : profils JSON, versions NoRegrets et interface graphique
+
+L'archive s'appelle désormais `NoRegret.zip`. Pour sélectionner NoRegrets comme
+les autres agents et comparer plusieurs blueprints dans la TUI rs_poker, suivre
+`MODE_D_EMPLOI_NOREGRET.md`. Le mode `table` décrit ci-dessous reste disponible.
+
 # Choisir chaque joueur d'une table de 2 à 6
 
 Les résultats précédents marqués **HU** concernent deux joueurs. HU signifie

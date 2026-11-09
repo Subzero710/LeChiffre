@@ -1,3 +1,10 @@
+# Note du 9 novembre 2026
+
+La correction du fast-forward CFR est incluse dans `NoRegret.zip`. Les anciens
+scores de duels impliquant CFR doivent être refaits ; le réglage `uniform`
+seul ne masquait pas ses cartes dans le fast-forward à la racine. Les résultats
+contre les autres agents restent des mesures historiques de leurs entraînements.
+
 # Validation NoRegrets comme Agent rs_poker — 30 octobre 2026
 
 Le nouveau `NoRegretsAgent` implémente réellement `rs_poker::arena::Agent`.

@@ -1,3 +1,4 @@
+pub mod arena_config;
 pub mod bridge;
 pub mod reference;
 pub mod rs_agent;

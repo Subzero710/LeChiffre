@@ -1,3 +1,10 @@
+# Note du 9 novembre 2026
+
+Les scores ci-dessous sont historiques. Cette table contenait un agent CFR dont
+le mode rapide utilisait encore les vraies cartes cachées adverses malgré
+`uniform`. Le défaut est corrigé dans `NoRegret.zip` : refaire la comparaison
+avant d'utiliser ce tableau comme classement. Voir `ARENA_VERSIONS.md`.
+
 # Table configurable 2 à 6 joueurs — validation du 30 octobre 2026
 
 Le NoRegrets public conserve son moteur et son véritable entraînement MCCFR.

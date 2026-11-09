@@ -236,6 +236,10 @@ impl NoRegretsAgent {
             choices: HashMap::new(),
         }
     }
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
     pub fn stats(&self) -> Arc<Mutex<AgentStats>> {
         self.stats.clone()
     }
