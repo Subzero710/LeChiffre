@@ -27,11 +27,8 @@ jobs:
           docker info >/dev/null
           docker compose version
 
-      - name: Prepare local bind mounts and UID/GID
-        run: sh docker/init.sh
-
       - name: Build production and toolchain images
-        run: docker compose build
+        run: docker compose --profile ci build
 
       - name: Rust formatting, Clippy and tests (app + rs-poker)
         run: docker compose run --rm -T test

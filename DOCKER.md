@@ -1,168 +1,106 @@
-# Docker — LeChiffre (application principale uniquement)
+# LeChiffre — Docker
 
-This deployment is for **LeChiffre**, its existing **rs-poker** engine and
-**agents**, and the **hierarchical Behavioral Engine Z0/Z1/Z2**. All Rust
-compilation, CLI execution, source import, Parquet conversion, training,
-evaluation, checkpoint resume and quality checks run in Docker. The separate
-`crates/lechiffre-sdcfr/` and `crates/lechiffre-nlhe/` experiments are excluded
-from the build context and images; the source files remain in the repository.
+Docker **builds and runs** the existing LeChiffre CLI, the vendored `rs-poker`
+engine and its built-in agents, and the Behavioral Engine Z0/Z1/Z2. The
+experimental `crates/lechiffre-sdcfr` and `crates/lechiffre-nlhe` are not built.
+This setup does **not** change the application source or project layout.
 
-## Host prerequisites
+## Invariants
 
-Git, Docker Engine (or Docker Desktop with a Linux/WSL shell) and Docker Compose
-V2. **Do not install Rust, Cargo, Clippy or rustfmt on the host.** Network access
-is needed on first build for the base images and crates.io dependencies. Docker
-Engine access is an OS-level requirement, not something the project modifies.
-On a host where `docker compose` requires `sudo`, only explicit manually-run
-Docker commands need that privilege; Git hooks and CI never call `sudo` or
-silently grant access to the daemon.
+- No `docker/init.sh`, `.env` generation, UID/GID discovery or prestart scripts.
+- No implicit `mkdir`, `chown`, host permission changes, or Git configuration
+  changes. Neither `build` nor the default `run` commands create host folders.
+- Compose defines **no persistent volumes** or writable project bind mounts.
+- Runtime processes run with an unprivileged numeric UID/GID (65532:65532).
+- No network ports or long-running service dependencies; these are CLI jobs.
+- The only automatic runtime output is stdout/stderr. Results not explicitly
+  mounted remain inside a disposable container and are discarded with `--rm`.
+- Docker Engine access is a host prerequisite. This configuration never uses
+  `sudo` internally and never changes access to the Docker daemon. If this
+  machine requires `sudo docker`, use it explicitly for Docker commands only.
 
-```sh
-git clone https://github.com/Subzero710/LeChiffre.git
-cd LeChiffre
-sh docker/init.sh
-docker compose build
-```
+## Run the existing programs
 
-`docker/init.sh` creates an `.env` containing the **actual** numeric host
-UID/GID, plus `inputs/`, `data/`, `models/` and `runs/`. If `.env` already exists,
-the script validates it and does not overwrite it. `LOCAL_UID` and `LOCAL_GID`
-are mandatory; Compose rejects missing values. Do not simply assume that the
-example UID/GID are correct for your machine.
-
-The initialization script also adds local exclusion rules to `.git/info/exclude`
-for `.env`, `inputs/`, `data/`, `models/`, and `runs/`, without modifying
-your checkout's `.gitignore`. This protects the local clone; repeat the
-initialization step in every new clone.
-
-The root and vendored `Cargo.lock` files are required by `--locked` builds.
-The Docker build uses Rust 1.99.1 and a portable Linux CPU baseline (instead
-of the vendored crate's x86-64-v3 optimization). Supported Docker platforms
-must support the upstream Rust toolchain and Debian bookworm images.
-
-## One-off jobs
-
-These are CLI jobs; no permanently running server or exposed port is needed.
-The host directories are bind-mounted, so removing a container never removes
-files written to `data/`, `models/` or `runs/`. Runtime jobs start in the
-writable `/workspace/runs` directory; provide absolute paths for inputs.
+From the repository root, with Docker Engine and Compose V2 installed:
 
 ```sh
-# LeChiffre's existing random simulation.
-docker compose run --rm app --simulate-random
+# Build the runtime image. To build the test toolchain too, enable the CI profile.
+sudo docker compose build
 
-# Existing rs-poker agents; configs are read from ./agents in the host checkout.
-docker compose run --rm poker arena compare /workspace/agents -n 1000 -p 2
+# A single LeChiffre random-agent simulation.
+sudo docker compose run --rm app --simulate-random
 
-# Other supported rs-poker CLI subcommands are passed through unchanged.
-docker compose run --rm poker holdem rank AcKdQhJsTs
+# Existing rs-poker arena agents, including CFR Basic and CFR Simple.
+sudo docker compose run --rm poker arena compare /workspace/agents -n 100 -p 2
+
+# rs-poker CLI help and hand evaluation.
+sudo docker compose run --rm poker --help
+sudo docker compose run --rm poker holdem rank AcKdQhJsTs
 ```
 
-## Behavioral Engine — real datasets
+`docker compose up` executes the default one-shot CLI jobs (`app` and `poker`),
+then exits. It does not start a long-running application server. Use
+`docker compose run --rm` for a specific command, especially the Arena.
 
-Place original CSV/JSON source sessions under `inputs/` (read-only inside
-containers), and write your real training JSON under `configs/`. The checked-in
-`hierarchical.example.json` is a **syntax example**, not a valid configuration
-for arbitrary datasets. Each `source-file session-id` pair must be provided
-consistently for import, training, validation and resume, because exact replay
-legality is reconstructed from those original session files.
+The `agents/` and `configs/` already in the repository are copied into the
+image. No host directory is initialized or created for them. You must rebuild
+an image to incorporate changes made to these files.
+
+## Explicit dataset access for the Behavioral Engine
+
+The default services have **no** host data mounts. If you want to import,
+train, evaluate or resume with private data, choose the source and output paths
+and opt in to exposing an **already existing** host directory. This example
+mounts the existing current repository directory at `/host` and uses the
+**calling user's** UID/GID for any deliberately requested output files:
 
 ```sh
-# 1. Import the source and build the Parquet dataset (new output directory).
-docker compose run --rm behavioural \
-  --export-poker-with-the-boys-parquet /workspace/data/parquet \
-  /workspace/inputs/source.csv session-id
-
-# 2. Inspect the resulting dataset.
-docker compose run --rm behavioural \
-  --behaviour-dataset-stats /workspace/data/parquet
-
-# 3. Train the hierarchical Behavioral Engine. Use a real matching config.
-docker compose run --rm behavioural \
-  --train-behavioural /workspace/configs/train.json \
-  /workspace/data/parquet /workspace/models/model-v1.json \
-  /workspace/inputs/source.csv session-id
-
-# 4. Evaluate the checkpoint (prospective split remains unchanged).
-docker compose run --rm behavioural \
-  --evaluate-behavioural /workspace/models/model-v1.json \
-  /workspace/data/parquet /workspace/inputs/source.csv session-id
-
-# 5. Resume to a NEW checkpoint, never overwrite the input.
-docker compose run --rm behavioural \
-  --resume-behavioural /workspace/models/model-v1.json \
-  /workspace/data/parquet /workspace/models/model-v2.json \
-  /workspace/configs/hierarchical-resume.example.json \
-  /workspace/inputs/source.csv session-id
+# For example only: replace file paths and session id with your own real inputs.
+# The mounted source directory ($PWD) already exists; no new host folder is
+# created by Compose. Output files/dirs are created only by the requested CLI.
+sudo docker compose run --rm -T \
+  --user "$(id -u):$(id -g)" \
+  --volume "$PWD:/host" \
+  behavioural \
+  --export-poker-with-the-boys-parquet /host/chemin/vers/sortie-parquet \
+  /host/chemin/vers/source.csv id-session
 ```
 
-Additional source sessions are appended as `file session-id` pairs. The
-Behavioral Engine validates exact `rs-poker` replay legality, global split,
-dataset fingerprint and model/checkpoint compatibility. **Docker does not
-modify, bypass or relax these checks**. Old A/G checkpoints are refused by the
-application; no automatic migration or training fallback is introduced.
-
-### Individual Z1 baselines
+For subsequent training, use the same *explicit* `--user` and `--volume` options,
+with the existing CLI's exact arguments. For example:
 
 ```sh
-# First version; the output path must not exist.
-docker compose run --rm behavioural \
-  --create-player-baseline /workspace/models/model-v1.json \
-  /workspace/data/parquet 42 800 /workspace/models/player42-v1.json \
-  /workspace/inputs/source.csv session-id
-
-# Only process new hands before index 1000, writing a separate checkpoint.
-docker compose run --rm behavioural \
-  --advance-player-baseline /workspace/models/model-v1.json \
-  /workspace/data/parquet 42 1000 \
-  /workspace/models/player42-v1.json /workspace/models/player42-v2.json \
-  /workspace/inputs/source.csv session-id
+sudo docker compose run --rm -T \
+  --user "$(id -u):$(id -g)" --volume "$PWD:/host" \
+  behavioural \
+  --train-behavioural /host/chemin/vers/config.json \
+  /host/chemin/vers/parquet-existant /host/chemin/vers/nouveau-modele.json \
+  /host/chemin/vers/source.csv id-session
 ```
 
-The checkpoint paths in these examples are illustrative. Select subject IDs,
-indices and source sessions from your actual dataset. The format and strict
-compatibility conditions are documented in `docs/BEHAVIOURAL_ENGINE.md`.
+The paths above are **examples**, not paths asserted to exist. Pass real,
+existing input paths; outputs are created by the program only when requested. The CLI retains its strict exact-legality, chronological split,
+checkpoint and resume checks. See `docs/BEHAVIOURAL_ENGINE.md`.
 
-## Development, testing and CI
+The explicit `--volume` form can create an absent host **source** path with
+some Compose versions; therefore mount **only a path you have checked already
+exists** (`$PWD` is an existing directory when run from the project root).
+Never mount missing paths implicitly from `compose.yaml`.
+
+## Tests and CI
 
 ```sh
-# All root quality checks, plus explicit rs-poker tests and doc tests.
-docker compose run --rm test
-
-# Format the root Rust source tree on the host through a Docker toolchain.
-docker compose run --rm format
-
-# Run the exact root formatting check without changing any files.
-docker compose run --rm format -- --check
+# Same checks as GitHub Actions: no local files written by the test container.
+sudo docker compose --profile ci build
+sudo docker compose run --rm -T test
 ```
 
-The `test` service mounts source **read-only** and uses persistent Docker named
-volumes `cargo-registry` and `cargo-target` for Cargo dependencies and build
-artifacts. The `format` service mounts the checkout writable and runs with the
-host UID/GID, so formatted source files are not owned by root. Git hooks never invoke Docker, Rust, `sudo` or change host permissions.
-The optional `pre-commit` hook only runs `git diff --cached --check`; there is
-no `pre-push` hook. All Rust quality checks and smoke tests run in GitHub
-Actions, using Docker as the hosted runner user without `sudo`. CI uses
-`docker compose run --rm -T` because workflows have no interactive terminal.
-A self-hosted runner must provide unprivileged Docker access in advance; the
-workflow checks this and fails rather than escalating privileges.
+`test` mounts the **existing** checkout read-only. Build products and temporary
+Cargo files are inside the ephemeral test container. The CI runs Docker as the
+GitHub runner user and does not require `sudo`; user Git hooks do not run Docker.
+The build and test processes may create internal image layers and transient
+container filesystems; they do not create project directories on the host.
 
-`docker compose run --rm test` verifies build/test correctness, not predictive
-quality on private real-world poker histories. To validate the Behavioral
-Engine scientifically, import a real dataset and run the training/evaluation
-commands above with the appropriate chronological split.
-
-## Data and security
-
-- `inputs/` is mounted read-only: raw, private source histories.
-- `configs/` and `agents/` are mounted read-only: runtime configuration.
-- `data/`, `models/`, `runs/` are persistent writable bind mounts.
-- `.env`, source histories, data, models and runs are ignored locally through
-  `.git/info/exclude` (set by `docker/init.sh`) and excluded from the Docker
-  build context; **no real poker dataset is baked into an image**.
-- Runtime containers use the numeric host UID/GID and do not require root.
-- All services are CLI jobs with no published ports.
-
-On failure the process exits with a non-zero status; there is no silent
-checkpoint migration, automatic restart or alternate trainer. Keep model
-checkpoints with their matching Parquet data and original sources for resume.
+Removing obsolete files left by an older dockerization (`.env`, `inputs/`,
+`data/`, `models/`, `runs/`, or `.git/info/exclude` entries) is **not performed**.
+Review these manually if they already exist; this patch never deletes user data.

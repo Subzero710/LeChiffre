@@ -15,7 +15,13 @@ ENV RUSTFLAGS="-C link-arg=-Wl,-zstack-size=47185920 -C force-frame-pointers=yes
 WORKDIR /workspace
 
 FROM toolchain AS build
-COPY . /workspace
+# Copy only application sources and their required local dependencies.
+# Never copy host datasets, checkpoints, .env files or unrelated experiments.
+COPY Cargo.toml Cargo.lock /workspace/
+COPY src /workspace/src
+COPY vendor/rs-poker /workspace/vendor/rs-poker
+COPY configs /workspace/configs
+COPY agents /workspace/agents
 RUN --mount=type=cache,id=lechiffre-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=lechiffre-build-target,target=/cargo-target,sharing=locked \
     set -eu; \
@@ -31,9 +37,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /workspace
 ENV HOME=/tmp
+USER 65532:65532
 COPY --from=build /dist/lechiffre /usr/local/bin/lechiffre
 COPY --from=build /dist/rsp /usr/local/bin/rsp
 COPY agents /workspace/agents
 COPY configs /workspace/configs
-# Production images do not contain Cargo, the Rust source tree or the two
-# experimental crates. Runtime sources and data are provided by bind mounts.
+# Production images contain no Rust sources or experimental crates.
+# No user data or host directories are mounted unless requested explicitly.
