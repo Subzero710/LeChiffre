@@ -1,0 +1,18 @@
+# Never send local data, checkpoints, secrets or build caches to Docker.
+.git
+.gitignore
+.env
+.env.*
+**/target/
+**/.idea/
+/inputs/
+/data/
+/models/
+/runs/
+
+# Separate experimental implementations are NOT part of this Docker project.
+/crates/
+
+# Local generated artifacts.
+*.patch
+*.zip

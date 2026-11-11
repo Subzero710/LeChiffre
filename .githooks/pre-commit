@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Hooks must work on machines without Docker, sudo or a Rust toolchain.
+# Validate only staged whitespace; Rust formatting, Clippy and tests run in CI.
+cd "$(git rev-parse --show-toplevel)"
+git diff --cached --check

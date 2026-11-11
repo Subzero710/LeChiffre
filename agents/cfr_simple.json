@@ -1,0 +1,27 @@
+{
+  "type": "cfr_simple",
+  "name": "CFRSimpleAgent",
+  "hand_estimator": "uniform",
+  "exploration": {
+    "budget": [
+      {
+        "type": "deadline",
+        "millis": 2048
+      },
+      {
+        "type": "per_depth_iterations",
+        "counts": [128, 3, 1, 1, 1],
+        "fallback": 1
+      },
+      {
+        "type": "regret_below",
+        "epsilon": 0.001,
+        "min_iterations": 8
+      },
+      {
+        "type": "max_width",
+        "recursive_widths": [8, 1, 1]
+      }
+    ]
+  }
+}

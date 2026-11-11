@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docker:
+    name: Docker build, quality gate and smoke tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Verify unprivileged Docker access
+        run: |
+          docker info >/dev/null
+          docker compose version
+
+      - name: Build production and toolchain images
+        run: docker compose --profile ci build
+
+      - name: Rust formatting, Clippy and tests (app + rs-poker)
+        run: docker compose run --rm -T test
+
+      - name: Application smoke test
+        run: docker compose run --rm -T app --simulate-random
+
+      - name: Poker engine CLI smoke test
+        run: docker compose run --rm -T poker holdem rank AcKdQhJsTs

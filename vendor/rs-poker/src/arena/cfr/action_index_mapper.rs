@@ -474,7 +474,10 @@ mod tests {
             .blinds(Chips::MAX, Chips::MAX / 2)
             .build()
             .unwrap();
-        assert_eq!(compute_effective_range(&game_state), (Chips::MAX, Chips::MAX));
+        assert_eq!(
+            compute_effective_range(&game_state),
+            (Chips::MAX, Chips::MAX)
+        );
     }
 
     // === Configuration tests ===

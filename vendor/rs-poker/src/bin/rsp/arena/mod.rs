@@ -4,6 +4,7 @@ pub mod charts;
 pub mod compare;
 pub mod diag;
 pub mod generate;
+pub mod rotate;
 pub mod verify;
 
 #[derive(Args)]
@@ -22,6 +23,8 @@ enum ArenaCommand {
     Diag(diag::DiagArgs),
     /// Generate Open Hand History files from poker simulations
     Generate(generate::GenerateArgs),
+    /// Benchmark agents in persistent-stack table rotations
+    Rotate(rotate::RotateArgs),
     /// Verify agent config files load correctly
     Verify(verify::VerifyArgs),
 }
@@ -37,6 +40,8 @@ pub enum ArenaError {
     #[error(transparent)]
     Generate(#[from] generate::GenerateError),
     #[error(transparent)]
+    Rotate(#[from] rotate::RotateError),
+    #[error(transparent)]
     Verify(#[from] verify::VerifyError),
 }
 
@@ -49,6 +54,7 @@ pub async fn run(
         ArenaCommand::Compare(a) => compare::run(a, &default_budget).await?,
         ArenaCommand::Diag(a) => diag::run(a)?,
         ArenaCommand::Generate(a) => generate::run(a, &default_budget).await?,
+        ArenaCommand::Rotate(a) => rotate::run(a, &default_budget).await?,
         ArenaCommand::Verify(a) => verify::run(a)?,
     }
     Ok(())

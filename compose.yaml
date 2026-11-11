@@ -1,0 +1,45 @@
+# LeChiffre: build and execute existing CLIs. No host directory is created or
+# changed by Compose. Runtime inputs/outputs require explicit user bind mounts.
+x-runtime: &runtime
+  image: lechiffre-runtime:local
+  build:
+    context: .
+    target: runtime
+  working_dir: /workspace
+  init: true
+
+services:
+  app:
+    <<: *runtime
+    entrypoint: ["/usr/local/bin/lechiffre"]
+    command: ["--simulate-random"]
+
+  poker:
+    <<: *runtime
+    entrypoint: ["/usr/local/bin/rsp"]
+    command: ["--help"]
+
+  behavioural:
+    <<: *runtime
+    profiles: ["jobs"]
+    entrypoint: ["/usr/local/bin/lechiffre"]
+    # Always supply an explicit behavioural CLI command with `compose run`.
+    command: ["--behaviour-dataset-stats"]
+
+  test:
+    image: lechiffre-toolchain:local
+    build:
+      context: .
+      target: toolchain
+    profiles: ["ci"]
+    working_dir: /workspace
+    entrypoint: ["/bin/sh", "/workspace/docker/verify.sh"]
+    # Source tree exists already and is strictly read-only. Cargo artifacts
+    # remain inside the disposable container, not under the project checkout.
+    volumes:
+      - type: bind
+        source: .
+        target: /workspace
+        read_only: true
+        bind:
+          create_host_path: false

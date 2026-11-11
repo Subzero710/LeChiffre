@@ -106,11 +106,11 @@ pub struct GameStateBuilder {
     big_blind: Option<Chips>,
 
     // Optional with defaults
-    small_blind: Option<Chips>,               // Default: big_blind / 2
-    ante: Option<Chips>,                      // Default: 0
-    dealer_idx: Option<usize>,                // Default: 0
-    max_raises_per_round: Option<Option<u8>>, // Default: Some(3)
-    rake: Option<RakeConfig>,                 // Default: no rake
+    small_blind: Option<Chips>,                // Default: big_blind / 2
+    ante: Option<Chips>,                       // Default: 0
+    dealer_idx: Option<usize>,                 // Default: 0
+    max_raises_per_round: Option<Option<u8>>,  // Default: Some(3)
+    rake: Option<RakeConfig>,                  // Default: no rake
     preflop_three_bet_or_higher: Option<bool>, // Default: false
 
     // For mid-game states (defaults for new games)
@@ -850,10 +850,7 @@ impl GameState {
 
         self.round_data.do_bet(extra_amount, is_forced);
 
-        if self.round == Round::Preflop
-            && !is_forced
-            && self.round_data.total_raise_count >= 2
-        {
+        if self.round == Round::Preflop && !is_forced && self.round_data.total_raise_count >= 2 {
             self.preflop_three_bet_or_higher = true;
         }
 
