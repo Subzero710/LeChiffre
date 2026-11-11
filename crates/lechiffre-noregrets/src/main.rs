@@ -183,7 +183,7 @@ async fn run() -> Result<(), String> {
                         "calling",
                         "all_in",
                         "folding",
-                        "random_pot_control",
+                        "equity",
                         "cfr_basic",
                         "cfr_simple",
                     ]

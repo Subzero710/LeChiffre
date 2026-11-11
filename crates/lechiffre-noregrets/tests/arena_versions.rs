@@ -36,7 +36,7 @@ async fn different_blueprints_keep_separate_names_models_and_history() {
             json!({"type":"noregrets","name":name,"reference":model}),
         );
     }
-    for kind in ["random", "calling", "all_in", "random_pot_control"] {
+    for kind in ["random", "calling", "all_in", "equity"] {
         write(&configs.join(format!("{kind}.json")), json!({"type":kind}));
     }
     let table = prepare_directory(&configs, None, None).unwrap();

@@ -1,5 +1,8 @@
 # Comparateur natif et modèles entraînés — 11 novembre 2026
 
+Historique de l'ajout du comparateur, avant fusion de master. Pour la version
+fusionnée et corrigée, voir `ALIGNEMENT_EQUITY.md` et `CORRIGER_APRES_FUSION.md`.
+
 ## Changement
 
 `lechiffre-arena compare` charge les JSON NoRegrets et rs_poker puis appelle

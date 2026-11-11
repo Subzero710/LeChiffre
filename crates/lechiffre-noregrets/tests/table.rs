@@ -59,7 +59,7 @@ async fn existing_agents_work_at_every_supported_table_size() {
             "calling",
             "all_in",
             "folding",
-            "random_pot_control",
+            "equity",
             "cfr_basic",
         ];
         let values: Vec<Value> = types[..n].iter().map(|t| json!({"type":t})).collect();

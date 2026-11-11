@@ -122,12 +122,6 @@ impl PreparedTable {
                 }
                 seats.push(Seat {label:label.clone(),config:serde_json::json!({"type":"noregrets","name":label,"reference":path,"metadata":r.metadata}),bot:Bot::NoRegrets(r)});
             } else {
-                let mut value = value;
-                // Same convenience default as match-agents; other settings
-                // remain the supplied ConfigAgentBuilder configuration.
-                if kind == "random_pot_control" && value.get("percent_call").is_none() {
-                    value["percent_call"] = serde_json::json!([0.5, 0.3]);
-                }
                 let mut cfg: AgentConfig =
                     serde_json::from_value(value).map_err(|e| e.to_string())?;
                 cfg.validate().map_err(|e| e.to_string())?;

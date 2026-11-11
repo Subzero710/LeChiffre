@@ -12,10 +12,9 @@ use std::sync::Arc;
 pub fn opponent_config(name: &str) -> Result<AgentConfig, String> {
     let value=match name {
         "random"=>serde_json::json!({"type":"random"}),
-        "random_pot_control"=>serde_json::json!({"type":"random_pot_control","percent_call":[0.5,0.3]}),
-        "calling"|"all_in"|"folding"=>serde_json::json!({"type":name}),
+        "equity"|"calling"|"all_in"|"folding"=>serde_json::json!({"type":name}),
         "cfr_basic"|"cfr_simple"=>serde_json::json!({"type":name,"hand_estimator":"uniform"}),
-        _=>return Err("unknown rs_poker opponent: use random, random_pot_control, calling, all_in, folding, cfr_basic, cfr_simple, all or --opponent-config".into()),
+        _=>return Err("unknown rs_poker opponent: use random, equity, calling, all_in, folding, cfr_basic, cfr_simple, all or --opponent-config".into()),
     };
     let mut cfg: AgentConfig = serde_json::from_value(value).map_err(|e| e.to_string())?;
     configure_cfr(&mut cfg)?;

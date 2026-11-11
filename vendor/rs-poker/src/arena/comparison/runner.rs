@@ -203,6 +203,9 @@ impl ArenaComparison {
             // Comparison-level rake must be part of the state before it is cloned
             // into permutations and CFR contexts.
             game_state.rake = self.config.rake;
+            if let Some(max) = self.max_raises_override {
+                game_state.max_raises_per_round = max;
+            }
 
             // Run all permutations with this game state
             let mut perm_ctx = PermutationContext {

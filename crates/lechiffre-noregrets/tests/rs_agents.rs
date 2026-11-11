@@ -21,7 +21,7 @@ async fn actual_existing_agents_run_inside_the_real_simulator() {
         "calling",
         "all_in",
         "folding",
-        "random_pot_control",
+        "equity",
         "cfr_basic",
         "cfr_simple",
     ] {

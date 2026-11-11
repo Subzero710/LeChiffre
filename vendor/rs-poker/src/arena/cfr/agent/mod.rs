@@ -797,6 +797,9 @@ mod tests {
         let budget = budget_for_schedule(&[]);
         let mut agent = CFRAgentBuilder::<ConfigurableActionGenerator>::new()
             .name("CFR-ff")
+            // As in the preceding river test, the expected fold is against
+            // these exact hole cards, not against a randomly sampled range.
+            .estimator(Arc::new(KnownHandsEstimator))
             .player_idx(1)
             .cfr_state(cfr_state.clone())
             .traversal_set(traversal_set)
@@ -2220,6 +2223,9 @@ mod tests {
 
         let mut agent = CFRAgentBuilder::<BasicCFRActionGenerator>::new()
             .name("CFR-enum-stability")
+            // Isolate deterministic board enumeration from the default
+            // opponent-range sampling. These fixed hands belong to this fixture.
+            .estimator(Arc::new(crate::arena::hand_estimator::KnownHandsEstimator))
             .player_idx(1) // P1 acts
             .cfr_state(cfr_state.clone())
             .traversal_set(traversal_set)
@@ -2243,7 +2249,8 @@ mod tests {
     /// The ≤2-card board-enumeration path (`fast_forward_enumerate_showdowns`,
     /// called when `cards_needed ≤ 2`) does NO sampling — it iterates a fixed
     /// set of card combinations from the remaining deck. Because the set of
-    /// remaining cards is determined solely by the fixed game state (holes +
+    /// remaining cards is determined by the explicitly fixed opponent hands
+    /// (`KnownHandsEstimator` in this fixture) and the game state (holes +
     /// board), the reward signal and therefore the PCFR+ update are fully
     /// deterministic.
     ///
