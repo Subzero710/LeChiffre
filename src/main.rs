@@ -173,6 +173,143 @@ fn print_behaviour_dataset_stats(args: &[String]) {
     print_dataset_statistics(&stats);
 }
 
+/// Atomically publishes new JSON without replacing an existing output.
+fn commit_new_json_manifest(
+    output: &std::path::Path,
+    manifest: &serde_json::Value,
+) -> Result<(), String> {
+    use std::io::Write;
+
+    let filename = output
+        .file_name()
+        .ok_or_else(|| format!("invalid output manifest path: {}", output.display()))?
+        .to_string_lossy();
+    let temporary = output.with_file_name(format!(
+        ".{filename}.{}.inprogress",
+        std::process::id()
+    ));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|e| format!("cannot create {}: {e}", temporary.display()))?;
+    let result: Result<(), String> = (|| {
+        serde_json::to_writer_pretty(&mut file, manifest).map_err(|e| e.to_string())?;
+        file.write_all(b"\n").map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        // On Unix, hard_link fails with AlreadyExists instead of overwriting.
+        std::fs::hard_link(&temporary, output).map_err(|e| {
+            format!(
+                "cannot commit new manifest {} (existing files are never replaced): {e}",
+                output.display()
+            )
+        })?;
+        Ok(())
+    })();
+    drop(file);
+    let removed = std::fs::remove_file(&temporary);
+    result?;
+    removed.map_err(|e| format!("could not clean up {}: {e}", temporary.display()))?;
+    Ok(())
+}
+
+/// Exports an immutable manifest of complete hands, not a split of event rows.
+/// `hand_index` denotes ingestion order only; source-time chronology is unverified.
+fn split_behaviour_dataset_hands(args: &[String]) -> Result<(), String> {
+    use lechiffre::datasets::behaviour_parquet_loader::HAND_SPLIT_ALGORITHM_VERSION;
+    use serde_json::json;
+
+    if args.len() != 4 {
+        return Err(
+            "usage: --split-behaviour-dataset-hands <parquet-dir> <new-manifest.json>".into(),
+        );
+    }
+    let dataset = BehaviourParquetDataset::open(&args[2]).map_err(|e| e.to_string())?;
+    let split = dataset
+        .split_hands_by_ingestion(7_000, 1_500, 1_500)
+        .map_err(|e| e.to_string())?;
+    let stats = dataset.summary();
+
+    // Existing hierarchical query hands are used for training, NOT validation.
+    // These strict train/validation/test boundaries are intentionally not wired
+    // into HierarchicalHandSplit, to prevent validation-to-training leakage.
+    let to_entries = |hands: &[lechiffre::datasets::behaviour_parquet_loader::HandPartitionEntry]| {
+        hands.iter().map(|entry| {
+            json!({
+                "hand_id": entry.hand_id.as_str(),
+                "hand_index": entry.hand_index,
+                "decisions": entry.decision_count,
+                "players_at_table": entry.players_at_table,
+            })
+        }).collect::<Vec<_>>()
+    };
+    let subject_counts = split.subject_hand_counts().iter().map(|(&subject_id, &counts)| {
+        json!({
+            "subject_id": subject_id,
+            "train_hands": counts[0],
+            "validation_hands": counts[1],
+            "test_hands": counts[2],
+        })
+    }).collect::<Vec<_>>();
+    let decisions = split.decision_counts();
+    let memberships = split.subject_hand_rows();
+    let manifest = json!({
+        "format": "lechiffre.ingestion-hand-split.v1",
+        "algorithm_version": HAND_SPLIT_ALGORITHM_VERSION,
+        "ordering": "persisted_hand_index_ingestion_order_not_verified_wall_clock_chronology",
+        "ratios_basis_points": {"train": 7000, "validation": 1500, "test": 1500},
+        "rounding": "floor_train_and_validation_remainder_to_test",
+        "dataset": {
+            "hands": stats.hands_written,
+            "decisions": stats.events_written,
+            "subject_hand_rows": stats.subject_hand_rows_written,
+            "fingerprint_fnv128_noncryptographic": dataset.dataset_fingerprint(),
+        },
+        "boundaries": {
+            "first_validation_hand_index": split.first_validation_hand_index(),
+            "first_test_hand_index": split.first_test_hand_index(),
+        },
+        "hierarchical_training_integration": "not_compatible_query_partition_is_used_for_training",
+        "partitions": {
+            "train": {
+                "hands": split.train().len(),
+                "decisions": decisions[0],
+                "subject_hand_rows": memberships[0],
+                "entries": to_entries(split.train()),
+            },
+            "validation": {
+                "hands": split.validation().len(),
+                "decisions": decisions[1],
+                "subject_hand_rows": memberships[1],
+                "entries": to_entries(split.validation()),
+            },
+            "test": {
+                "hands": split.test().len(),
+                "decisions": decisions[2],
+                "subject_hand_rows": memberships[2],
+                "entries": to_entries(split.test()),
+            },
+        },
+        "subjects": subject_counts,
+    });
+
+    let output = std::path::Path::new(&args[3]);
+    commit_new_json_manifest(output, &manifest)?;
+    println!(
+        "manifest={} train_hands={} validation_hands={} test_hands={} train_decisions={} validation_decisions={} test_decisions={} first_validation_hand_index={} first_test_hand_index={} ordering=ingestion_not_verified_chronological",
+        output.display(),
+        split.train().len(),
+        split.validation().len(),
+        split.test().len(),
+        decisions[0],
+        decisions[1],
+        decisions[2],
+        split.first_validation_hand_index(),
+        split.first_test_hand_index(),
+    );
+    Ok(())
+}
+
 /// Strict hierarchical run specification. No compatibility with the old A/G config.
 struct BehaviourRunConfig {
     split: lechiffre::datasets::behaviour_parquet_loader::HierarchicalHandSplit,
@@ -729,6 +866,13 @@ fn player_baseline_cli(args: &[String], advance: bool) -> Result<(), String> {
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 && args[1] == "--split-behaviour-dataset-hands" {
+        if let Err(error) = split_behaviour_dataset_hands(&args) {
+            eprintln!("behavioural hand split failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if args.len() > 1 {
         let result = match args[1].as_str() {
             "--train-behavioural" => Some(train_hierarchical(&args)),
@@ -860,6 +1004,22 @@ async fn main() {
 #[cfg(test)]
 mod hierarchical_cli_tests {
     use super::*;
+
+    #[test]
+    fn hand_split_manifest_refuses_overwriting_an_existing_file() {
+        let path = std::env::temp_dir().join(format!(
+            "lechiffre-hand-split-{}.json",
+            std::process::id()
+        ));
+        let original = serde_json::json!({"format": "first"});
+        let replacement = serde_json::json!({"format": "second"});
+        commit_new_json_manifest(&path, &original).unwrap();
+        assert!(commit_new_json_manifest(&path, &replacement).is_err());
+        let actual: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(actual, original);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn rejects_obsolete_and_incomplete_configs() {

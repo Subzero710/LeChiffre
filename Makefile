@@ -21,6 +21,7 @@ help:
 	  '  make arena HANDS=100 PLAYERS=2     Compare existing Arena agents' \
 	  '  make poker ARGS="holdem rank AcKdQhJsTs"  Run an rsp CLI command' \
 	  '  make behavioural ARGS="..." RUN_OPTIONS="..."  Run the existing behavioural CLI' \
+  '    --split-behaviour-dataset-hands <parquet-dir> <new-manifest.json>' \
 	  '  make test                          Build toolchain and execute Rust tests' \
 	  '  make smoke                         Build and smoke-test both CLIs' \
 	  '  make ci                            Run tests and CLI smoke tests' \

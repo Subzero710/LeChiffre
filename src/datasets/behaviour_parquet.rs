@@ -1186,6 +1186,33 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]
+    fn split_complete_persisted_hands_in_ingestion_order() {
+        let dir = temp_dataset_dir("hand-split-integration");
+        let hands = (0..20)
+            .map(|n| make_hand(&format!("split-hand-{n}"), Some(0)))
+            .collect::<Vec<_>>();
+        let mut writer = BehaviourParquetDatasetWriter::create(&dir).unwrap();
+        writer.write_hands(&hands, &subject_ids()).unwrap();
+        writer.close().unwrap();
+
+        let loaded = crate::datasets::behaviour_parquet_loader::BehaviourParquetDataset::open(&dir)
+            .unwrap();
+        let split = loaded.split_hands_by_ingestion(7_000, 1_500, 1_500).unwrap();
+        assert_eq!(split.train().len(), 14);
+        assert_eq!(split.validation().len(), 3);
+        assert_eq!(split.test().len(), 3);
+        assert_eq!(split.decision_counts(), [28, 6, 6]);
+        assert_eq!(split.subject_hand_rows(), [28, 6, 6]);
+        assert_eq!(split.first_validation_hand_index(), 14);
+        assert_eq!(split.first_test_hand_index(), 17);
+        assert_eq!(split.subject_hand_counts().len(), 2);
+        assert!(dir.join(EVENTS_FILE_NAME).is_file());
+        assert!(dir.join(SUBJECTS_FILE_NAME).is_file());
+        assert!(dir.join(SUCCESS_FILE_NAME).is_file());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn missing_timing_drops_entire_hand() {
         let dir = temp_dataset_dir("timing");
         let mut writer = BehaviourParquetDatasetWriter::create(&dir).unwrap();

@@ -20,6 +20,43 @@ Le seul trainer est `HierarchicalTrainer` dans `src/datasets/behaviour_parquet_l
 
 La séparation est **globale par `hand_index`** (support < query < validation). Une main rejetée à l'import ou structurellement invalide ne fournit aucun événement. Toute décision exploitée requiert un `LegalActionSpace` issu du replay exact `rs-poker`, jamais inféré à partir de l'action observée.
 
+### Découpage des mains retenues, sans fuite entre décisions
+
+La commande `--split-behaviour-dataset-hands <parquet-dir> <new-manifest.json>`
+crée, en Rust, un manifeste **70 % train / 15 % validation / 15 % test**, en
+comptant les **mains retenues complètes**, jamais les décisions. Les deux
+premières tailles sont arrondies à l'entier inférieur et le reliquat est
+attribué au test. Le manifeste conserve pour chaque main son `hand_id`, son
+`hand_index`, son nombre de décisions et sa taille de table. Il inclut
+l'empreinte déterministe non cryptographique utilisée par les checkpoints.
+Il indique aussi les effectifs disponibles pour chaque sujet pseudonymisé
+dans chaque partition.
+
+Exécution depuis le Makefile existant avec le répertoire de données monté en
+`/host` dans Docker :
+
+```bash
+DATA="$HOME/lechiffre-data-v02"
+RUN_OPTIONS="--user $(id -u):$(id -g) --volume ${DATA}:/host"
+sudo make behavioural RUN_OPTIONS="$RUN_OPTIONS" ARGS="--split-behaviour-dataset-hands /host/parquet-v02-prepared /host/hand-split-v02.json"
+```
+
+Pour 17 611 mains, le découpage comprend 12 327 mains train, 2 641 validation
+et 2 643 test. Tous les événements d'une même main et toutes ses associations
+aux joueurs restent dans une partition unique. Le dataset Parquet d'origine est
+conservé intact ; le chemin du manifeste doit être nouveau.
+
+**Le `hand_index` représente l'ordre d'ingestion, pas un horodatage réel.**
+Le manifeste ne prouve donc pas une séparation temporelle entre les sessions.
+Le trainer hiérarchique actuel utilise **query pour entraîner G et A** ; ses
+frontières ne peuvent donc **pas** être alimentées directement avec les
+frontières train/validation/test du manifeste, au risque d'entraîner sur les
+mains de validation. Le manifeste **n'est pas lu automatiquement** par
+la commande d'entraînement ; une intégration séparée du protocole
+train/validation/test sera nécessaire avant de l'utiliser pour entraîner le
+modèle et mesurer validation et test sans fuite.
+Le contrôle de chronologie réelle nécessite une preuve des dates des sources.
+
 ### Configuration explicite
 
 `configs/hierarchical.example.json` contient **toutes les clés obligatoires**. Il s'agit d'un exemple de syntaxe, non d'hyperparamètres optimisés pour des données réelles : les frontières, comptes de mains et pseudonymes doivent être remplacés par les valeurs de ton dataset. Toute clé inconnue, clé manquante ou champ de longueur incorrecte entraîne une erreur.

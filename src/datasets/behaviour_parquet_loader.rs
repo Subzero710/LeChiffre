@@ -33,6 +33,10 @@ const HAND_INDEX_SEMANTICS: &str =
 const SUBJECT_ID_SEMANTICS: &str = "pseudonymous_grouping_metadata_not_model_feature";
 
 mod analysis;
+mod hand_split;
+pub use hand_split::{
+    HandPartitionEntry, HandSplitError, IngestionHandSplit, HAND_SPLIT_ALGORITHM_VERSION,
+};
 pub use analysis::{
     BehaviourDatasetAnalysisError, BehaviourDatasetStatistics, DatasetPartition,
     FloatDistributionSummary, IntegerDistributionSummary, SPLIT_BASIS_POINTS,
@@ -110,6 +114,12 @@ impl BehaviourParquetDataset {
 
     pub fn subject_count(&self) -> usize {
         self.subjects.len()
+    }
+
+    /// Deterministic noncryptographic fingerprint over loaded events and memberships.
+    /// The hierarchical checkpoint uses this same fingerprint algorithm.
+    pub fn dataset_fingerprint(&self) -> String {
+        training_data::dataset_fingerprint(self)
     }
 
     pub fn subject_ids(&self) -> impl Iterator<Item = u64> + '_ {
