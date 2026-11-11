@@ -9,8 +9,6 @@ gui = ["dep:ratatui", "dep:crossterm", "dep:tachyonfx", "dep:tempfile", "dep:tra
 
 [dependencies]
 noregrets = { package = "pluribus", path = "../../vendor/noregrets" }
-lechiffre-nlhe = { path = "../lechiffre-nlhe" }
-lechiffre-sdcfr = { path = "../lechiffre-sdcfr" }
 rand = { version = "0.9", features = ["small_rng"] }
 rayon = "1.10"
 serde = { version = "1", features = ["derive"] }

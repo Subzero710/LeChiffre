@@ -1,152 +1,155 @@
-# NoRegret.zip — tables graphiques et comparaison des blueprints
+# NoRegret — entraîner un modèle et comparer toutes les positions
 
-Décompresser à la racine de LeChiffre. Exécuter les commandes ci-dessous
-depuis cette racine, dans PowerShell. Le nouveau lanceur utilise les vrais
-agents et le tableau de bord fournis par rs_poker. NoRegrets joue son blueprint,
-sans recherche stratégique en ligne. Aucun changement du dépôt Git distant
-n'est effectué par cette archive.
+Extraire `NoRegret.zip` à la racine de LeChiffre, sur `feature/ia_gto`.
+Exécuter les commandes ci-dessous depuis cette racine, dans PowerShell.
+L'adaptateur est conservé : le lanceur reste `crates/lechiffre-noregrets/Cargo.toml`.
+Il utilise les agents, le simulateur, le comparateur et le tableau de bord de rs_poker.
+Les anciens modules SD-CFR/NLHE ne sont plus nécessaires. Aucun push n'est effectué.
 
-## Une configuration JSON par agent
-
-Les configurations disponibles sont dans `configs/agents/`. Copier dans un
-dossier de sélection exactement **2 à 6 fichiers `.json`**, un par siège.
-L'ordre alphabétique des fichiers détermine les sièges. Les noms restent
-distincts dans les courbes, les historiques et les rapports ; les doublons
-reçoivent un suffixe de siège. Les fichiers `.json.example` sont ignorés.
-
-Exemple : six joueurs, NoRegrets par défaut et cinq agents existants.
+## 1. Entraîner ta version six joueurs à 10 BB
 
 ```powershell
-New-Item -ItemType Directory -Force configs/demo-noregrets | Out-Null
+cargo run --release --locked --manifest-path crates/lechiffre-noregrets/Cargo.toml -- train-agent --players 6 --stack 20 --iterations 100000 --seed 43 --out runs/noregrets-v2
 ```
+
+- `--players 6` : modèle entraîné pour six joueurs.
+- `--stack 20` : 20 jetons avec une BB de 2, donc **10 BB** par joueur.
+- `--iterations 100000` : budget de parcours MCCFR, pas nombre de mains de test.
+- `--seed 43` : graine d'entraînement.
+- `--out` : nouveau dossier contenant `agent-reference.json` et `blueprint.bin`.
+
+Attendre la fin avant d'utiliser le modèle. Cet entraînement repart de zéro ;
+ce n'est pas une reprise du modèle fourni. Pour une autre version, changer le
+nom et le dossier de sortie. Davantage de parcours ne garantit pas un meilleur
+score contre chaque adversaire : il faut mesurer le résultat.
+
+Vérifier le modèle sauvegardé :
 
 ```powershell
-"noregrets_default","calling","folding","all_in","random_default","random_pot_control" | ForEach-Object { Copy-Item "configs/agents/$_.json" -Destination "configs/demo-noregrets/" }
+cargo run --release --locked --manifest-path crates/lechiffre-noregrets/Cargo.toml -- inspect --reference runs/noregrets-v2
 ```
 
-```powershell
-cargo run --release --locked --manifest-path crates/lechiffre-noregrets/Cargo.toml --features gui --bin lechiffre-arena -- table configs/demo-noregrets --hands 6000 --tui --out runs/demo-noregrets
-```
+## 2. Créer son profil JSON
 
-Il y a ici **6 000 mains au total**, avec les six mêmes sièges, le bouton tournant
-et des tapis réinitialisés à chaque main. Ce lanceur n'effectue pas les 720
-permutations de `rsp arena compare`. `--hands` doit être un multiple du nombre
-de joueurs et couvrir au moins deux rotations du bouton.
-
-Utiliser un nouveau dossier `--out` à chaque expérience. Les résultats sont
-enregistrés dans `table.csv`, `table.json` et `hands.jsonl`. Les rapports complets
-ne sont écrits qu'après les mains demandées ; une interruption conserve les
-mains déjà enregistrées, sans présenter un rapport partiel comme terminé.
-
-Tab change de panneau ; les flèches sélectionnent une ligne ; Entrée dans
-l'historique ouvre une main avec les cartes et les actions. Échap revient au
-tableau de bord ; Ctrl+C quitte. Agrandir le terminal pour lire les noms longs.
-`--no-tui` active l'affichage texte et conserve les mêmes fichiers de sortie.
-
-## Ajouter un NoRegrets déjà entraîné
-
-Créer `configs/agents/noregrets_v2.json`, par exemple :
+Après l'entraînement, créer `configs/agents/noregrets_v2.json` :
 
 ```json
 {
   "type": "noregrets",
-  "name": "NoRegrets-100k",
-  "reference": "runs/noregrets-100k"
+  "name": "NoRegrets-v2-100k",
+  "reference": "runs/noregrets-v2"
 }
 ```
 
-Remplacer `reference` par le véritable dossier de ton entraînement. Il doit
-contenir **`agent-reference.json` et `blueprint.bin`**, produits par `train-agent`.
-Les chemins relatifs sont interprétés depuis le répertoire où la commande est
-lancée. Préférer `/` dans les chemins JSON, y compris sous Windows.
-Un checkpoint neural SD-CFR ou la référence du duel réduit n'est pas un modèle
-Agent NoRegrets compatible : leurs règles et leur format diffèrent.
+Le fichier `noregrets_v2.json.example` fourni peut servir de modèle : retirer
+`.example` après avoir terminé l'entraînement correspondant.
+`reference` désigne le dossier réel, pas le fichier `blueprint.bin`.
+Les chemins sont relatifs à la racine où tu exécutes la commande ; utiliser `/`
+dans les JSON sous Windows. Un fichier `.json.example` n'est jamais chargé.
+Pour un modèle déjà entraîné ailleurs, indiquer son vrai dossier contenant les
+deux fichiers ci-dessus. Les checkpoints neuronaux et les références du duel
+réduit ont un autre format.
 
-Pour comparer NoRegrets par défaut et ta version avec quatre agents existants,
-utiliser un **nouveau dossier** `configs/duel-versions` :
+## 3. Choisir les six profils
 
-```powershell
-New-Item -ItemType Directory -Force configs/duel-versions | Out-Null
-```
-
-```powershell
-"noregrets_default","noregrets_v2","calling","folding","random_default","random_pot_control" | ForEach-Object { Copy-Item "configs/agents/$_.json" -Destination "configs/duel-versions/" }
-```
+Créer un **nouveau dossier de sélection** et copier les six JSON souhaités :
 
 ```powershell
-cargo run --release --locked --manifest-path crates/lechiffre-noregrets/Cargo.toml --features gui --bin lechiffre-arena -- table configs/duel-versions --hands 6000 --tui --out runs/duel-versions
+New-Item -ItemType Directory -Force configs/comparaison-v2 | Out-Null
+"noregrets_default","noregrets_v2","calling","folding","random_default","random_pot_control" | ForEach-Object { Copy-Item "configs/agents/$_.json" -Destination "configs/comparaison-v2/" }
 ```
 
-Créer autant de configurations nommées que nécessaire : v1, v2, v3… Une table
-peut contenir uniquement des versions NoRegrets, uniquement des agents rs_poker,
-ou un mélange. Pour modifier la sélection, retirer les anciens JSON du dossier
-de sélection ou créer un nouveau dossier. Le catalogue `configs/agents/` contient
-plus de six profils et n'est donc pas directement une table.
+Il contient deux versions NoRegrets et quatre agents rs_poker existants.
+Pour changer un joueur, changer les fichiers du dossier de sélection. Utiliser
+un nom distinct par profil. L'ordre des fichiers ne fixe plus leurs voisins :
+le mode `compare` permute les sièges.
 
-## Compatibilité des modèles et modèle par défaut
+Pour tester seulement le modèle fourni et cinq agents existants, sans entraîner :
 
-Les blueprints d'une même table doivent correspondre au **même nombre de
-joueurs, aux mêmes tapis et aux mêmes blindes**. Le lanceur vérifie les
-métadonnées et les SHA-256 avant le jeu et déduit le tapis des modèles lorsque
-`--stack` est absent. Les blindes sont fixées à 1/2 jetons.
+```powershell
+New-Item -ItemType Directory -Force configs/comparaison-defaut | Out-Null
+"noregrets_default","calling","folding","all_in","random_default","random_pot_control" | ForEach-Object { Copy-Item "configs/agents/$_.json" -Destination "configs/comparaison-defaut/" }
+```
 
-`noregrets_default.json` choisit automatiquement la référence fournie adaptée :
+## 4. Lancer le comparateur natif avec l'affichage graphique
 
-| Joueurs sélectionnés | Référence par défaut | Tapis |
+```powershell
+cargo run --release --locked --manifest-path crates/lechiffre-noregrets/Cargo.toml --features gui --bin lechiffre-arena -- compare configs/comparaison-v2 -p 6 -n 10 --seed 123 --tui --out runs/comparaison-v2-seed123
+```
+
+Pour le test sans entraînement, remplacer `configs/comparaison-v2` par
+`configs/comparaison-defaut` et choisir un autre dossier `--out`.
+
+- `-p 6` : six places à chaque table.
+- `-n 10` : dix séries d'états initiaux ; chacune parcourt toutes les permutations.
+- Six profils à six places donnent **720 permutations × 10 = 7 200 mains**.
+- Chaque profil joue 7 200 mains, dont 1 200 à chaque siège.
+- `--seed` fixe les tirages du comparateur et des agents qui acceptent sa graine.
+- `--no-tui` remplace `--tui` pour un lancement texte avec les mêmes résultats.
+
+Pour environ 72 000 mains, utiliser `-n 100` et un nouveau `--out`.
+On peut fournir plus de profils que de places : sept profils à six places
+donnent **5 040 permutations par série**. Le total est affiché avant la partie.
+Les modèles doivent être entraînés pour **six joueurs**, même avec sept profils.
+
+Le comparateur réutilise un état initial par série et change les affectations
+aux sièges ; les distributions de cartes utilisent des sous-flux aléatoires
+distincts entre permutations. Ce n'est pas un test où toutes les mains futures
+sont identiques pour chaque permutation. Plusieurs graines restent utiles.
+
+Tab change de panneau ; les flèches sélectionnent une ligne ; Entrée dans
+l'historique ouvre une main ; Échap revient ; Ctrl+C quitte.
+Utiliser un nouveau dossier `--out` à chaque lancement. Après interruption,
+les mains déjà jouées restent consultables ; aucun rapport complet n'est écrit.
+
+## 5. Lire les résultats
+
+Le gain final affiché dans le terminal est en **bb/100**. Les statistiques
+proviennent de `rs_poker::arena::comparison::ArenaComparison`, regroupées par
+profil sur toutes ses positions.
+
+| Fichier dans le dossier de sortie | Contenu |
+|---|---|
+| `results.md` | Rapport natif, classement, gains et statistiques par position |
+| `results.json` | Statistiques natives par nom d'agent ; montants en jetons |
+| `comparison.json` | Profils effectifs, graine, protocole, métadonnées et SHA-256 des modèles |
+| `hands.jsonl` | Historique des mains pour la TUI et la consultation détaillée |
+
+Dans `results.json`, `profit_per_100_hands` est en jetons/100 : diviser par
+**2** pour obtenir les bb/100 de cette configuration. Le mode natif ne calcule
+pas d'IC95 apparié ni l'exploitabilité exacte. Un petit test ne prouve pas
+qu'une stratégie est GTO ou meilleure contre tous les adversaires.
+Les profils CFR utilisent `uniform` pour ignorer les cartes privées adverses ;
+leurs budgets explicites sont conservés. Sans budget explicite, le défaut est
+50 ms avec fast-forward. Tous leurs tirages internes ne sont pas contrôlés
+par la graine du comparateur.
+
+## Compatibilité et anciens modes
+
+Le modèle fourni par `noregrets_default.json` est choisi selon **`-p`** :
+
+| Places à table | Référence par défaut | Tapis |
 |---|---|---|
 | 2 | `references/noregrets-hu10bb-agent-10000-seed42` | 10 BB |
 | 6 | `references/noregrets-6max-10bb-agent-10000-seed42` | 10 BB |
-| 3, 4 ou 5 | Pas de référence fournie : indiquer ton propre dossier | Selon ton modèle |
+| 3, 4 ou 5 | Fournir un modèle entraîné pour ce nombre de joueurs | Selon le modèle |
 
-`--reference chemin` remplace le défaut pour les fichiers NoRegrets sans
-`reference`. Une référence explicite dans un JSON est prioritaire. Chaque modèle
-fourni a été entraîné ici à partir du code public ; il n'est pas un modèle
-préentraîné commercial de l'auteur. Le budget fourni reste limité à 10 000
-parcours et ne garantit pas une stratégie très forte.
+Tous les NoRegrets d'une comparaison doivent avoir le même nombre de joueurs,
+le même tapis et les mêmes blindes. Blindes fixées à 1/2, sans ante ni rake,
+relances libres. Le tapis est déduit des modèles ; `--stack` le précise en jetons.
+Les modèles et leurs hashes sont vérifiés avant le lancement. Un modèle à
+100 BB ne peut pas jouer avec celui fourni à 10 BB.
+`--reference dossier` fournit le défaut aux profils sans `reference` ; un chemin
+explicite dans un JSON est prioritaire. Les références fournies ont été
+entraînées ici depuis le code public, pas publiées préentraînées par l'auteur.
+NoRegrets joue son blueprint, sans recherche stratégique en ligne.
 
-Un modèle personnel à **100 BB** ne peut pas être comparé au défaut à **10 BB**
-dans la même table. Utiliser deux modèles à 100 BB, ou entraîner ta version à
-10 BB pour la comparer au défaut. Pour entraîner un second modèle six joueurs
-à 10 BB, compatible avec celui fourni :
-
-```powershell
-cargo run --release --locked --manifest-path crates/lechiffre-noregrets/Cargo.toml -- train-agent --players 6 --stack 20 --iterations 100000 --seed 43 --out runs/noregrets-100k
-```
-
-## Lire les comparaisons
-
-Le tableau de bord fournit les statistiques natives de rs_poker et les courbes
-de profit. `table.csv` donne les gains en bb/100 et leurs IC95 approximatifs,
-calculés sur les moyennes des rotations complètes du bouton. `table.json`
-conserve aussi les configurations, métadonnées et hashes des modèles, et les
-compteurs d'inconnus et de décisions après mise hors menu.
-
-Les places fixes et le bouton tournant permettent un premier test comparable,
-mais plusieurs graines et davantage de mains sont nécessaires pour un
-classement fiable. À six joueurs, les gains dépendent de tous les adversaires.
-L'exploitabilité exacte n'est pas calculée. Les variantes CFR utilisent un
-estimateur `uniform` ; leurs tirages internes ne sont pas tous contrôlés par la
-graine de la table.
-
-## Intégration et branche principale
-
-La CLI native `rsp` n'a pas de type NoRegrets. Le binaire supplémentaire
-`lechiffre-arena` utilise `NoRegretsAgent` et réutilise directement les sources
-de sa TUI. Il se compile avec la fonctionnalité optionnelle `gui`. Les anciennes
-commandes `lechiffre-noregrets train-agent`, `table`, `match-agents`, etc. restent
-disponibles, et les sources du tableau de bord natif ne sont pas modifiées.
-
-Le 9 novembre 2026, la branche principale accessible est `master`
-(`dbc6067615a042c28484cac8dd66a4a878556e61`), et la branche de travail est
-`feature/ia_gto` (`e278cc529d714ddbae6c60a132eb0ff9fe35dd98`). Les deux fichiers
-rs_poker corrigés sont identiques dans ces deux versions avant la modification :
-
-- `vendor/rs-poker/src/arena/cfr/agent/engine.rs` : le fast-forward à la racine
-  utilise désormais les mains tirées par l'estimateur, et non les vraies mains.
-- `vendor/rs-poker/src/arena/hand_estimator/estimators.rs` : l'estimateur uniforme
-  retire aussi l'information privée des mains couchées lors du tirage.
-
-Ces corrections changent les résultats des comparaisons contenant CFR. Les
-anciens classements impliquant ces agents doivent être refaits. Les tests
-vérifient que changer les cartes adverses réelles ne modifie pas le calcul à
-modèle adverse fixé, y compris lorsque des joueurs sont couchés.
+Les anciens modes `table` restent disponibles : sièges fixes et bouton tournant,
+rapports `table.csv/json`, IC95 approximatifs et compteurs NoRegrets.
+Utiliser **`compare` pour équilibrer aussi les positions relatives**.
+`train-agent`, `match-agents` et `inspect` restent disponibles sans `gui`.
+La CLI native `rsp` seule ne lit pas les JSON NoRegrets : le lanceur de
+l'adaptateur charge les modèles et les injecte dans le comparateur natif.
+Sa boucle de permutations, ses statistiques et sa TUI sont réutilisées.
+Voir `crates/lechiffre-noregrets/validation/COMPARATEUR_NATIF.md` pour les
+changements communs à rs_poker et le suivi de `master`.

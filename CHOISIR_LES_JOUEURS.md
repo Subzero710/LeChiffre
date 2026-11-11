@@ -1,5 +1,20 @@
 # Nouveau : profils JSON, versions NoRegrets et interface graphique
 
+**Positions relatives équilibrées :** utiliser désormais `lechiffre-arena compare`,
+expliqué pas à pas dans `MODE_D_EMPLOI_NOREGRET.md`, avec les commandes pour
+entraîner un modèle et le sélectionner. Ce mode appelle le comparateur natif
+rs_poker : six profils à six places avec `-n 10` donnent 720 × 10 = 7 200 mains.
+Il permute les joueurs entre les sièges. Les anciens modes `table` ci-dessous
+gardent les sièges fixes et font tourner le bouton.
+
+**Correction du 11 novembre 2026 :** le module NoRegrets est autonome. Il ne
+requiert plus `crates/lechiffre-nlhe` ni `crates/lechiffre-sdcfr`. Si Cargo
+réclame encore l'un de leurs `Cargo.toml`, extraire la version corrigée de
+`NoRegret.zip` à la racine du projet, avec les nouveaux fichiers du module et
+son `Cargo.lock`. Les commandes de ce guide fonctionnent avec cette version.
+Les anciens outils du duel SD-CFR réduit (`train` et `match`) ont été retirés ;
+pour entraîner un agent de table, utiliser `train-agent`.
+
 L'archive s'appelle désormais `NoRegret.zip`. Pour sélectionner NoRegrets comme
 les autres agents et comparer plusieurs blueprints dans la TUI rs_poker, suivre
 `MODE_D_EMPLOI_NOREGRET.md`. Le mode `table` décrit ci-dessous reste disponible.

@@ -978,22 +978,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "lechiffre-nlhe"
-version = "0.1.0"
-dependencies = [
- "lechiffre-sdcfr",
- "rs_poker",
-]
-
-[[package]]
 name = "lechiffre-noregrets"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "clap",
  "crossterm 0.28.1",
- "lechiffre-nlhe",
- "lechiffre-sdcfr",
  "pluribus",
  "rand 0.9.5",
  "ratatui",
@@ -1008,10 +998,6 @@ dependencies = [
  "tokio",
  "tracing",
 ]
-
-[[package]]
-name = "lechiffre-sdcfr"
-version = "0.1.0"
 
 [[package]]
 name = "libc"

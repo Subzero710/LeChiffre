@@ -1,19 +1,9 @@
 use clap::{Parser, Subcommand};
-use lechiffre_nlhe::game::GAME_ID;
-use lechiffre_noregrets::{
-    bridge,
-    reference::{self, Reference, Settings},
-    rs_agent::AgentReference,
-    rs_arena,
-    table_arena::PreparedTable,
-};
-use lechiffre_sdcfr::training::Trainer;
-use std::{fs, path::PathBuf, time::Instant};
+use lechiffre_noregrets::{rs_agent::AgentReference, rs_arena, table_arena::PreparedTable};
+use std::{fs, path::PathBuf};
 
 #[derive(Parser)]
-#[command(
-    about = "NoRegrets : Agent rs_poker, matchs contre agents existants et comparaison SD-CFR"
-)]
+#[command(about = "NoRegrets : Agent rs_poker, matchs contre agents existants")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -60,37 +50,6 @@ enum Command {
         #[arg(long)]
         opponent_config: Option<PathBuf>,
         #[arg(long, default_value_t = 1000)]
-        hands: u64,
-        #[arg(long, default_value_t = 123)]
-        seed: u64,
-        #[arg(long)]
-        out: PathBuf,
-    },
-    /// Entrainer le vrai MCCFR tabulaire de NoRegrets sur le jeu reduit.
-    Train {
-        #[arg(long, default_value_t = 10_000)]
-        iterations: u64,
-        #[arg(long, default_value_t = 42)]
-        seed: u64,
-        #[arg(long, default_value_t = 1)]
-        threads: usize,
-        #[arg(long, default_value_t = 12)]
-        buckets: u16,
-        #[arg(long, default_value_t = 64)]
-        equity_rollouts: u32,
-        /// Zero: buckets d'equite sans centroids. >0: k-medians EMD amont.
-        #[arg(long, default_value_t = 0)]
-        centroid_samples: usize,
-        #[arg(long)]
-        out: PathBuf,
-    },
-    /// Mesurer les gains du SD-CFR face au blueprint NoRegrets, agents figes.
-    Match {
-        #[arg(long)]
-        checkpoint: PathBuf,
-        #[arg(long)]
-        reference: PathBuf,
-        #[arg(long, default_value_t = 10_000)]
         hands: u64,
         #[arg(long, default_value_t = 123)]
         seed: u64,
@@ -284,99 +243,8 @@ async fn run() -> Result<(), String> {
             )
             .map_err(|e| e.to_string())?;
         }
-        Command::Train {
-            iterations,
-            seed,
-            threads,
-            buckets,
-            equity_rollouts,
-            centroid_samples,
-            out,
-        } => {
-            let settings = Settings {
-                iterations,
-                seed,
-                threads,
-                buckets,
-                equity_rollouts,
-                centroid_samples,
-            };
-            settings.validate()?;
-            if out.exists() {
-                return Err("output directory already exists; choose a new --out".into());
-            }
-            println!(
-                "NoRegrets public {} ; HU 10 BB, menu LeChiffre, cap 1.",
-                reference::UPSTREAM_COMMIT
-            );
-            println!(
-                "MCCFR tabulaire, blueprint seul, pruning desactive. {iterations} parcours ; {threads} thread(s)."
-            );
-            println!(
-                "Ce budget est un essai : aucun niveau GTO ou niveau de l'auteur n'est garanti."
-            );
-            let start = Instant::now();
-            let model = reference::train(&settings)?;
-            model.save(&out)?;
-            println!(
-                "Reference sauvegardee : {} ; {} infosets ; {:.2} s",
-                out.display(),
-                model.policy.blueprint.strategies.len(),
-                start.elapsed().as_secs_f64()
-            );
-        }
-        Command::Match {
-            checkpoint,
-            reference: path,
-            hands,
-            seed,
-            out,
-        } => {
-            if out.exists() {
-                return Err("output directory already exists; choose a new --out".into());
-            }
-            let hero = Trainer::load(&checkpoint, GAME_ID).map_err(|e| e.to_string())?;
-            let reference = Reference::load(&path)?;
-            let (r, coverage) = bridge::duel(&hero, &reference, hands, seed)?;
-            if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
-                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-            }
-            fs::create_dir(&out).map_err(|e| e.to_string())?;
-            let report = serde_json::json!({
-                "game_id": GAME_ID, "seed": seed, "hands": r.hands, "pairs": r.pairs,
-                "hero_checkpoint": checkpoint, "hero_iterations": hero.completed(),
-                "reference_directory": path, "reference": reference.metadata,
-                "mode": "blueprint-only; no online search; no pruning; common reduced menu",
-                "total_bb": r.total_bb, "bb_per_100": r.bb_per_100, "ci95": r.ci95,
-                "mean_bb_by_hero_seat": r.by_seat, "reference_coverage": coverage,
-                "exact_exploitability": serde_json::Value::Null
-            });
-            fs::write(
-                out.join("comparison.json"),
-                serde_json::to_vec_pretty(&report).map_err(|e| e.to_string())?,
-            )
-            .map_err(|e| e.to_string())?;
-            fs::write(out.join("matches.csv"), format!("opponent,hands,pairs,seed,total_bb,bb_per_100,ci95_low,ci95_high\nnoregrets-blueprint-reduced,{},{},{},{:.6},{:.6},{:.6},{:.6}\n", r.hands,r.pairs,seed,r.total_bb,r.bb_per_100,r.ci95[0],r.ci95[1])).map_err(|e| e.to_string())?;
-            println!(
-                "SD-CFR vs NoRegrets blueprint reduit : {} mains appariees, places alternees.",
-                r.hands
-            );
-            println!(
-                "Gain du SD-CFR : {:+.3} bb/100 ; IC95 [{:+.3}, {:+.3}] ; total {:+.2} BB",
-                r.bb_per_100, r.ci95[0], r.ci95[1], r.total_bb
-            );
-            for (i, street) in ["preflop", "flop", "turn", "river"].iter().enumerate() {
-                println!(
-                    "Reference {street}: {} decisions, {} replis check/call sur infoset inconnu.",
-                    coverage.decisions[i], coverage.fallbacks[i]
-                );
-            }
-            println!(
-                "Ce resultat compare ces deux entrainements ; exploitabilite exacte non calculee."
-            );
-        }
         Command::Inspect { reference } => {
-            let r = Reference::load(&reference)?;
+            let r = AgentReference::load(&reference)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&r.metadata).map_err(|e| e.to_string())?

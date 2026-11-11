@@ -1,9 +1,9 @@
 //! Fixed seats, rotating button, actual rs_poker agents. 2..6 players.
+use crate::rng::Rng;
 use crate::{
     rs_agent::{AgentReference, AgentStats, NoRegretsAgent},
     rs_arena::configure_cfr,
 };
-use lechiffre_sdcfr::rng::Rng;
 use rs_poker::arena::{
     Agent, GameStateBuilder, HoldemSimulationBuilder,
     agent::{AgentConfig, ConfigAgentBuilder},
@@ -16,18 +16,18 @@ use std::{
     sync::Arc,
 };
 
-enum Bot {
+pub(crate) enum Bot {
     NoRegrets(Arc<AgentReference>),
     Existing(AgentConfig),
 }
-struct Seat {
-    label: String,
-    config: Value,
-    bot: Bot,
+pub(crate) struct Seat {
+    pub(crate) label: String,
+    pub(crate) config: Value,
+    pub(crate) bot: Bot,
 }
 pub struct PreparedTable {
-    seats: Vec<Seat>,
-    stack: u32,
+    pub(crate) seats: Vec<Seat>,
+    pub(crate) stack: u32,
 }
 
 /// One completed hand, consumed immediately by the native rs_poker dashboard.
@@ -68,6 +68,16 @@ impl PreparedTable {
         default_reference: Option<&Path>,
     ) -> Result<Self, String> {
         let n = configs.len();
+        Self::prepare_profiles(configs, n, stack, default_reference)
+    }
+
+    /// Shared profile validation for fixed tables and native comparison pools.
+    pub(crate) fn prepare_profiles(
+        configs: Vec<Value>,
+        n: usize,
+        stack: Option<u32>,
+        default_reference: Option<&Path>,
+    ) -> Result<Self, String> {
         if !(2..=6).contains(&n) {
             return Err("choose 2 to 6 players, one configuration per seat".into());
         }

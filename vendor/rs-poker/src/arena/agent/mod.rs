@@ -40,6 +40,7 @@ pub trait Agent: Send {
 pub use all_in::{AllInAgent, AllInAgentGenerator};
 pub use calling::{CallingAgent, CallingAgentGenerator};
 pub use clone::{CloneAgent, CloneAgentGenerator};
+pub use config::ConfigAgentGenerator;
 pub use config::{AgentConfig, AgentConfigError, CfrExploration, ConfigAgentBuilder};
 pub use folding::{FoldingAgent, FoldingAgentGenerator};
 pub use generator::AgentGenerator;

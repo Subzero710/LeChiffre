@@ -42,10 +42,22 @@ async fn actual_existing_agents_run_inside_the_real_simulator() {
 
 #[tokio::test]
 async fn normal_agent_trait_and_hidden_card_independence() {
-    let gs = lechiffre_nlhe::game::Nlhe::from_deal([0, 1, 2, 3, 4, 5, 6, 7, 8])
-        .unwrap()
-        .engine()
-        .clone();
+    let mut gs = rs_poker::arena::GameStateBuilder::new()
+        .stacks([20, 20])
+        .blinds(2, 1)
+        .dealer_idx(0)
+        .max_raises_per_round(None)
+        .build()
+        .unwrap();
+    gs.advance_round(); // Starting -> Ante
+    gs.advance_round(); // Ante -> DealPreflop
+    gs.advance_round(); // DealPreflop -> Preflop
+    gs.do_bet(1, true).unwrap();
+    gs.do_bet(2, true).unwrap();
+    gs.sb_posted = true;
+    gs.bb_posted = true;
+    gs.hands[0] = rs_poker::core::Hand::new_with_cards(vec![0u8.into(), 1u8.into()]);
+    gs.hands[1] = rs_poker::core::Hand::new_with_cards(vec![2u8.into(), 3u8.into()]);
     let mut other = gs.clone();
     other.hands[1] = rs_poker::core::Hand::new_with_cards(vec![30u8.into(), 31u8.into()]);
     let mut a = NoRegretsAgent::new(reference(), 9);

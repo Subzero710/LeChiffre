@@ -7,6 +7,19 @@ use std::{
 };
 
 pub fn load_directory(path: &Path) -> Result<Vec<Value>, String> {
+    let configs = load_profile_pool(path)?;
+    if !(2..=6).contains(&configs.len()) {
+        return Err(format!(
+            "select 2 to 6 JSON files in {}; found {}",
+            path.display(),
+            configs.len()
+        ));
+    }
+    Ok(configs)
+}
+
+/// A comparison pool may contain more profiles than seats at a table.
+pub fn load_profile_pool(path: &Path) -> Result<Vec<Value>, String> {
     let mut files = fs::read_dir(path)
         .map_err(|e| format!("{}: {e}", path.display()))?
         .map(|e| e.map(|e| e.path()))
@@ -14,9 +27,9 @@ pub fn load_directory(path: &Path) -> Result<Vec<Value>, String> {
         .map_err(|e| e.to_string())?;
     files.retain(|p| p.is_file() && p.extension().is_some_and(|e| e == "json"));
     files.sort();
-    if !(2..=6).contains(&files.len()) {
+    if files.len() < 2 {
         return Err(format!(
-            "select 2 to 6 JSON files in {}; found {}",
+            "select at least 2 JSON files in {}; found {}",
             path.display(),
             files.len()
         ));

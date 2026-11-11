@@ -155,6 +155,8 @@
 
 use std::sync::Arc;
 
+use super::generator::AgentGenerator;
+
 use crate::arena::agent::{
     AllInAgent, CallingAgent, FoldingAgent, RandomAgent, RandomPotControlAgent,
 };
@@ -172,11 +174,25 @@ use serde::{Deserialize, Serialize};
 use std::{io::ErrorKind, path::Path};
 use thiserror::Error;
 
+/// Thread-safe external generator accepted by declarative agent builders.
+pub trait ConfigAgentGenerator: AgentGenerator + Send + Sync + std::fmt::Debug {}
+impl<T: AgentGenerator + Send + Sync + std::fmt::Debug> ConfigAgentGenerator for T {}
+
 /// Configuration for different agent types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub enum AgentConfig {
+    /// Application-provided agent, constructed afresh for each seat and game.
+    /// Applications load their own JSON and retain serializable provenance.
+    #[serde(skip)]
+    #[cfg_attr(feature = "arbitrary", arbitrary(skip))]
+    Generated {
+        /// Display name used by comparisons.
+        name: Option<String>,
+        /// The agent implementation remains in the application crate.
+        generator: Arc<dyn ConfigAgentGenerator>,
+    },
     /// Agent that always goes all-in
     AllIn {
         /// Optional explicit name for the agent
@@ -672,6 +688,13 @@ impl ConfigAgentBuilder {
         let player_idx = self.player_idx.expect("player_idx is required");
 
         match &self.config {
+            AgentConfig::Generated { generator, .. } => generator.generate_seeded(
+                player_idx,
+                self.game_state
+                    .as_ref()
+                    .expect("game_state is required for generated agents"),
+                self.rng_seed,
+            ),
             AgentConfig::AllIn { name } => Box::new(AllInAgent::new(resolve_agent_name(
                 name,
                 "AllInAgent",

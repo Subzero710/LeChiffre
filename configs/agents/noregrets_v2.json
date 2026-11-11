@@ -1,5 +1,5 @@
 {
   "type": "noregrets",
-  "name": "NoRegrets-v2",
-  "reference": "runs/mon-modele"
+  "name": "NoRegrets-v2-100k",
+  "reference": "runs/noregrets-v2"
 }

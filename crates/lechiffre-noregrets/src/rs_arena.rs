@@ -1,6 +1,6 @@
 //! Real rs_poker agents and real HoldemSimulation, no replacement policies.
+use crate::rng::Rng;
 use crate::rs_agent::{AgentReference, AgentStats, NoRegretsAgent};
-use lechiffre_sdcfr::rng::Rng;
 use rs_poker::arena::{
     Agent, GameStateBuilder, HoldemSimulationBuilder,
     agent::{AgentConfig, ConfigAgentBuilder},
