@@ -1,15 +1,35 @@
+# Rust build artifacts, including crates/ and vendor/
 target/
-/.idea
-/runs
-/tests/fixtures/leduc_openspiel.tsv
 
-# Journaux et fichiers temporaires
+# Training and evaluation outputs
+/runs/
+
+# Local data and notes
+/aide
+
+# JetBrains IDE files
+.idea/
+
+# Python scripts and tools
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Logs and temporary files
 *.log
 *.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
 
-# Archives de livraison
+# Delivery archives at the repository root
 /LeChiffre*.zip
+/NoRegret*.zip
 
-# Fichiers système
+# Operating system files
 .DS_Store
 Thumbs.db
+Desktop.ini
