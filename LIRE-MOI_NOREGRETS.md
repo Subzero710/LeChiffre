@@ -166,8 +166,6 @@ le temps et les données générées. L'exploitabilité exacte NLHE n'est pas ca
 
 ```sh
 cargo test --locked --manifest-path crates/lechiffre-noregrets/Cargo.toml
-cargo test --locked --manifest-path crates/lechiffre-nlhe/Cargo.toml
-cargo test --locked --manifest-path crates/lechiffre-sdcfr/Cargo.toml
 ```
 
 La validation détaillée figure dans
