@@ -184,10 +184,7 @@ fn commit_new_json_manifest(
         .file_name()
         .ok_or_else(|| format!("invalid output manifest path: {}", output.display()))?
         .to_string_lossy();
-    let temporary = output.with_file_name(format!(
-        ".{filename}.{}.inprogress",
-        std::process::id()
-    ));
+    let temporary = output.with_file_name(format!(".{filename}.{}.inprogress", std::process::id()));
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -233,24 +230,32 @@ fn split_behaviour_dataset_hands(args: &[String]) -> Result<(), String> {
     // Existing hierarchical query hands are used for training, NOT validation.
     // These strict train/validation/test boundaries are intentionally not wired
     // into HierarchicalHandSplit, to prevent validation-to-training leakage.
-    let to_entries = |hands: &[lechiffre::datasets::behaviour_parquet_loader::HandPartitionEntry]| {
-        hands.iter().map(|entry| {
+    let to_entries =
+        |hands: &[lechiffre::datasets::behaviour_parquet_loader::HandPartitionEntry]| {
+            hands
+                .iter()
+                .map(|entry| {
+                    json!({
+                        "hand_id": entry.hand_id.as_str(),
+                        "hand_index": entry.hand_index,
+                        "decisions": entry.decision_count,
+                        "players_at_table": entry.players_at_table,
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+    let subject_counts = split
+        .subject_hand_counts()
+        .iter()
+        .map(|(&subject_id, &counts)| {
             json!({
-                "hand_id": entry.hand_id.as_str(),
-                "hand_index": entry.hand_index,
-                "decisions": entry.decision_count,
-                "players_at_table": entry.players_at_table,
+                "subject_id": subject_id,
+                "train_hands": counts[0],
+                "validation_hands": counts[1],
+                "test_hands": counts[2],
             })
-        }).collect::<Vec<_>>()
-    };
-    let subject_counts = split.subject_hand_counts().iter().map(|(&subject_id, &counts)| {
-        json!({
-            "subject_id": subject_id,
-            "train_hands": counts[0],
-            "validation_hands": counts[1],
-            "test_hands": counts[2],
         })
-    }).collect::<Vec<_>>();
+        .collect::<Vec<_>>();
     let decisions = split.decision_counts();
     let memberships = split.subject_hand_rows();
     let manifest = json!({
@@ -1007,10 +1012,8 @@ mod hierarchical_cli_tests {
 
     #[test]
     fn hand_split_manifest_refuses_overwriting_an_existing_file() {
-        let path = std::env::temp_dir().join(format!(
-            "lechiffre-hand-split-{}.json",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("lechiffre-hand-split-{}.json", std::process::id()));
         let original = serde_json::json!({"format": "first"});
         let replacement = serde_json::json!({"format": "second"});
         commit_new_json_manifest(&path, &original).unwrap();

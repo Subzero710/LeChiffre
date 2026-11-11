@@ -115,10 +115,12 @@ impl fmt::Display for HandSplitError {
             ),
             Self::CountOverflow => write!(f, "hand split count overflow"),
             Self::EventCountMismatch { expected, observed } => write!(
-                f, "hand split event count mismatch: expected {expected}, observed {observed}"
+                f,
+                "hand split event count mismatch: expected {expected}, observed {observed}"
             ),
             Self::SubjectRowsMismatch { expected, observed } => write!(
-                f, "hand split subject rows mismatch: expected {expected}, observed {observed}"
+                f,
+                "hand split subject rows mismatch: expected {expected}, observed {observed}"
             ),
         }
     }
@@ -152,8 +154,7 @@ impl BehaviourParquetDataset {
         }
 
         let n = self.hands.len();
-        let train_n =
-            (n as u128 * u128::from(train_bps) / u128::from(SPLIT_BASIS_POINTS)) as usize;
+        let train_n = (n as u128 * u128::from(train_bps) / u128::from(SPLIT_BASIS_POINTS)) as usize;
         let validation_n =
             (n as u128 * u128::from(validation_bps) / u128::from(SPLIT_BASIS_POINTS)) as usize;
         let test_n = n - train_n - validation_n;
@@ -258,10 +259,10 @@ impl BehaviourParquetDataset {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::behavioural::{HandId, Position, EVENT_CONTINUOUS_WIDTH};
-    use crate::datasets::behaviour_parquet::BehaviourParquetDatasetSummary;
     use super::super::{PersistedHand, SubjectMembership};
+    use super::*;
+    use crate::behavioural::{EVENT_CONTINUOUS_WIDTH, HandId, Position};
+    use crate::datasets::behaviour_parquet::BehaviourParquetDatasetSummary;
     use std::collections::HashSet;
 
     fn fixture(n: usize) -> BehaviourParquetDataset {
@@ -278,14 +279,24 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let subjects = BTreeMap::from([
-            (11_u64, (0..n).map(|hand_slot| SubjectMembership {
-                hand_slot,
-                subject_position: Position::ButtonSmallBlind,
-            }).collect::<Vec<_>>()),
-            (22_u64, (0..n).map(|hand_slot| SubjectMembership {
-                hand_slot,
-                subject_position: Position::BigBlind,
-            }).collect::<Vec<_>>()),
+            (
+                11_u64,
+                (0..n)
+                    .map(|hand_slot| SubjectMembership {
+                        hand_slot,
+                        subject_position: Position::ButtonSmallBlind,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                22_u64,
+                (0..n)
+                    .map(|hand_slot| SubjectMembership {
+                        hand_slot,
+                        subject_position: Position::BigBlind,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
         ]);
         BehaviourParquetDataset {
             summary: BehaviourParquetDatasetSummary {
@@ -327,12 +338,14 @@ mod tests {
             .chain(result.test())
             .collect::<Vec<_>>();
         assert_eq!(all.len(), 20);
-        let ids = all.iter().map(|e| e.hand_id.as_str()).collect::<HashSet<_>>();
+        let ids = all
+            .iter()
+            .map(|e| e.hand_id.as_str())
+            .collect::<HashSet<_>>();
         assert_eq!(ids.len(), 20);
         assert!(all.iter().all(|e| e.decision_count == 2));
         assert_eq!(
-            ds.split_hands_by_ingestion(7_000, 1_500, 1_500)
-                .unwrap(),
+            ds.split_hands_by_ingestion(7_000, 1_500, 1_500).unwrap(),
             result
         );
     }
