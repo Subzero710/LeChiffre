@@ -1,0 +1,11 @@
+{
+  "format": "noregrets-rs-agent-unlimited-v2",
+  "source": "757f7692738069522195d2b486eec60a8b010c0c",
+  "iterations": 10000,
+  "seed": 42,
+  "num_players": 6,
+  "stack": 20,
+  "small_blind": 1,
+  "big_blind": 2,
+  "blueprint_sha256": "263928f216707efd518e53ae975d62e92d4480695c4b9b32f245c8b449679b2c"
+}

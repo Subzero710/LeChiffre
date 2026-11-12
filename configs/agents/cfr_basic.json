@@ -1,0 +1,5 @@
+{
+  "type": "cfr_basic",
+  "name": "CFR-basic",
+  "hand_estimator": "uniform"
+}

@@ -1,0 +1,392 @@
+{
+  "Calling": {
+    "agent_name": "Calling",
+    "total_profit": 4083,
+    "total_games": 7200,
+    "wins": 2406,
+    "losses": 4762,
+    "breakeven": 32,
+    "profit_per_game": 0.56708336,
+    "profit_per_100_hands": 56.708336,
+    "roi_percent": 2.8354166,
+    "position_stats": [
+      {
+        "seat_index": 0,
+        "games_played": 1200,
+        "profit": 243,
+        "profit_per_game": 0.2025
+      },
+      {
+        "seat_index": 1,
+        "games_played": 1200,
+        "profit": 1036,
+        "profit_per_game": 0.86333334
+      },
+      {
+        "seat_index": 2,
+        "games_played": 1200,
+        "profit": -388,
+        "profit_per_game": -0.32333332
+      },
+      {
+        "seat_index": 3,
+        "games_played": 1200,
+        "profit": 624,
+        "profit_per_game": 0.52
+      },
+      {
+        "seat_index": 4,
+        "games_played": 1200,
+        "profit": 1210,
+        "profit_per_game": 1.0083333
+      },
+      {
+        "seat_index": 5,
+        "games_played": 1200,
+        "profit": 1358,
+        "profit_per_game": 1.1316667
+      }
+    ],
+    "vpip_percent": 100.0,
+    "pfr_percent": 0.0,
+    "three_bet_percent": 0.0,
+    "aggression_factor": null,
+    "cbet_percent": 0.0,
+    "wtsd_percent": 0.0,
+    "wsd_percent": 33.416668,
+    "steal_percent": 0.0,
+    "aggression_frequency": 100.0,
+    "flop_aggression_factor": 0.0,
+    "turn_aggression_factor": 0.0,
+    "river_aggression_factor": 0.0,
+    "preflop_win_rate": 0.0,
+    "flop_win_rate": 0.0,
+    "turn_win_rate": 0.0,
+    "river_win_rate": 0.0
+  },
+  "Folding": {
+    "agent_name": "Folding",
+    "total_profit": -3600,
+    "total_games": 7200,
+    "wins": 0,
+    "losses": 2400,
+    "breakeven": 4800,
+    "profit_per_game": -0.5,
+    "profit_per_100_hands": -50.0,
+    "roi_percent": -100.0,
+    "position_stats": [
+      {
+        "seat_index": 0,
+        "games_played": 1200,
+        "profit": -600,
+        "profit_per_game": -0.5
+      },
+      {
+        "seat_index": 1,
+        "games_played": 1200,
+        "profit": -360,
+        "profit_per_game": -0.3
+      },
+      {
+        "seat_index": 2,
+        "games_played": 1200,
+        "profit": -360,
+        "profit_per_game": -0.3
+      },
+      {
+        "seat_index": 3,
+        "games_played": 1200,
+        "profit": -480,
+        "profit_per_game": -0.4
+      },
+      {
+        "seat_index": 4,
+        "games_played": 1200,
+        "profit": -840,
+        "profit_per_game": -0.7
+      },
+      {
+        "seat_index": 5,
+        "games_played": 1200,
+        "profit": -960,
+        "profit_per_game": -0.8
+      }
+    ],
+    "vpip_percent": 0.0,
+    "pfr_percent": 0.0,
+    "three_bet_percent": 0.0,
+    "aggression_factor": 0.0,
+    "cbet_percent": 0.0,
+    "wtsd_percent": 0.0,
+    "wsd_percent": 0.0,
+    "steal_percent": 0.0,
+    "aggression_frequency": 0.0,
+    "flop_aggression_factor": 0.0,
+    "turn_aggression_factor": 0.0,
+    "river_aggression_factor": 0.0,
+    "preflop_win_rate": 0.0,
+    "flop_win_rate": 0.0,
+    "turn_win_rate": 0.0,
+    "river_win_rate": 0.0
+  },
+  "AllIn": {
+    "agent_name": "AllIn",
+    "total_profit": 3468,
+    "total_games": 7200,
+    "wins": 2394,
+    "losses": 4770,
+    "breakeven": 36,
+    "profit_per_game": 0.48166665,
+    "profit_per_100_hands": 48.166664,
+    "roi_percent": 2.4083333,
+    "position_stats": [
+      {
+        "seat_index": 0,
+        "games_played": 1200,
+        "profit": -605,
+        "profit_per_game": -0.50416666
+      },
+      {
+        "seat_index": 1,
+        "games_played": 1200,
+        "profit": 1547,
+        "profit_per_game": 1.2891667
+      },
+      {
+        "seat_index": 2,
+        "games_played": 1200,
+        "profit": 118,
+        "profit_per_game": 0.09833334
+      },
+      {
+        "seat_index": 3,
+        "games_played": 1200,
+        "profit": 2030,
+        "profit_per_game": 1.6916667
+      },
+      {
+        "seat_index": 4,
+        "games_played": 1200,
+        "profit": 178,
+        "profit_per_game": 0.14833333
+      },
+      {
+        "seat_index": 5,
+        "games_played": 1200,
+        "profit": 200,
+        "profit_per_game": 0.16666667
+      }
+    ],
+    "vpip_percent": 100.0,
+    "pfr_percent": 91.51389,
+    "three_bet_percent": 80.00729,
+    "aggression_factor": null,
+    "cbet_percent": 0.0,
+    "wtsd_percent": 0.0,
+    "wsd_percent": 33.25,
+    "steal_percent": 54.706924,
+    "aggression_frequency": 100.0,
+    "flop_aggression_factor": 0.0,
+    "turn_aggression_factor": 0.0,
+    "river_aggression_factor": 0.0,
+    "preflop_win_rate": 0.0,
+    "flop_win_rate": 0.0,
+    "turn_win_rate": 0.0,
+    "river_win_rate": 0.0
+  },
+  "NoRegrets-defaut": {
+    "agent_name": "NoRegrets-defaut",
+    "total_profit": 3996,
+    "total_games": 7200,
+    "wins": 1464,
+    "losses": 4011,
+    "breakeven": 1725,
+    "profit_per_game": 0.555,
+    "profit_per_100_hands": 55.5,
+    "roi_percent": 4.1363463,
+    "position_stats": [
+      {
+        "seat_index": 0,
+        "games_played": 1200,
+        "profit": 703,
+        "profit_per_game": 0.5858333
+      },
+      {
+        "seat_index": 1,
+        "games_played": 1200,
+        "profit": 100,
+        "profit_per_game": 0.083333336
+      },
+      {
+        "seat_index": 2,
+        "games_played": 1200,
+        "profit": 284,
+        "profit_per_game": 0.23666666
+      },
+      {
+        "seat_index": 3,
+        "games_played": 1200,
+        "profit": 1699,
+        "profit_per_game": 1.4158334
+      },
+      {
+        "seat_index": 4,
+        "games_played": 1200,
+        "profit": 384,
+        "profit_per_game": 0.32
+      },
+      {
+        "seat_index": 5,
+        "games_played": 1200,
+        "profit": 826,
+        "profit_per_game": 0.68833333
+      }
+    ],
+    "vpip_percent": 67.583336,
+    "pfr_percent": 25.88889,
+    "three_bet_percent": 2.6194518,
+    "aggression_factor": 0.7490456,
+    "cbet_percent": 0.0,
+    "wtsd_percent": 0.0,
+    "wsd_percent": 30.743385,
+    "steal_percent": 100.0,
+    "aggression_frequency": 33.455982,
+    "flop_aggression_factor": 0.0,
+    "turn_aggression_factor": 0.0,
+    "river_aggression_factor": 0.0,
+    "preflop_win_rate": 0.0,
+    "flop_win_rate": 0.0,
+    "turn_win_rate": 0.0,
+    "river_win_rate": 0.0
+  },
+  "RandomDefault": {
+    "agent_name": "RandomDefault",
+    "total_profit": -6913,
+    "total_games": 7200,
+    "wins": 1191,
+    "losses": 4668,
+    "breakeven": 1341,
+    "profit_per_game": -0.9601389,
+    "profit_per_100_hands": -96.01389,
+    "roi_percent": -7.71971,
+    "position_stats": [
+      {
+        "seat_index": 0,
+        "games_played": 1200,
+        "profit": -2322,
+        "profit_per_game": -1.935
+      },
+      {
+        "seat_index": 1,
+        "games_played": 1200,
+        "profit": -847,
+        "profit_per_game": -0.7058333
+      },
+      {
+        "seat_index": 2,
+        "games_played": 1200,
+        "profit": -738,
+        "profit_per_game": -0.615
+      },
+      {
+        "seat_index": 3,
+        "games_played": 1200,
+        "profit": -862,
+        "profit_per_game": -0.7183333
+      },
+      {
+        "seat_index": 4,
+        "games_played": 1200,
+        "profit": -2031,
+        "profit_per_game": -1.6925
+      },
+      {
+        "seat_index": 5,
+        "games_played": 1200,
+        "profit": -113,
+        "profit_per_game": -0.094166666
+      }
+    ],
+    "vpip_percent": 70.93056,
+    "pfr_percent": 17.041666,
+    "three_bet_percent": 3.030303,
+    "aggression_factor": 1.2045519,
+    "cbet_percent": 0.0,
+    "wtsd_percent": 0.0,
+    "wsd_percent": 29.700747,
+    "steal_percent": 10.777626,
+    "aggression_frequency": 38.705547,
+    "flop_aggression_factor": 0.0,
+    "turn_aggression_factor": 0.0,
+    "river_aggression_factor": 0.0,
+    "preflop_win_rate": 0.0,
+    "flop_win_rate": 0.0,
+    "turn_win_rate": 0.0,
+    "river_win_rate": 0.0
+  },
+  "RandomPotControl": {
+    "agent_name": "RandomPotControl",
+    "total_profit": -1034,
+    "total_games": 7200,
+    "wins": 76,
+    "losses": 2563,
+    "breakeven": 4561,
+    "profit_per_game": -0.14361112,
+    "profit_per_100_hands": -14.361112,
+    "roi_percent": -13.511041,
+    "position_stats": [
+      {
+        "seat_index": 0,
+        "games_played": 1200,
+        "profit": -108,
+        "profit_per_game": -0.09
+      },
+      {
+        "seat_index": 1,
+        "games_played": 1200,
+        "profit": 47,
+        "profit_per_game": 0.039166667
+      },
+      {
+        "seat_index": 2,
+        "games_played": 1200,
+        "profit": -83,
+        "profit_per_game": -0.06916667
+      },
+      {
+        "seat_index": 3,
+        "games_played": 1200,
+        "profit": -147,
+        "profit_per_game": -0.1225
+      },
+      {
+        "seat_index": 4,
+        "games_played": 1200,
+        "profit": -421,
+        "profit_per_game": -0.35083333
+      },
+      {
+        "seat_index": 5,
+        "games_played": 1200,
+        "profit": -322,
+        "profit_per_game": -0.26833335
+      }
+    ],
+    "vpip_percent": 5.0833335,
+    "pfr_percent": 2.347222,
+    "three_bet_percent": 0.23492561,
+    "aggression_factor": null,
+    "cbet_percent": 0.0,
+    "wtsd_percent": 0.0,
+    "wsd_percent": 41.758244,
+    "steal_percent": 1.4285715,
+    "aggression_frequency": 8.643582,
+    "flop_aggression_factor": 0.0,
+    "turn_aggression_factor": 0.0,
+    "river_aggression_factor": 0.0,
+    "preflop_win_rate": 0.0,
+    "flop_win_rate": 0.0,
+    "turn_win_rate": 0.0,
+    "river_win_rate": 0.0
+  }
+}

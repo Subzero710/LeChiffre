@@ -1,0 +1,46 @@
+{
+  "bb_per_100": -24.46500000000005,
+  "ci95": [
+    -33.625423088186906,
+    -15.304576911813195
+  ],
+  "exact_exploitability": null,
+  "game_id": "nlhe-hu-v1:52:stack20-blinds2-1:button0:cap1:history3x4:inputs312-actions6",
+  "hands": 10000,
+  "hero_checkpoint": "verification/neural-16/checkpoint-000016.bin",
+  "hero_iterations": 16,
+  "mean_bb_by_hero_seat": [
+    -0.357,
+    -0.1323
+  ],
+  "mode": "blueprint-only; no online search; no pruning; common reduced menu",
+  "pairs": 5000,
+  "reference": {
+    "blueprint_sha256": "7f7d20ab486f38878457b64cbb9e3d0c3b2c0ab97458ad373230e415a7754ae2",
+    "centroid_samples": 0,
+    "format": 1,
+    "game_id": "nlhe-hu-v1:52:stack20-blinds2-1:button0:cap1:history3x4:inputs312-actions6",
+    "iterations": 10000,
+    "mode": "blueprint-only-reduced-no-pruning",
+    "seed": 42,
+    "threads": 1,
+    "upstream_commit": "757f7692738069522195d2b486eec60a8b010c0c"
+  },
+  "reference_coverage": {
+    "decisions": [
+      9751,
+      4845,
+      2936,
+      1653
+    ],
+    "fallbacks": [
+      20,
+      0,
+      2,
+      14
+    ]
+  },
+  "reference_directory": "verification/reference-10000",
+  "seed": 123,
+  "total_bb": -2446.5
+}

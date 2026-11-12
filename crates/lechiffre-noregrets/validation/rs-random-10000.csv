@@ -1,0 +1,2 @@
+opponent,hands,seed,total_bb,bb_per_100,ci95_low,ci95_high,decisions,unseen,decisions_after_off_tree_bet
+"random",10000,123,7311.000000,73.110000,64.461620,81.758380,15814,814,4588

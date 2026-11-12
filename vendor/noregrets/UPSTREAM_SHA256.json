@@ -1,0 +1,174 @@
+{
+  "ROADMAP.md": {
+    "sha256": "cbfede42f434b17f85e84b44a55181835738aa05c35193f6454ca86453fc354a",
+    "bytes": 23630
+  },
+  "README.md": {
+    "sha256": "c69a90ac6a940eb670a65ce7ebc8651989da4553e39818244d097a5f8819a6b5",
+    "bytes": 52068
+  },
+  ".gitignore": {
+    "sha256": "c23d9a21f50a36dfc71a7319ab36a748f3ed34f310e1c38c8e4a9d75d7b11a5b",
+    "bytes": 64
+  },
+  "LICENSE": {
+    "sha256": "d14f8cfebaacaba7c93bd90c42b8a239f29e9f3562398bce5596a0eee01a2985",
+    "bytes": 1072
+  },
+  "Cargo.lock": {
+    "sha256": "d2d7178232388569fb3e4a58ede68b6b185a7cca60d372fdc0733bd4120a619f",
+    "bytes": 34572
+  },
+  "BASELINES.md": {
+    "sha256": "6fafecbc4c3a8697dea099a9e1f9fb436f8f17e8ec4aa3cfe3d67e0fc3506054",
+    "bytes": 66962
+  },
+  "Cargo.toml": {
+    "sha256": "9a883084d2ebb1116dbfaae2ef09d7549a49a74fed1325c7c405f92b8441f2ba",
+    "bytes": 596
+  },
+  "legacy/requirements.txt": {
+    "sha256": "6d178b5d2fe53a02c1a89965c0bfdbd69130e0476b21654b7475021d792ff679",
+    "bytes": 13
+  },
+  "legacy/poker_bot_utils.py": {
+    "sha256": "fcb2e7478f9cffca8a65c12d5ec8ad4202e74045197a9a9d48e31a6a8fb5be8b",
+    "bytes": 12742
+  },
+  "legacy/train.py": {
+    "sha256": "0f95b70e0900e00101d747a91225c76d72afb39b48a54e098271d44eed1df7a2",
+    "bytes": 2782
+  },
+  "legacy/poker_bot_pluribus.py": {
+    "sha256": "726aef97dc2e2a48148d7c5ab5628913b4818a08c460f698318ee7a06e6c72a3",
+    "bytes": 23948
+  },
+  "legacy/test_play.py": {
+    "sha256": "5b6c404dfc8d7454fac2a77d2187851cbae747e571b53b9d342331db9f400dff",
+    "bytes": 1034
+  },
+  "legacy/quick_test.py": {
+    "sha256": "b271b7510fc0d71fa280ab46c0589b0b22f263faf20ff204f278c65a783a993c",
+    "bytes": 4374
+  },
+  "legacy/play.py": {
+    "sha256": "efab09ef5209df0635772292f35ef82b4c0d13c193b42c6d994517bc628552f9",
+    "bytes": 2399
+  },
+  "legacy/README_python.md": {
+    "sha256": "704f9c498b75554893d7ed32847d96bfcc34b229b56ddfe3d83741ffb365b021",
+    "bytes": 10240
+  },
+  "legacy/minimal_test.py": {
+    "sha256": "654585ddea319f2f13d568b8a811cd7139e99cad27b11a7b7e244a90590dd4de",
+    "bytes": 2469
+  },
+  "legacy/test_installation.py": {
+    "sha256": "4d7e9fe05ec61e32bb264500d36aefb82ee5d7c8744b9c034a915a15c61e944a",
+    "bytes": 3220
+  },
+  "legacy/log.txt": {
+    "sha256": "cd153537b0647ed169577384b38deae76f0f7686ddb9b38d30c6428de33dbfd3",
+    "bytes": 497
+  },
+  "legacy/poker_game_engine.py": {
+    "sha256": "1fc54c3dd496d687b3c7c29767123bfe783d1f70deff1dde47e85f2c5d5e5b53",
+    "bytes": 14117
+  },
+  "src/main.rs": {
+    "sha256": "200f648f1f5c8172f593ef9eefb202358c1873cd29a0f5ecf8989037fc33e0a5",
+    "bytes": 56793
+  },
+  "src/distill.rs": {
+    "sha256": "1ff8b73095cb0975fba37f6141ceb6fa4b2cf411905dd1870f3a5f1e5a4ff976",
+    "bytes": 13121
+  },
+  "src/bot.rs": {
+    "sha256": "fc8646de33633e2413fc959c6700480a320bebd4d5f5123d702ee865d619bb8a",
+    "bytes": 56720
+  },
+  "src/ablate.rs": {
+    "sha256": "580f5b6c1fd0c82c9d9756c731d3c71b855fa50262990a2961f3c3355b46e6d1",
+    "bytes": 7167
+  },
+  "src/benchmark.rs": {
+    "sha256": "5fd9417f3c9221ed2eccdb90c3579193b45a3c3ca5d09ecdd2d4933cdabb54d0",
+    "bytes": 16159
+  },
+  "src/clone.rs": {
+    "sha256": "3a39c09bc61f19a3ad946cb03ef6e00a6b9c81c0e2f81cb5cb259e0287fd3d8e",
+    "bytes": 11651
+  },
+  "src/play.rs": {
+    "sha256": "439eeff1720d51b1a41296a54027601e810a044ff4b04ecb836eddca92fff497",
+    "bytes": 8161
+  },
+  "src/cards.rs": {
+    "sha256": "d4554a48738b341836e9cedd60fd514325852ee331daed4542184fde7f621ad0",
+    "bytes": 2164
+  },
+  "src/flop.rs": {
+    "sha256": "3b5374ab71005831af232ce6fb6e8024e9254853a49cb159910eafec0737cd5f",
+    "bytes": 33132
+  },
+  "src/slumbot.rs": {
+    "sha256": "ad1e0c56975b3c0158e00b3a1d52599a88d6be7a00caaa689e60b5e11b965610",
+    "bytes": 30664
+  },
+  "src/portfolio.rs": {
+    "sha256": "d80eb451a47d892fca08d344a96f2c52e856b13a77460d83dfa39db2edfa15c2",
+    "bytes": 6378
+  },
+  "src/engine.rs": {
+    "sha256": "3943f52a73a23aaebda6e5e490388c07cfbcc24156760f0ece452c02ae892572",
+    "bytes": 28744
+  },
+  "src/abstraction.rs": {
+    "sha256": "03b9d78c7f1e43e5214c26d97170eae342506eb526502d91b38df42e2b12491c",
+    "bytes": 73414
+  },
+  "src/net.rs": {
+    "sha256": "efbb22ef1952c3c9d245b3c4f135e1a9ffa1e47647443ebff739a322e450a9dd",
+    "bytes": 11264
+  },
+  "src/br.rs": {
+    "sha256": "d2f71476b1d284f60fb49d50dbdf1dd582496343d27140f3875136f846f2792a",
+    "bytes": 30161
+  },
+  "src/valuenet.rs": {
+    "sha256": "c70b2bbd7747777577dd6d61c5b748de55525bcf6b275fe3387e0cda296ebf38",
+    "bytes": 16003
+  },
+  "src/eval.rs": {
+    "sha256": "7021de9f97cbc2724d160030337dc022281aa6b397772a4ebb5b451bd85d0847",
+    "bytes": 11149
+  },
+  "src/search.rs": {
+    "sha256": "0caf0089b31d245eaa13678793468f6befd7aad5529776848b81dfe1f94cf407",
+    "bytes": 15473
+  },
+  "src/aivat.rs": {
+    "sha256": "f5ef231f1570156b4f13cfc2f81233b24d11be32a40be121e0ca40eba135897f",
+    "bytes": 14951
+  },
+  "src/cfr.rs": {
+    "sha256": "fa710178726f4ac36f80dda5422173c931347df7ca3800d63cb9a98df0241181",
+    "bytes": 57775
+  },
+  "src/river.rs": {
+    "sha256": "338314d2e8e647293f78c4de2c6d893f2fcf28b7c1cf91fdf5cf69b152fde46d",
+    "bytes": 35272
+  },
+  "src/turn.rs": {
+    "sha256": "d30714491d377106985950b4cf6eabc256a90842864abc7757c8b9566e919616",
+    "bytes": 35617
+  },
+  "src/lbr.rs": {
+    "sha256": "23180dc9e71dfeb568b2d0317fce50c383bbf93f13c09f3b7c49414d5d16a612",
+    "bytes": 33863
+  },
+  "src/table.rs": {
+    "sha256": "1d2eb95b9657203bd9d1d519aaf92f308b4e90b2e0d118978e6bfdc41dd4fde3",
+    "bytes": 27619
+  }
+}

@@ -1,0 +1,132 @@
+{
+  "players": 6,
+  "stack": 20,
+  "big_blind": 2,
+  "hands": 6000,
+  "cycles": 1000,
+  "seed": 123,
+  "seats": [
+    {
+      "seat": 1,
+      "agent": "noregrets",
+      "config": {
+        "metadata": {
+          "big_blind": 2,
+          "blueprint_sha256": "263928f216707efd518e53ae975d62e92d4480695c4b9b32f245c8b449679b2c",
+          "format": "noregrets-rs-agent-unlimited-v2",
+          "iterations": 10000,
+          "num_players": 6,
+          "seed": 42,
+          "small_blind": 1,
+          "source": "757f7692738069522195d2b486eec60a8b010c0c",
+          "stack": 20
+        },
+        "name": "noregrets",
+        "reference": "references/noregrets-6max-10bb-agent-10000-seed42",
+        "type": "noregrets"
+      },
+      "total_bb": 318.5,
+      "bb_per_100": 5.308333333333294,
+      "ci95": [
+        -34.479906460075455,
+        45.096573126742044
+      ],
+      "noregrets": {
+        "decisions": 7671,
+        "unseen": 2534,
+        "decisions_after_off_tree_bet": 707,
+        "errors": []
+      }
+    },
+    {
+      "seat": 2,
+      "agent": "random",
+      "config": {
+        "name": "random",
+        "percent_call": [
+          0.5,
+          0.6,
+          0.45
+        ],
+        "percent_fold": [
+          0.25,
+          0.3,
+          0.5
+        ],
+        "type": "random"
+      },
+      "total_bb": -3665.5,
+      "bb_per_100": -61.09166666666665,
+      "ci95": [
+        -96.75482542999119,
+        -25.42850790334211
+      ],
+      "noregrets": null
+    },
+    {
+      "seat": 3,
+      "agent": "calling (siege 3)",
+      "config": {
+        "name": "calling (siege 3)",
+        "type": "calling"
+      },
+      "total_bb": -550.5,
+      "bb_per_100": -9.175000000000031,
+      "ci95": [
+        -53.27918137809227,
+        34.9291813780922
+      ],
+      "noregrets": null
+    },
+    {
+      "seat": 4,
+      "agent": "all_in",
+      "config": {
+        "name": "all_in",
+        "type": "all_in"
+      },
+      "total_bb": -1119.0,
+      "bb_per_100": -18.650000000000013,
+      "ci95": [
+        -62.19821708139518,
+        24.898217081395153
+      ],
+      "noregrets": null
+    },
+    {
+      "seat": 5,
+      "agent": "calling (siege 5)",
+      "config": {
+        "name": "calling (siege 5)",
+        "type": "calling"
+      },
+      "total_bb": 4296.0,
+      "bb_per_100": 71.6,
+      "ci95": [
+        25.452117760035165,
+        117.74788223996482
+      ],
+      "noregrets": null
+    },
+    {
+      "seat": 6,
+      "agent": "random_pot_control",
+      "config": {
+        "name": "random_pot_control",
+        "percent_call": [
+          0.5,
+          0.3
+        ],
+        "type": "random_pot_control"
+      },
+      "total_bb": 720.5,
+      "bb_per_100": 12.00833333333333,
+      "ci95": [
+        -1.3128921801610236,
+        25.32955884682768
+      ],
+      "noregrets": null
+    }
+  ],
+  "exact_exploitability": null
+}

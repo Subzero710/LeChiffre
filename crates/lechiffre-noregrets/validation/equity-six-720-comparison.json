@@ -1,0 +1,70 @@
+{
+  "ante": 0,
+  "big_blind": 2,
+  "exact_exploitability": null,
+  "max_raises_per_round": null,
+  "note": "Native seat permutations; future deals use independent RNG substreams. Native statistics; no exact exploitability or paired confidence interval.",
+  "num_game_states": 1,
+  "permutations_per_state": 720,
+  "planned_total_hands": 720,
+  "players": 6,
+  "profiles": [
+    {
+      "name": "Calling (siege 1)",
+      "type": "calling"
+    },
+    {
+      "name": "Calling (siege 2)",
+      "type": "calling"
+    },
+    {
+      "iterations": 1000,
+      "large_bet_pot": 1.0,
+      "large_edge": 0.6,
+      "medium_bet_pot": 0.66,
+      "medium_edge": 0.35,
+      "name": "EquityAgent",
+      "small_bet_pot": 0.33,
+      "small_edge": 0.15,
+      "type": "equity"
+    },
+    {
+      "name": "Folding",
+      "type": "folding"
+    },
+    {
+      "metadata": {
+        "big_blind": 2,
+        "blueprint_sha256": "d595b70a57e943dc61df06e0de87ae24273c241c709c550ea98e52064dc63d74",
+        "format": "noregrets-rs-agent-unlimited-v2",
+        "iterations": 64,
+        "num_players": 6,
+        "seed": 43,
+        "small_blind": 1,
+        "source": "757f7692738069522195d2b486eec60a8b010c0c",
+        "stack": 20
+      },
+      "name": "NoRegrets-validation64",
+      "reference": "runs/equity-v2-validation",
+      "type": "noregrets"
+    },
+    {
+      "name": "RandomDefault",
+      "percent_call": [
+        0.5,
+        0.6,
+        0.45
+      ],
+      "percent_fold": [
+        0.25,
+        0.3,
+        0.5
+      ],
+      "type": "random"
+    }
+  ],
+  "runner": "rs_poker::arena::comparison::ArenaComparison",
+  "seed": 123,
+  "small_blind": 1,
+  "stack": 20
+}

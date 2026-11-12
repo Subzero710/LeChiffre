@@ -1,0 +1,10 @@
+{
+  "format": "noregrets-rs-agent-hu-unlimited-v1",
+  "source": "757f7692738069522195d2b486eec60a8b010c0c",
+  "iterations": 10000,
+  "seed": 42,
+  "stack": 20,
+  "small_blind": 1,
+  "big_blind": 2,
+  "blueprint_sha256": "e54eb25a0571d2ca5b64bc4cbb290fb9c502d12fc81af03dabe688226bd96bea"
+}
