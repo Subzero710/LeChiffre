@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::fmt;
 
 use super::BehaviourParquetDataset;
-use crate::behavioural::checkpoint::{dimension, exact_keys, unsigned};
+use crate::behavioural::checkpoint::{dimension, exact_keys};
 use crate::behavioural::codebook::{action_from_id, position_from_id, position_id, street_from_id};
 use crate::behavioural::{
     ActionKind, ActionSizing, CategoricalFeature, ContinuousFeature, FeaturizedHand,
@@ -38,58 +38,30 @@ where
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HierarchicalHandSplit {
-    pub first_query_hand_index: u64,
-    pub first_evaluation_hand_index: u64,
+pub struct TrainingEpisodeConfig {
     pub support_hands: usize,
     pub query_hands: usize,
-    pub evaluation_hands: usize,
 }
-impl HierarchicalHandSplit {
-    pub fn new(
-        first_query_hand_index: u64,
-        first_evaluation_hand_index: u64,
-        support_hands: usize,
-        query_hands: usize,
-        evaluation_hands: usize,
-    ) -> Result<Self, TrainingDataError> {
-        if first_evaluation_hand_index <= first_query_hand_index
-            || support_hands == 0
-            || query_hands == 0
-            || evaluation_hands == 0
-        {
+impl TrainingEpisodeConfig {
+    pub fn new(support_hands: usize, query_hands: usize) -> Result<Self, TrainingDataError> {
+        if support_hands == 0 || query_hands == 0 {
             return Err(TrainingDataError::InvalidConfiguration);
         }
         Ok(Self {
-            first_query_hand_index,
-            first_evaluation_hand_index,
             support_hands,
             query_hands,
-            evaluation_hands,
         })
     }
+
     pub(crate) fn checkpoint_value(self) -> Value {
-        json!({"first_query_hand_index":self.first_query_hand_index,
-               "first_evaluation_hand_index":self.first_evaluation_hand_index,
-               "support_hands":self.support_hands,"query_hands":self.query_hands,"evaluation_hands":self.evaluation_hands})
+        json!({"support_hands":self.support_hands,"query_hands":self.query_hands})
     }
+
     pub(crate) fn from_checkpoint(value: &Value) -> Result<Self, String> {
-        exact_keys(
-            value,
-            &[
-                "first_query_hand_index",
-                "first_evaluation_hand_index",
-                "support_hands",
-                "query_hands",
-                "evaluation_hands",
-            ],
-        )?;
+        exact_keys(value, &["support_hands", "query_hands"])?;
         Self::new(
-            unsigned(&value["first_query_hand_index"])?,
-            unsigned(&value["first_evaluation_hand_index"])?,
             dimension(&value["support_hands"])?,
             dimension(&value["query_hands"])?,
-            dimension(&value["evaluation_hands"])?,
         )
         .map_err(|e| e.to_string())
     }
@@ -98,14 +70,17 @@ impl HierarchicalHandSplit {
 #[derive(Debug, Clone)]
 pub(super) struct SubjectSample {
     pub(super) id: u64,
+    pub(super) support: Vec<(u64, FeaturizedHand)>,
     pub(super) query: Vec<FeaturizedHand>,
-    pub(super) validation: Vec<FeaturizedHand>,
 }
 
+/// One deterministic trailing episode per selected subject, entirely inside
+/// the globally verified Train partition; support strictly precedes query.
 pub(super) fn sample_subjects(
     dataset: &BehaviourParquetDataset,
     selected: &[u64],
-    split: HierarchicalHandSplit,
+    partitions: &super::DatasetPartitions,
+    episode: TrainingEpisodeConfig,
 ) -> Result<Vec<SubjectSample>, TrainingDataError> {
     if selected.is_empty() {
         return Err(TrainingDataError::EmptySubjectSelection);
@@ -120,54 +95,60 @@ pub(super) fn sample_subjects(
             .subjects
             .get(&id)
             .ok_or(TrainingDataError::UnknownSubject { subject_id: id })?;
-        let mut support = Vec::new();
-        let mut query = Vec::new();
-        let mut validation = Vec::new();
-        for membership in memberships {
-            let hand = &dataset.hands[membership.hand_slot];
-            let materialized = hand.materialize(membership.subject_position);
-            if hand.hand_index < split.first_query_hand_index {
-                support.push(materialized);
-            } else if hand.hand_index < split.first_evaluation_hand_index {
-                query.push(materialized);
-            } else {
-                validation.push(materialized);
-            }
-        }
-        if support.len() < split.support_hands
-            || query.len() < split.query_hands
-            || validation.len() < split.evaluation_hands
-        {
+        let train = memberships
+            .iter()
+            .filter(|membership| {
+                partitions.contains_train(dataset.hands[membership.hand_slot].hand_index)
+            })
+            .collect::<Vec<_>>();
+        let needed = episode
+            .support_hands
+            .checked_add(episode.query_hands)
+            .ok_or(TrainingDataError::CountOverflow)?;
+        if train.len() < needed {
             return Err(TrainingDataError::InsufficientPartition {
                 subject_id: id,
-                available_support: support.len(),
-                available_query: query.len(),
-                available_evaluation: validation.len(),
+                available_support: train.len().saturating_sub(episode.query_hands),
+                available_query: train.len().min(episode.query_hands),
+                available_evaluation: 0,
             });
         }
-        let support = support.split_off(support.len() - split.support_hands);
-        query.truncate(split.query_hands);
-        validation.truncate(split.evaluation_hands);
-        for (name, hands) in [
-            ("support", &support),
-            ("query", &query),
-            ("evaluation", &validation),
-        ] {
-            if !hands
-                .iter()
-                .any(|hand| subject_decisions(hand).next().is_some())
-            {
-                return Err(TrainingDataError::NoSubjectDecisions {
-                    subject_id: id,
-                    partition: name,
-                });
-            }
+        let tail = &train[train.len() - needed..];
+        let support = tail[..episode.support_hands]
+            .iter()
+            .map(|membership| {
+                let hand = &dataset.hands[membership.hand_slot];
+                (
+                    hand.hand_index,
+                    hand.materialize(membership.subject_position),
+                )
+            })
+            .collect::<Vec<_>>();
+        let query = tail[episode.support_hands..]
+            .iter()
+            .map(|membership| {
+                dataset.hands[membership.hand_slot].materialize(membership.subject_position)
+            })
+            .collect::<Vec<_>>();
+        if !support
+            .iter()
+            .any(|(_, hand)| subject_decisions(hand).next().is_some())
+        {
+            return Err(TrainingDataError::NoSubjectDecisions {
+                subject_id: id,
+                partition: "support",
+            });
         }
-        result.push(SubjectSample {
-            id,
-            query,
-            validation,
-        });
+        if !query
+            .iter()
+            .any(|hand| subject_decisions(hand).next().is_some())
+        {
+            return Err(TrainingDataError::NoSubjectDecisions {
+                subject_id: id,
+                partition: "query",
+            });
+        }
+        result.push(SubjectSample { id, support, query });
     }
     Ok(result)
 }
@@ -394,9 +375,9 @@ impl std::error::Error for TrainingDataError {}
 mod tests {
     use super::*;
     #[test]
-    fn enforces_strict_chronological_partitions() {
-        assert!(HierarchicalHandSplit::new(5, 5, 1, 1, 1).is_err());
-        assert!(HierarchicalHandSplit::new(5, 6, 1, 0, 1).is_err());
-        assert!(HierarchicalHandSplit::new(5, 6, 1, 1, 1).is_ok());
+    fn enforces_nonempty_support_query() {
+        assert!(TrainingEpisodeConfig::new(0, 1).is_err());
+        assert!(TrainingEpisodeConfig::new(1, 0).is_err());
+        assert!(TrainingEpisodeConfig::new(1, 1).is_ok());
     }
 }

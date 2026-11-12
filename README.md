@@ -89,7 +89,7 @@ LeChiffre comprend un modèle comportemental hiérarchique utilisant un **Genera
 - **Z₁ — baseline individuelle :** adaptation au comportement observé d'un joueur, initialisée à Z₀.
 - **Z₂ — état momentané :** représentation inférée pour une décision particulière, avec une distinction entre prédiction *avant* l'action et reconstruction *après* l'action.
 
-Le pipeline disponible dans le binaire `lechiffre` couvre l'import CSV/JSON pris en charge, l'export Parquet, l'entraînement hiérarchique, l'évaluation, la reprise de checkpoints et la persistance des baselines individuelles.
+Le pipeline disponible dans le binaire `lechiffre` couvre l'import CSV/JSON pris en charge, l'export Parquet, l'entraînement hiérarchique, l'évaluation, la reprise de checkpoints et la persistance des baselines individuelles. L'entraînement exige un manifeste Train / Validation / Test (`lechiffre.ingestion-hand-split.v1`) validé contre le Parquet ; Support / Query ne sert qu'à former les épisodes internes à Train. Le test final doit être lancé explicitement sur le checkpoint sélectionné par Validation.
 
 Les fichiers `configs/hierarchical.example.json` et `configs/hierarchical-resume.example.json` sont **des exemples de structure**, pas des configurations universelles prêtes à entraîner un modèle sur n'importe quel dataset.
 

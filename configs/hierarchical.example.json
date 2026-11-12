@@ -9,16 +9,32 @@
   "baseline_max_step_prior_std": 0.1,
   "beta_kl": 0.01,
   "seed": 42,
-  "z0_initial": [0.0, 0.0, 0.0, 0.0],
-  "z0_prior_std": [1.0, 1.0, 1.0, 1.0],
-  "first_query_hand_index": 400,
-  "first_evaluation_hand_index": 700,
+  "z0_initial": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "z0_prior_std": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+  ],
   "support_hands": 100,
   "query_hands": 30,
-  "evaluation_hands": 20,
   "blueprint_epochs": 5,
-  "personalization_history_hands": [0, 10, 100, 10, 100],
+  "personalization_history_hands": [
+    0,
+    10,
+    100,
+    10,
+    100
+  ],
   "momentary_history_hands": 100,
   "momentary_epochs": 10,
-  "subject_ids": [1, 2]
+  "subject_ids": [
+    1,
+    2
+  ]
 }

@@ -213,9 +213,6 @@ fn commit_new_json_manifest(
 /// Exports an immutable manifest of complete hands, not a split of event rows.
 /// `hand_index` denotes ingestion order only; source-time chronology is unverified.
 fn split_behaviour_dataset_hands(args: &[String]) -> Result<(), String> {
-    use lechiffre::datasets::behaviour_parquet_loader::HAND_SPLIT_ALGORITHM_VERSION;
-    use serde_json::json;
-
     if args.len() != 4 {
         return Err(
             "usage: --split-behaviour-dataset-hands <parquet-dir> <new-manifest.json>".into(),
@@ -225,79 +222,8 @@ fn split_behaviour_dataset_hands(args: &[String]) -> Result<(), String> {
     let split = dataset
         .split_hands_by_ingestion(7_000, 1_500, 1_500)
         .map_err(|e| e.to_string())?;
-    let stats = dataset.summary();
-
-    // Existing hierarchical query hands are used for training, NOT validation.
-    // These strict train/validation/test boundaries are intentionally not wired
-    // into HierarchicalHandSplit, to prevent validation-to-training leakage.
-    let to_entries =
-        |hands: &[lechiffre::datasets::behaviour_parquet_loader::HandPartitionEntry]| {
-            hands
-                .iter()
-                .map(|entry| {
-                    json!({
-                        "hand_id": entry.hand_id.as_str(),
-                        "hand_index": entry.hand_index,
-                        "decisions": entry.decision_count,
-                        "players_at_table": entry.players_at_table,
-                    })
-                })
-                .collect::<Vec<_>>()
-        };
-    let subject_counts = split
-        .subject_hand_counts()
-        .iter()
-        .map(|(&subject_id, &counts)| {
-            json!({
-                "subject_id": subject_id,
-                "train_hands": counts[0],
-                "validation_hands": counts[1],
-                "test_hands": counts[2],
-            })
-        })
-        .collect::<Vec<_>>();
+    let manifest = split.manifest_value(&dataset);
     let decisions = split.decision_counts();
-    let memberships = split.subject_hand_rows();
-    let manifest = json!({
-        "format": "lechiffre.ingestion-hand-split.v1",
-        "algorithm_version": HAND_SPLIT_ALGORITHM_VERSION,
-        "ordering": "persisted_hand_index_ingestion_order_not_verified_wall_clock_chronology",
-        "ratios_basis_points": {"train": 7000, "validation": 1500, "test": 1500},
-        "rounding": "floor_train_and_validation_remainder_to_test",
-        "dataset": {
-            "hands": stats.hands_written,
-            "decisions": stats.events_written,
-            "subject_hand_rows": stats.subject_hand_rows_written,
-            "fingerprint_fnv128_noncryptographic": dataset.dataset_fingerprint(),
-        },
-        "boundaries": {
-            "first_validation_hand_index": split.first_validation_hand_index(),
-            "first_test_hand_index": split.first_test_hand_index(),
-        },
-        "hierarchical_training_integration": "not_compatible_query_partition_is_used_for_training",
-        "partitions": {
-            "train": {
-                "hands": split.train().len(),
-                "decisions": decisions[0],
-                "subject_hand_rows": memberships[0],
-                "entries": to_entries(split.train()),
-            },
-            "validation": {
-                "hands": split.validation().len(),
-                "decisions": decisions[1],
-                "subject_hand_rows": memberships[1],
-                "entries": to_entries(split.validation()),
-            },
-            "test": {
-                "hands": split.test().len(),
-                "decisions": decisions[2],
-                "subject_hand_rows": memberships[2],
-                "entries": to_entries(split.test()),
-            },
-        },
-        "subjects": subject_counts,
-    });
-
     let output = std::path::Path::new(&args[3]);
     commit_new_json_manifest(output, &manifest)?;
     println!(
@@ -317,7 +243,7 @@ fn split_behaviour_dataset_hands(args: &[String]) -> Result<(), String> {
 
 /// Strict hierarchical run specification. No compatibility with the old A/G config.
 struct BehaviourRunConfig {
-    split: lechiffre::datasets::behaviour_parquet_loader::HierarchicalHandSplit,
+    episode: lechiffre::datasets::behaviour_parquet_loader::TrainingEpisodeConfig,
     latent_dimension: usize,
     generator_hidden: usize,
     analyzer_hidden: usize,
@@ -402,7 +328,7 @@ fn config_f32_vec(v: &serde_json::Value, key: &str) -> Result<Vec<f32>, String> 
         .collect()
 }
 fn run_configuration(path: &str) -> Result<BehaviourRunConfig, String> {
-    use lechiffre::datasets::behaviour_parquet_loader::HierarchicalHandSplit;
+    use lechiffre::datasets::behaviour_parquet_loader::TrainingEpisodeConfig;
     let v = configuration_object(path)?;
     let keys = [
         "latent_dimension",
@@ -417,11 +343,8 @@ fn run_configuration(path: &str) -> Result<BehaviourRunConfig, String> {
         "seed",
         "z0_initial",
         "z0_prior_std",
-        "first_query_hand_index",
-        "first_evaluation_hand_index",
         "support_hands",
         "query_hands",
-        "evaluation_hands",
         "blueprint_epochs",
         "personalization_history_hands",
         "momentary_history_hands",
@@ -429,12 +352,9 @@ fn run_configuration(path: &str) -> Result<BehaviourRunConfig, String> {
         "subject_ids",
     ];
     require_exact_keys(&v, &keys)?;
-    let split = HierarchicalHandSplit::new(
-        config_u64(&v, "first_query_hand_index")?,
-        config_u64(&v, "first_evaluation_hand_index")?,
+    let episode = TrainingEpisodeConfig::new(
         config_usize(&v, "support_hands")?,
         config_usize(&v, "query_hands")?,
-        config_usize(&v, "evaluation_hands")?,
     )
     .map_err(|e| e.to_string())?;
     let history = config_sizes(&v, "personalization_history_hands")?;
@@ -450,8 +370,8 @@ fn run_configuration(path: &str) -> Result<BehaviourRunConfig, String> {
         || initial.len() != dim
         || std.len() != dim
         || subjects.is_empty()
-        || history.iter().any(|&n| n > split.support_hands)
-        || momentary_history > split.support_hands
+        || history.iter().any(|&n| n > episode.support_hands)
+        || momentary_history > episode.support_hands
         || std.iter().any(|s| *s <= 0.0)
         || [
             "generator_lr",
@@ -470,7 +390,7 @@ fn run_configuration(path: &str) -> Result<BehaviourRunConfig, String> {
         return Err("invalid hierarchical configuration: all phases, model dimensions, and rates are strictly required".into());
     }
     Ok(BehaviourRunConfig {
-        split,
+        episode,
         latent_dimension: dim,
         generator_hidden: config_usize(&v, "generator_hidden")?,
         analyzer_hidden: config_usize(&v, "analyzer_hidden")?,
@@ -577,10 +497,11 @@ fn print_hierarchical_epoch(
     );
 }
 fn print_hierarchical_validation(
+    partition: lechiffre::datasets::behaviour_parquet_loader::EvaluationPartition,
     r: &lechiffre::datasets::behaviour_parquet_loader::HierarchicalValidationReport,
 ) {
     println!(
-        "validation_decisions={} z0_predictive_nll={:.8} z1_predictive_nll={:.8} z2_prior_predictive_nll={:.8} z2_posterior_RECONSTRUCTION_nll={:.8} mean_KL={:.8}",
+        "partition={partition:?} decisions={} z0_predictive_nll={:.8} z1_predictive_nll={:.8} z2_prior_predictive_nll={:.8} z2_posterior_RECONSTRUCTION_nll={:.8} mean_KL={:.8}",
         r.decisions,
         r.z0_predictive_nll,
         r.z1_predictive_nll,
@@ -615,7 +536,8 @@ fn replay_provider<'a>(
 fn execute_phases(
     trainer: &mut lechiffre::datasets::behaviour_parquet_loader::HierarchicalTrainer,
     dataset: &lechiffre::datasets::behaviour_parquet_loader::BehaviourParquetDataset,
-    split: lechiffre::datasets::behaviour_parquet_loader::HierarchicalHandSplit,
+    partitions: &lechiffre::datasets::behaviour_parquet_loader::DatasetPartitions,
+    episode: lechiffre::datasets::behaviour_parquet_loader::TrainingEpisodeConfig,
     subjects: &[u64],
     blueprint_epochs: usize,
     personalization_histories: &[usize],
@@ -625,7 +547,13 @@ fn execute_phases(
 ) -> Result<(), String> {
     for _ in 0..blueprint_epochs {
         let report = trainer
-            .train_blueprint_epoch(dataset, subjects, split, &mut replay_provider(exact))
+            .train_blueprint_epoch(
+                dataset,
+                subjects,
+                partitions,
+                episode,
+                &mut replay_provider(exact),
+            )
             .map_err(|e| e.to_string())?;
         print_hierarchical_epoch(&report);
     }
@@ -634,7 +562,8 @@ fn execute_phases(
             .train_personalization_epoch(
                 dataset,
                 subjects,
-                split,
+                partitions,
+                episode,
                 history,
                 &mut replay_provider(exact),
             )
@@ -646,7 +575,8 @@ fn execute_phases(
             .train_momentary_epoch(
                 dataset,
                 subjects,
-                split,
+                partitions,
+                episode,
                 momentary_history,
                 &mut replay_provider(exact),
             )
@@ -654,6 +584,25 @@ fn execute_phases(
         print_hierarchical_epoch(&report);
     }
     Ok(())
+}
+
+fn load_verified_partitions(
+    dataset: &BehaviourParquetDataset,
+    path: &str,
+) -> Result<lechiffre::datasets::behaviour_parquet_loader::DatasetPartitions, String> {
+    lechiffre::datasets::behaviour_parquet_loader::DatasetPartitions::read_manifest(dataset, path)
+        .map_err(|e| e.to_string())
+}
+
+fn evaluation_partition(
+    arg: &str,
+) -> Result<lechiffre::datasets::behaviour_parquet_loader::EvaluationPartition, String> {
+    use lechiffre::datasets::behaviour_parquet_loader::EvaluationPartition;
+    match arg {
+        "validation" => Ok(EvaluationPartition::Validation),
+        "test" => Ok(EvaluationPartition::Test),
+        _ => Err("evaluation partition must be exactly validation or test".into()),
+    }
 }
 
 fn train_hierarchical(args: &[String]) -> Result<(), String> {
@@ -664,12 +613,13 @@ fn train_hierarchical(args: &[String]) -> Result<(), String> {
     use lechiffre::datasets::behaviour_parquet_loader::{
         BehaviourParquetDataset, HierarchicalTrainer,
     };
-    if args.len() < 7 || !(args.len() - 5).is_multiple_of(2) {
-        return Err("usage: --train-behavioural <hierarchical-config.json> <parquet-dir> <checkpoint-out.json> <source.csv|.json> <session-id> ...".into());
+    if args.len() < 8 || !(args.len() - 6).is_multiple_of(2) {
+        return Err("usage: --train-behavioural <hierarchical-config.json> <parquet-dir> <manifest.json> <checkpoint-out.json> <source.csv|.json> <session-id> ...".into());
     }
     let run = run_configuration(&args[2])?;
     let dataset = BehaviourParquetDataset::open(&args[3]).map_err(|e| e.to_string())?;
-    let exact = exact_source_legality(&args[5..])?;
+    let partitions = load_verified_partitions(&dataset, &args[4])?;
+    let exact = exact_source_legality(&args[6..])?;
     let latent = BehaviourLatentConfig::new(run.latent_dimension).map_err(|e| e.to_string())?;
     let blueprint = BehaviourBlueprint::new(
         latent.profile(run.z0_initial).map_err(|e| e.to_string())?,
@@ -701,7 +651,8 @@ fn train_hierarchical(args: &[String]) -> Result<(), String> {
     execute_phases(
         &mut trainer,
         &dataset,
-        run.split,
+        &partitions,
+        run.episode,
         &run.subjects,
         run.blueprint_epochs,
         &run.personalization_history_hands,
@@ -713,17 +664,21 @@ fn train_hierarchical(args: &[String]) -> Result<(), String> {
         .evaluate(
             &dataset,
             &run.subjects,
-            run.split,
+            &partitions,
+            lechiffre::datasets::behaviour_parquet_loader::EvaluationPartition::Validation,
             &mut replay_provider(&exact),
         )
         .map_err(|e| e.to_string())?;
-    print_hierarchical_validation(&report);
+    print_hierarchical_validation(
+        lechiffre::datasets::behaviour_parquet_loader::EvaluationPartition::Validation,
+        &report,
+    );
     trainer
-        .save_checkpoint(&args[4])
+        .save_checkpoint(&args[5])
         .map_err(|e| e.to_string())?;
     println!(
         "checkpoint={} model_id={}",
-        args[4],
+        args[5],
         trainer.model_id().map_err(|e| e.to_string())?
     );
     Ok(())
@@ -733,21 +688,23 @@ fn resume_hierarchical(args: &[String]) -> Result<(), String> {
     use lechiffre::datasets::behaviour_parquet_loader::{
         BehaviourParquetDataset, HierarchicalTrainer,
     };
-    if args.len() < 8 || !(args.len() - 6).is_multiple_of(2) {
-        return Err("usage: --resume-behavioural <checkpoint-in.json> <parquet-dir> <checkpoint-out.json> <resume-config.json> <source.csv|.json> <session-id> ...".into());
+    if args.len() < 9 || !(args.len() - 7).is_multiple_of(2) {
+        return Err("usage: --resume-behavioural <checkpoint-in.json> <parquet-dir> <manifest.json> <checkpoint-out.json> <resume-config.json> <source.csv|.json> <session-id> ...".into());
     }
     let mut trainer = HierarchicalTrainer::load_checkpoint(&args[2]).map_err(|e| e.to_string())?;
     let dataset = BehaviourParquetDataset::open(&args[3]).map_err(|e| e.to_string())?;
-    let config = resume_configuration(&args[5])?;
-    let split = trainer
-        .training_split()
-        .ok_or("checkpoint missing chronological split")?;
+    let partitions = load_verified_partitions(&dataset, &args[4])?;
+    let config = resume_configuration(&args[6])?;
+    let episode = trainer
+        .training_episode()
+        .ok_or("checkpoint missing training episode")?;
     let subjects = trainer.training_subjects().to_vec();
-    let exact = exact_source_legality(&args[6..])?;
+    let exact = exact_source_legality(&args[7..])?;
     execute_phases(
         &mut trainer,
         &dataset,
-        split,
+        &partitions,
+        episode,
         &subjects,
         config.blueprint_extra_epochs,
         &config.personalization_history_hands,
@@ -757,16 +714,25 @@ fn resume_hierarchical(args: &[String]) -> Result<(), String> {
     )?;
     if trainer.completed_epochs().2 > 0 {
         let report = trainer
-            .evaluate(&dataset, &subjects, split, &mut replay_provider(&exact))
+            .evaluate(
+                &dataset,
+                &subjects,
+                &partitions,
+                lechiffre::datasets::behaviour_parquet_loader::EvaluationPartition::Validation,
+                &mut replay_provider(&exact),
+            )
             .map_err(|e| e.to_string())?;
-        print_hierarchical_validation(&report);
+        print_hierarchical_validation(
+            lechiffre::datasets::behaviour_parquet_loader::EvaluationPartition::Validation,
+            &report,
+        );
     }
     trainer
-        .save_checkpoint(&args[4])
+        .save_checkpoint(&args[5])
         .map_err(|e| e.to_string())?;
     println!(
         "checkpoint={} model_id={}",
-        args[4],
+        args[5],
         trainer.model_id().map_err(|e| e.to_string())?
     );
     Ok(())
@@ -776,19 +742,20 @@ fn evaluate_hierarchical(args: &[String], unseen: bool) -> Result<(), String> {
     use lechiffre::datasets::behaviour_parquet_loader::{
         BehaviourParquetDataset, HierarchicalTrainer,
     };
-    let start = if unseen { 5 } else { 4 };
+    let start = if unseen { 7 } else { 6 };
     if args.len() < start + 2 || !(args.len() - start).is_multiple_of(2) {
         return Err(if unseen {
-            "usage: --evaluate-unseen-behavioural <checkpoint.json> <parquet-dir> <subject-ids-comma-separated> <source.csv|.json> <session-id> ..."
+            "usage: --evaluate-unseen-behavioural <checkpoint.json> <parquet-dir> <manifest.json> <validation|test> <subject-ids> <source.csv|.json> <session-id> ..."
         } else {
-            "usage: --evaluate-behavioural <checkpoint.json> <parquet-dir> <source.csv|.json> <session-id> ..."
+            "usage: --evaluate-behavioural <checkpoint.json> <parquet-dir> <manifest.json> <validation|test> <source.csv|.json> <session-id> ..."
         }.into());
     }
     let trainer = HierarchicalTrainer::load_checkpoint(&args[2]).map_err(|e| e.to_string())?;
     let dataset = BehaviourParquetDataset::open(&args[3]).map_err(|e| e.to_string())?;
-    let split = trainer.training_split().ok_or("checkpoint missing split")?;
+    let partitions = load_verified_partitions(&dataset, &args[4])?;
+    let partition = evaluation_partition(&args[5])?;
     let subjects = if unseen {
-        args[4]
+        args[6]
             .split(',')
             .map(|id| {
                 id.parse::<u64>()
@@ -800,12 +767,101 @@ fn evaluate_hierarchical(args: &[String], unseen: bool) -> Result<(), String> {
     };
     let exact = exact_source_legality(&args[start..])?;
     let report = if unseen {
-        trainer.evaluate_unseen(&dataset, &subjects, split, &mut replay_provider(&exact))
+        trainer.evaluate_unseen(
+            &dataset,
+            &subjects,
+            &partitions,
+            partition,
+            &mut replay_provider(&exact),
+        )
     } else {
-        trainer.evaluate(&dataset, &subjects, split, &mut replay_provider(&exact))
+        trainer.evaluate(
+            &dataset,
+            &subjects,
+            &partitions,
+            partition,
+            &mut replay_provider(&exact),
+        )
     }
     .map_err(|e| e.to_string())?;
-    print_hierarchical_validation(&report);
+    print_hierarchical_validation(partition, &report);
+    Ok(())
+}
+
+/// Select exactly one immutable checkpoint by prospective Z2 prior NLL on
+/// Validation. Test is never evaluated, even when ranking candidates.
+fn select_best_hierarchical(args: &[String]) -> Result<(), String> {
+    use lechiffre::datasets::behaviour_parquet_loader::{EvaluationPartition, HierarchicalTrainer};
+    if args.len() < 8 || !(args.len() - 6).is_multiple_of(2) {
+        return Err("usage: --select-best-behavioural <parquet-dir> <manifest.json> <selected-checkpoint-out.json> <checkpoint1,checkpoint2,...> <source.csv|.json> <session-id> ...".into());
+    }
+    let dataset = BehaviourParquetDataset::open(&args[2]).map_err(|e| e.to_string())?;
+    let partitions = load_verified_partitions(&dataset, &args[3])?;
+    let output = std::path::Path::new(&args[4]);
+    if output.exists() {
+        return Err(format!(
+            "selected checkpoint already exists: {}",
+            output.display()
+        ));
+    }
+    let candidates: Vec<_> = args[5].split(',').collect();
+    if candidates.len() < 2 || candidates.iter().any(|candidate| candidate.is_empty()) {
+        return Err("selection requires at least two distinct checkpoint paths".into());
+    }
+    let mut unique = std::collections::HashSet::new();
+    if candidates
+        .iter()
+        .any(|candidate| !unique.insert(*candidate))
+    {
+        return Err("candidate checkpoint paths must be unique".into());
+    }
+    let exact = exact_source_legality(&args[6..])?;
+    let mut best: Option<(f64, &str)> = None;
+    let mut identity: Option<(
+        Vec<u64>,
+        lechiffre::datasets::behaviour_parquet_loader::TrainingEpisodeConfig,
+    )> = None;
+    for &path in &candidates {
+        let trainer = HierarchicalTrainer::load_checkpoint(path).map_err(|e| e.to_string())?;
+        let episode = trainer
+            .training_episode()
+            .ok_or("checkpoint missing training episode")?;
+        let current = (trainer.training_subjects().to_vec(), episode);
+        if let Some(expected) = &identity {
+            if expected != &current {
+                return Err("checkpoint subject selection or episode differs".into());
+            }
+        } else {
+            identity = Some(current);
+        }
+        let report = trainer
+            .evaluate(
+                &dataset,
+                trainer.training_subjects(),
+                &partitions,
+                EvaluationPartition::Validation,
+                &mut replay_provider(&exact),
+            )
+            .map_err(|e| format!("candidate {path}: {e}"))?;
+        let score = report.z2_prior_predictive_nll;
+        if !score.is_finite() {
+            return Err(format!(
+                "candidate {path} has a non-finite validation score"
+            ));
+        }
+        println!("candidate={path} validation_z2_prior_predictive_nll={score:.8}");
+        if best.as_ref().is_none_or(|(minimum, _)| score < *minimum) {
+            best = Some((score, path));
+        }
+    }
+    let (score, path) = best.ok_or("no candidate checkpoint")?;
+    // Hard-linking enforces create-new semantics. Any FS error is fatal.
+    std::fs::hard_link(path, output).map_err(|e| e.to_string())?;
+    println!(
+        "selected_checkpoint={} source={} validation_z2_prior_predictive_nll={score:.8}",
+        output.display(),
+        path
+    );
     Ok(())
 }
 
@@ -884,6 +940,7 @@ async fn main() {
             "--resume-behavioural" => Some(resume_hierarchical(&args)),
             "--evaluate-behavioural" => Some(evaluate_hierarchical(&args, false)),
             "--evaluate-unseen-behavioural" => Some(evaluate_hierarchical(&args, true)),
+            "--select-best-behavioural" => Some(select_best_hierarchical(&args)),
             "--create-player-baseline" => Some(player_baseline_cli(&args, false)),
             "--advance-player-baseline" => Some(player_baseline_cli(&args, true)),
             _ => None,

@@ -41,7 +41,8 @@ pub use analysis::{
     SubjectSplitConfigError,
 };
 pub use hand_split::{
-    HAND_SPLIT_ALGORITHM_VERSION, HandPartitionEntry, HandSplitError, IngestionHandSplit,
+    DatasetPartitions, EvaluationPartition, HAND_SPLIT_ALGORITHM_VERSION, HandPartitionEntry,
+    HandSplitError, IngestionHandSplit,
 };
 
 mod sampling;
@@ -52,7 +53,7 @@ pub use sampling::{
 
 mod baseline_adaptation;
 mod training_data;
-pub use training_data::{ExactLegalityProvider, HierarchicalHandSplit, TrainingDataError};
+pub use training_data::{ExactLegalityProvider, TrainingDataError, TrainingEpisodeConfig};
 
 mod hierarchical_training;
 pub use hierarchical_training::{

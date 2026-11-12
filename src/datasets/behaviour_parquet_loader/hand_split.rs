@@ -3,8 +3,10 @@
 //! `hand_index` is ingestion order, NOT a verified wall-clock timestamp.
 //! Each persisted hand, including every one of its decisions and subjects,
 //! belongs to exactly one partition. Nothing is split by event row.
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::Path;
 
 use super::{BehaviourParquetDataset, SPLIT_BASIS_POINTS};
 
@@ -31,6 +33,104 @@ pub struct IngestionHandSplit {
 }
 
 impl IngestionHandSplit {
+    /// Stable snapshot of the original v1 JSON schema, including its historical
+    /// integration-warning field. Existing v1 manifests need no regeneration.
+    pub fn manifest_value(&self, dataset: &BehaviourParquetDataset) -> Value {
+        let to_entries = |hands: &[HandPartitionEntry]| {
+            hands
+                .iter()
+                .map(|entry| {
+                    json!({
+                        "hand_id": entry.hand_id,
+                        "hand_index": entry.hand_index,
+                        "decisions": entry.decision_count,
+                        "players_at_table": entry.players_at_table,
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        let subject_counts = self
+            .subject_hand_counts
+            .iter()
+            .map(|(&subject_id, &counts)| {
+                json!({"subject_id": subject_id, "train_hands": counts[0],
+                   "validation_hands": counts[1], "test_hands": counts[2]})
+            })
+            .collect::<Vec<_>>();
+        let stats = dataset.summary();
+        json!({
+            "format": "lechiffre.ingestion-hand-split.v1",
+            "algorithm_version": HAND_SPLIT_ALGORITHM_VERSION,
+            "ordering": "persisted_hand_index_ingestion_order_not_verified_wall_clock_chronology",
+            "ratios_basis_points": {"train": 7000, "validation": 1500, "test": 1500},
+            "rounding": "floor_train_and_validation_remainder_to_test",
+            "dataset": {
+                "hands": stats.hands_written, "decisions": stats.events_written,
+                "subject_hand_rows": stats.subject_hand_rows_written,
+                "fingerprint_fnv128_noncryptographic": dataset.dataset_fingerprint(),
+            },
+            "boundaries": {
+                "first_validation_hand_index": self.first_validation_hand_index,
+                "first_test_hand_index": self.first_test_hand_index,
+            },
+            "hierarchical_training_integration": "not_compatible_query_partition_is_used_for_training",
+            "partitions": {
+                "train": {"hands": self.train.len(), "decisions": self.decision_counts[0],
+                          "subject_hand_rows": self.subject_hand_rows[0], "entries": to_entries(&self.train)},
+                "validation": {"hands": self.validation.len(), "decisions": self.decision_counts[1],
+                               "subject_hand_rows": self.subject_hand_rows[1], "entries": to_entries(&self.validation)},
+                "test": {"hands": self.test.len(), "decisions": self.decision_counts[2],
+                           "subject_hand_rows": self.subject_hand_rows[2], "entries": to_entries(&self.test)},
+            },
+            "subjects": subject_counts,
+        })
+    }
+
+    /// Every field of the supplied manifest must match the committed Parquet.
+    /// No defaults, ignored entries, re-partitioning or silent migration.
+    pub fn read_manifest(
+        dataset: &BehaviourParquetDataset,
+        path: impl AsRef<Path>,
+    ) -> Result<Self, HandSplitError> {
+        let file = std::fs::File::open(path)
+            .map_err(|e| HandSplitError::InvalidManifest(e.to_string()))?;
+        let observed: Value = serde_json::from_reader(file)
+            .map_err(|e| HandSplitError::InvalidManifest(e.to_string()))?;
+        let expected = dataset.split_hands_by_ingestion(7_000, 1_500, 1_500)?;
+        if observed != expected.manifest_value(dataset) {
+            return Err(HandSplitError::InvalidManifest(
+                "manifest differs from the complete canonical v1 split for this Parquet".into(),
+            ));
+        }
+        Ok(expected)
+    }
+
+    pub fn manifest_fingerprint(&self, dataset: &BehaviourParquetDataset) -> String {
+        let payload = self.manifest_value(dataset).to_string();
+        let mut hash = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d_u128;
+        const PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
+        for byte in payload.bytes() {
+            hash = (hash ^ u128::from(byte)).wrapping_mul(PRIME);
+        }
+        format!("{hash:032x}")
+    }
+
+    pub fn contains_train(&self, hand_index: u64) -> bool {
+        self.train
+            .binary_search_by_key(&hand_index, |hand| hand.hand_index)
+            .is_ok()
+    }
+
+    pub fn contains_evaluation(&self, partition: EvaluationPartition, hand_index: u64) -> bool {
+        let entries = match partition {
+            EvaluationPartition::Validation => &self.validation,
+            EvaluationPartition::Test => &self.test,
+        };
+        entries
+            .binary_search_by_key(&hand_index, |hand| hand.hand_index)
+            .is_ok()
+    }
+
     pub fn train(&self) -> &[HandPartitionEntry] {
         &self.train
     }
@@ -69,8 +169,73 @@ impl IngestionHandSplit {
     }
 }
 
+/// Proof of an exact v1 manifest/Parquet match. There is no public unchecked
+/// constructor; training code accepts this verified object, not a raw split.
+#[derive(Debug, Clone)]
+pub struct DatasetPartitions {
+    split: IngestionHandSplit,
+    dataset_fingerprint: String,
+    manifest_fingerprint: String,
+}
+
+impl DatasetPartitions {
+    pub fn read_manifest(
+        dataset: &BehaviourParquetDataset,
+        path: impl AsRef<Path>,
+    ) -> Result<Self, HandSplitError> {
+        let split = IngestionHandSplit::read_manifest(dataset, path)?;
+        Ok(Self {
+            dataset_fingerprint: dataset.dataset_fingerprint(),
+            manifest_fingerprint: split.manifest_fingerprint(dataset),
+            split,
+        })
+    }
+
+    pub fn verify_dataset(&self, dataset: &BehaviourParquetDataset) -> Result<(), HandSplitError> {
+        if self.dataset_fingerprint != dataset.dataset_fingerprint()
+            || self.split != dataset.split_hands_by_ingestion(7_000, 1_500, 1_500)?
+        {
+            return Err(HandSplitError::InvalidManifest(
+                "verified partitions do not belong to this dataset".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn contains_train(&self, index: u64) -> bool {
+        self.split.contains_train(index)
+    }
+
+    pub fn contains_evaluation(&self, partition: EvaluationPartition, index: u64) -> bool {
+        self.split.contains_evaluation(partition, index)
+    }
+
+    pub fn manifest_fingerprint(&self) -> &str {
+        &self.manifest_fingerprint
+    }
+
+    #[cfg(test)]
+    pub(crate) fn canonical_for_test(dataset: &BehaviourParquetDataset) -> Self {
+        let split = dataset
+            .split_hands_by_ingestion(7_000, 1_500, 1_500)
+            .unwrap();
+        Self {
+            dataset_fingerprint: dataset.dataset_fingerprint(),
+            manifest_fingerprint: split.manifest_fingerprint(dataset),
+            split,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvaluationPartition {
+    Validation,
+    Test,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HandSplitError {
+    InvalidManifest(String),
     InvalidRatios {
         train_bps: u16,
         validation_bps: u16,
@@ -96,6 +261,7 @@ pub enum HandSplitError {
 impl fmt::Display for HandSplitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidManifest(message) => write!(f, "invalid split manifest: {message}"),
             Self::InvalidRatios {
                 train_bps,
                 validation_bps,
@@ -380,6 +546,50 @@ mod tests {
             ds.split_hands_by_ingestion(7_000, 1_500, 1_500),
             Err(HandSplitError::EmptyPartition { .. })
         ));
+    }
+
+    #[test]
+    fn strict_manifest_accepts_original_v1_and_rejects_tampering() {
+        let ds = fixture(20);
+        let split = ds.split_hands_by_ingestion(7_000, 1_500, 1_500).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "lechiffre-manifest-test-{}.json",
+            std::process::id()
+        ));
+        let canonical = split.manifest_value(&ds);
+        std::fs::write(&path, serde_json::to_vec(&canonical).unwrap()).unwrap();
+        assert_eq!(
+            IngestionHandSplit::read_manifest(&ds, &path).unwrap(),
+            split
+        );
+        let verified = DatasetPartitions::read_manifest(&ds, &path).unwrap();
+        assert!(verified.verify_dataset(&ds).is_ok());
+        assert_eq!(
+            verified.manifest_fingerprint(),
+            split.manifest_fingerprint(&ds)
+        );
+        let mut tampered = canonical.clone();
+        tampered["partitions"]["validation"]["entries"][0]["hand_id"] = json!("corrupt");
+        std::fs::write(&path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+        assert!(IngestionHandSplit::read_manifest(&ds, &path).is_err());
+        assert!(DatasetPartitions::read_manifest(&ds, &path).is_err());
+        let mut incomplete = canonical;
+        incomplete.as_object_mut().unwrap().remove("subjects");
+        std::fs::write(&path, serde_json::to_vec(&incomplete).unwrap()).unwrap();
+        assert!(IngestionHandSplit::read_manifest(&ds, &path).is_err());
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn global_partitions_are_disjoint_and_test_is_not_validation() {
+        let ds = fixture(20);
+        let split = ds.split_hands_by_ingestion(7_000, 1_500, 1_500).unwrap();
+        assert!(split.contains_train(0));
+        assert!(!split.contains_evaluation(EvaluationPartition::Validation, 0));
+        assert!(!split.contains_train(28));
+        assert!(split.contains_evaluation(EvaluationPartition::Validation, 28));
+        assert!(!split.contains_evaluation(EvaluationPartition::Test, 28));
+        assert!(split.contains_evaluation(EvaluationPartition::Test, 34));
     }
 
     #[test]
