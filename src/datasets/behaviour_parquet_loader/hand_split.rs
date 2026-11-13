@@ -10,7 +10,7 @@ use std::path::Path;
 
 use super::{BehaviourParquetDataset, SPLIT_BASIS_POINTS};
 
-pub const HAND_SPLIT_ALGORITHM_VERSION: u16 = 1;
+pub const HAND_SPLIT_ALGORITHM_VERSION: u16 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandPartitionEntry {
@@ -33,8 +33,8 @@ pub struct IngestionHandSplit {
 }
 
 impl IngestionHandSplit {
-    /// Stable snapshot of the original v1 JSON schema, including its historical
-    /// integration-warning field. Existing v1 manifests need no regeneration.
+    /// Canonical v2 manifest: one exact contract with the committed Parquet.
+    /// The obsolete integration warning and v1 schema are not accepted.
     pub fn manifest_value(&self, dataset: &BehaviourParquetDataset) -> Value {
         let to_entries = |hands: &[HandPartitionEntry]| {
             hands
@@ -59,7 +59,7 @@ impl IngestionHandSplit {
             .collect::<Vec<_>>();
         let stats = dataset.summary();
         json!({
-            "format": "lechiffre.ingestion-hand-split.v1",
+            "format": "lechiffre.ingestion-hand-split.v2",
             "algorithm_version": HAND_SPLIT_ALGORITHM_VERSION,
             "ordering": "persisted_hand_index_ingestion_order_not_verified_wall_clock_chronology",
             "ratios_basis_points": {"train": 7000, "validation": 1500, "test": 1500},
@@ -73,7 +73,6 @@ impl IngestionHandSplit {
                 "first_validation_hand_index": self.first_validation_hand_index,
                 "first_test_hand_index": self.first_test_hand_index,
             },
-            "hierarchical_training_integration": "not_compatible_query_partition_is_used_for_training",
             "partitions": {
                 "train": {"hands": self.train.len(), "decisions": self.decision_counts[0],
                           "subject_hand_rows": self.subject_hand_rows[0], "entries": to_entries(&self.train)},
@@ -99,7 +98,7 @@ impl IngestionHandSplit {
         let expected = dataset.split_hands_by_ingestion(7_000, 1_500, 1_500)?;
         if observed != expected.manifest_value(dataset) {
             return Err(HandSplitError::InvalidManifest(
-                "manifest differs from the complete canonical v1 split for this Parquet".into(),
+                "manifest differs from the complete canonical v2 split for this Parquet".into(),
             ));
         }
         Ok(expected)
@@ -169,7 +168,7 @@ impl IngestionHandSplit {
     }
 }
 
-/// Proof of an exact v1 manifest/Parquet match. There is no public unchecked
+/// Proof of an exact v2 manifest/Parquet match. There is no public unchecked
 /// constructor; training code accepts this verified object, not a raw split.
 #[derive(Debug, Clone)]
 pub struct DatasetPartitions {
@@ -549,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_manifest_accepts_original_v1_and_rejects_tampering() {
+    fn strict_manifest_accepts_v2_and_rejects_tampering() {
         let ds = fixture(20);
         let split = ds.split_hands_by_ingestion(7_000, 1_500, 1_500).unwrap();
         let path = std::env::temp_dir().join(format!(
@@ -568,6 +567,10 @@ mod tests {
             verified.manifest_fingerprint(),
             split.manifest_fingerprint(&ds)
         );
+        let mut obsolete = canonical.clone();
+        obsolete["format"] = json!("lechiffre.ingestion-hand-split.v1");
+        std::fs::write(&path, serde_json::to_vec(&obsolete).unwrap()).unwrap();
+        assert!(IngestionHandSplit::read_manifest(&ds, &path).is_err());
         let mut tampered = canonical.clone();
         tampered["partitions"]["validation"]["entries"][0]["hand_id"] = json!("corrupt");
         std::fs::write(&path, serde_json::to_vec(&tampered).unwrap()).unwrap();

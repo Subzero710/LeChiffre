@@ -18,7 +18,7 @@ Le seul trainer est `HierarchicalTrainer` dans `src/datasets/behaviour_parquet_l
 2. **Personnalisation** : `train_personalization_epoch()` construit Z₁ avec `history_hands` mains strictement antérieures à la frontière query, puis entraîne G sur les décisions Query internes à Train. Les longueurs sont explicitement variées d'une époque à l'autre : zéro est autorisé et signifie Z₁=Z₀.
 3. **Momentané** : `train_momentary_epoch()` entraîne A et G à partir du prior, du posterior et d'une KL conditionnelle, toujours à paramètres fixes pendant la construction d'un batch. Le prior ne lit pas l'action actuelle.
 
-La séparation globale est **Train / Validation / Test** sur des mains entières, par manifeste validé. Support et Query sont des rôles locaux **strictement à l'intérieur de Train** : pour chaque sujet, l'épisode déterministe prend les dernières `support_hands + query_hands` mains de Train, dans l'ordre d'ingestion. Support précède Query. Une main rejetée à l'import ou structurellement invalide ne fournit aucun événement. Toute décision exploitée requiert un `LegalActionSpace` issu du replay exact `rs-poker`, jamais inféré à partir de l'action observée.
+La séparation globale est **Train / Validation / Test** sur des mains entières, par manifeste validé. Support et Query sont des rôles locaux **strictement à l'intérieur de Train** : le sampler de `training_data.rs` crée des Query successives non dupliquées pour chaque joueur, en prenant pour chaque Query un Support constitué des `support_hands` mains Train immédiatement précédentes. Le dernier bloc Query peut contenir moins de `query_hands` mains. Les mains qui n'ont pas de décision cible peuvent servir de Support. Une main rejetée à l'import ou structurellement invalide ne fournit aucun événement. Toute décision exploitée requiert un `LegalActionSpace` issu du replay exact `rs-poker`, jamais inféré à partir de l'action observée.
 
 ### Découpage des mains retenues, sans fuite entre décisions
 
@@ -48,41 +48,43 @@ conservé intact ; le chemin du manifeste doit être nouveau.
 
 **Le `hand_index` représente l'ordre d'ingestion, pas un horodatage réel.** Le manifeste ne prouve donc pas la chronologie des sessions. En revanche, les identités de toutes les mains, leurs décisions, les effectifs des partitions, les effectifs par sujet et l'empreinte du dataset sont vérifiés contre le Parquet à chaque commande.
 
-Le **format v1 du manifeste est préservé**, y compris le champ historique `hierarchical_training_integration` dont la valeur reflète l'état du code lors de sa génération ; le nouveau lecteur ne l'interprète pas comme un mode de compatibilité. Aucun manifeste incomplet, altéré ou lié à un autre dataset n'est accepté.
+Le format canonique est **`lechiffre.ingestion-hand-split.v2`** (algorithme 2). Le champ incorrect `hierarchical_training_integration` a été supprimé. Le lecteur rejette un manifeste v1 : regénérer uniquement le manifeste à partir du même Parquet par `--split-behaviour-dataset-hands`, sans réimporter ni réauditer le dataset. Aucun manifeste incomplet, altéré ou lié à un autre dataset n'est accepté.
 
-Le blueprint Z₀/G apprend uniquement sur Train. Z₁ est adapté sur le Support de Train et G/A sont entraînés sur Query de Train. En Validation et Test, tous les poids sont figés et Z₁ n'utilise que des mains Train. **Test ne consomme jamais Validation comme historique.** La métrique Z₂ posterior demeure une reconstruction après observation.
+Le blueprint Z₀/G apprend uniquement sur Train. Z₁ est adapté sur chaque Support de Train et G/A sont entraînés sur toutes les Query distinctes de Train. En Validation et Test, tous les poids sont figés et Z₁ n'utilise que les dernières `support_hands` mains Train de chaque joueur, un budget explicite lié au checkpoint. **Test ne consomme jamais Validation comme historique.** La métrique Z₂ posterior demeure une reconstruction après observation.
 
 ### Configuration explicite
 
 `configs/hierarchical.example.json` contient **toutes les clés obligatoires**. Les anciennes clés `first_query_hand_index`, `first_evaluation_hand_index` et `evaluation_hands` sont refusées ; `support_hands` et `query_hands` décrivent désormais un épisode interne à Train. Il s'agit d'un exemple de syntaxe, non d'hyperparamètres optimisés pour des données réelles : les nombres de mains par épisode et les pseudonymes doivent être remplacés par les valeurs de ton dataset. Toute clé inconnue, clé manquante ou champ de longueur incorrecte entraîne une erreur.
 
 ```bash
-cargo run --release -- --train-behavioural configs/hierarchical.example.json data/parquet hand-split.json model-v2.json source.csv session-id
+cargo run --release -- --train-behavioural configs/hierarchical.example.json data/parquet hand-split-v2.json model-v3.json source.csv session-id
 ```
 
 Le fichier de checkpoint n'est écrit qu'après l'exécution des phases et la validation sur la partition Validation. L'ordre d'ingestion ne constitue pas une preuve de chronologie temporelle. L'application refuse de remplacer un chemin existant.
 
-### Validation et sujets inédits
+### Validation, Test et score probabiliste Z₂
 
 ```bash
-cargo run --release -- --evaluate-behavioural model-v2.json data/parquet hand-split.json validation source.csv session-id
-cargo run --release -- --evaluate-unseen-behavioural model-v2.json data/parquet hand-split.json validation 3,4 source.csv session-id
+# Rapport JSON créé sans remplacement du fichier existant :
+cargo run --release -- --evaluate-behavioural model-v3.json data/parquet hand-split-v2.json validation validation-report-v3.json source.csv session-id
 
-# Test final, seulement une fois le checkpoint choisi :
-cargo run --release -- --evaluate-behavioural selected-v2.json data/parquet hand-split.json test source.csv session-id
+# Test final, une seule fois le checkpoint sélectionné :
+cargo run --release -- --evaluate-behavioural selected-v3.json data/parquet hand-split-v2.json test test-report-v3.json source.csv session-id
 
-# Sélectionne le meilleur checkpoint par Z₂ prior predictive NLL sur Validation :
-cargo run --release -- --select-best-behavioural data/parquet hand-split.json selected-v2.json model-a.json,model-b.json source.csv session-id
+# Sélection du meilleur checkpoint selon la NLL *marginale* du prior Z₂ :
+cargo run --release -- --select-best-behavioural data/parquet hand-split-v2.json selected-v3.json model-a.json,model-b.json source.csv session-id
 ```
 
-La validation distingue sans ambiguïté quatre scores : `z0_predictive_nll`, `z1_predictive_nll`, `z2_prior_predictive_nll` et `z2_posterior_reconstruction_nll`. Le dernier score est une **reconstruction après observation**, pas une prédiction. Une baisse de ces scores ou une CI verte ne suffit pas à démontrer l'absence de posterior collapse ni la qualité humaine du latent. Les sujets de la commande `--evaluate-unseen-behavioural` doivent être absents du jeu de sujets entraînés.
+L'évaluation calcule `z0_predictive_nll`, `z1_predictive_nll` et `z2_prior_marginal_nll` sur les mêmes décisions. Pour ce dernier score, 64 tirages indépendants de la loi prior de Z₂ passent par G ; l'intégration Monte Carlo est réalisée par log-mean-exp stable. Les tirages viennent d'un flux déterministe propre à l'évaluation et ne modifient jamais la reprise d'entraînement. Le score `z2_posterior_reconstruction_nll` reste **une reconstruction après observation**, jamais une prédiction prospective ni un critère de sélection. Les métriques action, sizing conditionnel aux mises/relances et timing sont séparées avec leurs dénominateurs exacts dans le JSON `lechiffre.behavioural.validation.v3`. Le timing utilise la densité normale en `log1p(ms)` (pas une masse discrète en millisecondes arrondies). La décomposition marginale utilise la règle de chaîne : NLL(action), NLL(sizing | action) et NLL(timing | action, sizing). La moyenne jointe égale la moyenne action + la fréquence de mises/relances × la moyenne sizing conditionnelle + la moyenne timing.
+
+La commande `--evaluate-unseen-behavioural` a été supprimée : elle ne garantissait pas la séparation des joueurs reliés par des mains communes. Le protocole courant mesure des nouvelles mains de joueurs présents dans Train ; un benchmark **réellement** indépendant par joueur exige une définition distincte de partitions par groupes disjoints. Aucun résultat de ce type n'est revendiqué par le test actuel.
 
 ### Sauvegarde et reprise
 
-Le format unique est `lechiffre.hierarchical.checkpoint.v2`. Les checkpoints v1 sont explicitement refusés sans migration implicite. Il sauvegarde Z₀, A, G, les états Adam complets, les paramètres d'adaptation, les trois compteurs d'époques, l'état du flux pseudo-aléatoire, l'épisode Support/Query, la liste des sujets, l'empreinte exacte du dataset et celle du manifeste validé. Le modèle est relié à un identifiant déterministe (`model_id`) fondé sur ses paramètres ; l'empreinte n'est pas une signature cryptographique.
+Le format unique est `lechiffre.hierarchical.checkpoint.v3`. Les anciens checkpoints sont refusés sans migration implicite, car le manifeste et la sémantique du sampler ont changé. Les modèles doivent être réentraînés. Il sauvegarde Z₀, A, G, les états Adam complets, les paramètres d'adaptation, les trois compteurs d'époques, l'état du flux pseudo-aléatoire, l'épisode Support/Query, la liste des sujets, l'empreinte exacte du dataset et celle du manifeste validé. Le modèle est relié à un identifiant déterministe (`model_id`) fondé sur ses paramètres ; l'empreinte n'est pas une signature cryptographique.
 
 ```bash
-cargo run --release -- --resume-behavioural model-v2.json data/parquet hand-split.json model-v3.json configs/hierarchical-resume.example.json source.csv session-id
+cargo run --release -- --resume-behavioural model-v3.json data/parquet hand-split-v2.json resumed-v3.json configs/hierarchical-resume.example.json source.csv session-id
 ```
 
 La configuration de reprise est stricte. Les phases ne peuvent pas être rejouées dans le mauvais ordre. Les changements de dataset, de sujets, d'épisode Support/Query ou de manifeste sont rejetés. Le checkpoint `lechiffre.ag.checkpoint` est **incompatible et explicitement refusé**.
@@ -93,10 +95,10 @@ Chaque `PlayerBaselineState` possède le vecteur, l'incertitude, la précision d
 
 ```bash
 # Première construction (depuis Z₀, avant la main d'index 800)
-cargo run --release -- --create-player-baseline model-v2.json data/parquet 42 800 player42-v1.json source.csv session-id
+cargo run --release -- --create-player-baseline model-v3.json data/parquet 42 800 player42-v1.json source.csv session-id
 
 # Mise à jour uniquement sur les mains nouvelles d'index < 1000
-cargo run --release -- --advance-player-baseline model-v2.json data/parquet 42 1000 player42-v1.json player42-v2.json source.csv session-id
+cargo run --release -- --advance-player-baseline model-v3.json data/parquet 42 1000 player42-v1.json player42-v2.json source.csv session-id
 ```
 
 Les profils sont liés au **model_id exact** et au `subject_id` pseudonyme. Toute discordance est bloquante. Le nouvel état est écrit atomiquement dans un fichier inédit : ni l'entrée, ni le modèle, ni les poids A/G ne sont modifiés. Une erreur de légalité ou de décodage annule l'intégralité de la mise à jour. Le dernier index déjà couvert interdit de rejouer les mêmes mains. Un autre modèle global nécessite une personnalisation distincte ; les coordonnées Z₁ ne sont pas interchangeables entre versions.
@@ -106,8 +108,11 @@ Z₂ n'est pas un profil permanent. Il se calcule lors de l'observation d'une d�
 ## Code maintenu, code supprimé
 
 - Conservés : `GeneratorGradientBatch`, les têtes action/sizing/timing, `PlayerBaselineAdapter`, `ExactLegalityProvider`, la validation du replay exact, les adaptateurs sources et le Parquet strict.
-- Nouveaux : `training_data.rs` (décodage et découpage partagés), checkpoints hiérarchiques versionnés, CLI hiérarchique, états Z₁ persistants.
-- Supprimés : `generator_training.rs`, `GeneratorTrainer`, l'agrégation `Analyzer::infer(support)` pour l'apprentissage et `AnalyzerAdam::train_step(support)`, les commandes reliées à ces implémentations, la prise en charge des anciens checkpoints.
+- Une seule implémentation d'épisodes : `training_data.rs` et ses blocs Query successifs dans Train. `sampling.rs` et `training_episode.rs` ont été supprimés avec leurs réexports : ces deux chemins n'étaient pas consommés par `HierarchicalTrainer` et ne respectaient pas directement le manifeste global.
+- Le split par composantes de sujets (`split_subjects`, `SubjectSplitConfig`, `SubjectDatasetSplit`) a été supprimé : la CLI utilise exclusivement le manifeste par mains ; `cooccurrence_components` demeure pour les statistiques exactes.
+- Les abstractions `BehaviourGenerator` et `validate_latent_dimensions` ont été supprimées : le seul trainer vérifie déjà les dimensions concrètes A/G/Z₀ dans son constructeur. `BehaviourLatentModel`, réellement utilisé par A et G, demeure.
+- `evaluate_unseen` a été supprimé : il ne prouvait qu'une différence de listes d'identifiants, pas l'isolation des groupes de cooccurrence. La CLI, les docs et les tests liés ont été nettoyés.
+- Supprimés aussi : le champ obsolète du manifeste, l'ancien score Z₂ au latent moyen et les lecteurs des formats précédents. Aucune compatibilité silencieuse n'est proposée.
 
 Le même `G(C, Z)` génère les distributions d'actions légales, tailles de mise et temps de décision. Les montants autorisés restent définis en unités de jetons exactes par le moteur NLHE.
 

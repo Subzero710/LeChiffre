@@ -174,15 +174,12 @@ fn print_behaviour_dataset_stats(args: &[String]) {
 }
 
 /// Atomically publishes new JSON without replacing an existing output.
-fn commit_new_json_manifest(
-    output: &std::path::Path,
-    manifest: &serde_json::Value,
-) -> Result<(), String> {
+fn commit_new_json(output: &std::path::Path, manifest: &serde_json::Value) -> Result<(), String> {
     use std::io::Write;
 
     let filename = output
         .file_name()
-        .ok_or_else(|| format!("invalid output manifest path: {}", output.display()))?
+        .ok_or_else(|| format!("invalid output JSON path: {}", output.display()))?
         .to_string_lossy();
     let temporary = output.with_file_name(format!(".{filename}.{}.inprogress", std::process::id()));
     let mut file = std::fs::OpenOptions::new()
@@ -197,7 +194,7 @@ fn commit_new_json_manifest(
         // On Unix, hard_link fails with AlreadyExists instead of overwriting.
         std::fs::hard_link(&temporary, output).map_err(|e| {
             format!(
-                "cannot commit new manifest {} (existing files are never replaced): {e}",
+                "cannot commit new JSON {} (existing files are never replaced): {e}",
                 output.display()
             )
         })?;
@@ -225,7 +222,7 @@ fn split_behaviour_dataset_hands(args: &[String]) -> Result<(), String> {
     let manifest = split.manifest_value(&dataset);
     let decisions = split.decision_counts();
     let output = std::path::Path::new(&args[3]);
-    commit_new_json_manifest(output, &manifest)?;
+    commit_new_json(output, &manifest)?;
     println!(
         "manifest={} train_hands={} validation_hands={} test_hands={} train_decisions={} validation_decisions={} test_decisions={} first_validation_hand_index={} first_test_hand_index={} ordering=ingestion_not_verified_chronological",
         output.display(),
@@ -496,19 +493,42 @@ fn print_hierarchical_epoch(
         r.phase, r.decisions, r.mean_nll, r.mean_conditional_kl
     );
 }
+fn validation_report_value(
+    partition: lechiffre::datasets::behaviour_parquet_loader::EvaluationPartition,
+    r: &lechiffre::datasets::behaviour_parquet_loader::HierarchicalValidationReport,
+) -> serde_json::Value {
+    let components =
+        |c: &lechiffre::datasets::behaviour_parquet_loader::HierarchicalNllComponents| {
+            serde_json::json!({"action":c.action, "sizing_given_wager":c.sizing,
+                          "timing_log1p_ms":c.timing_log1p_ms})
+        };
+    serde_json::json!({
+        "format":"lechiffre.behavioural.validation.v3",
+        "partition":match partition {
+            lechiffre::datasets::behaviour_parquet_loader::EvaluationPartition::Validation => "validation",
+            lechiffre::datasets::behaviour_parquet_loader::EvaluationPartition::Test => "test",
+        },
+        "decisions":r.decisions,
+        "wager_decisions":r.wager_decisions,
+        "z2_prior_samples":r.z2_prior_samples,
+        "z0_predictive_nll":r.z0_predictive_nll,
+        "z1_predictive_nll":r.z1_predictive_nll,
+        "z2_prior_marginal_nll":r.z2_prior_marginal_nll,
+        "z2_posterior_reconstruction_nll":r.z2_posterior_reconstruction_nll,
+        "z0_components":components(&r.z0_components),
+        "z1_components":components(&r.z1_components),
+        "z2_prior_marginal_components":components(&r.z2_prior_marginal_components),
+        "mean_conditional_kl":r.mean_conditional_kl,
+        "timing_measure":"normal_density_in_log1p_milliseconds",
+        "sampling":"deterministic_common_standard_normal_stream",
+    })
+}
+
 fn print_hierarchical_validation(
     partition: lechiffre::datasets::behaviour_parquet_loader::EvaluationPartition,
     r: &lechiffre::datasets::behaviour_parquet_loader::HierarchicalValidationReport,
 ) {
-    println!(
-        "partition={partition:?} decisions={} z0_predictive_nll={:.8} z1_predictive_nll={:.8} z2_prior_predictive_nll={:.8} z2_posterior_RECONSTRUCTION_nll={:.8} mean_KL={:.8}",
-        r.decisions,
-        r.z0_predictive_nll,
-        r.z1_predictive_nll,
-        r.z2_prior_predictive_nll,
-        r.z2_posterior_reconstruction_nll,
-        r.mean_conditional_kl
-    );
+    println!("{}", validation_report_value(partition, r));
 }
 
 type ExactReplayMap = std::collections::HashMap<
@@ -738,53 +758,33 @@ fn resume_hierarchical(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn evaluate_hierarchical(args: &[String], unseen: bool) -> Result<(), String> {
+fn evaluate_hierarchical(args: &[String]) -> Result<(), String> {
     use lechiffre::datasets::behaviour_parquet_loader::{
         BehaviourParquetDataset, HierarchicalTrainer,
     };
-    let start = if unseen { 7 } else { 6 };
-    if args.len() < start + 2 || !(args.len() - start).is_multiple_of(2) {
-        return Err(if unseen {
-            "usage: --evaluate-unseen-behavioural <checkpoint.json> <parquet-dir> <manifest.json> <validation|test> <subject-ids> <source.csv|.json> <session-id> ..."
-        } else {
-            "usage: --evaluate-behavioural <checkpoint.json> <parquet-dir> <manifest.json> <validation|test> <source.csv|.json> <session-id> ..."
-        }.into());
+    if args.len() < 9 || !(args.len() - 7).is_multiple_of(2) {
+        return Err("usage: --evaluate-behavioural <checkpoint.json> <parquet-dir> <manifest.json> <validation|test> <new-report.json> <source.csv|.json> <session-id> ...".into());
     }
     let trainer = HierarchicalTrainer::load_checkpoint(&args[2]).map_err(|e| e.to_string())?;
     let dataset = BehaviourParquetDataset::open(&args[3]).map_err(|e| e.to_string())?;
     let partitions = load_verified_partitions(&dataset, &args[4])?;
     let partition = evaluation_partition(&args[5])?;
-    let subjects = if unseen {
-        args[6]
-            .split(',')
-            .map(|id| {
-                id.parse::<u64>()
-                    .map_err(|_| format!("invalid subject id {id}"))
-            })
-            .collect::<Result<Vec<_>, _>>()?
-    } else {
-        trainer.training_subjects().to_vec()
-    };
-    let exact = exact_source_legality(&args[start..])?;
-    let report = if unseen {
-        trainer.evaluate_unseen(
+    let exact = exact_source_legality(&args[7..])?;
+    let report = trainer
+        .evaluate(
             &dataset,
-            &subjects,
+            trainer.training_subjects(),
             &partitions,
             partition,
             &mut replay_provider(&exact),
         )
-    } else {
-        trainer.evaluate(
-            &dataset,
-            &subjects,
-            &partitions,
-            partition,
-            &mut replay_provider(&exact),
-        )
-    }
-    .map_err(|e| e.to_string())?;
-    print_hierarchical_validation(partition, &report);
+        .map_err(|e| e.to_string())?;
+    let mut result = validation_report_value(partition, &report);
+    result["model_id"] = serde_json::json!(trainer.model_id().map_err(|e| e.to_string())?);
+    result["dataset_fingerprint"] = serde_json::json!(dataset.dataset_fingerprint());
+    result["manifest_fingerprint"] = serde_json::json!(partitions.manifest_fingerprint());
+    commit_new_json(std::path::Path::new(&args[6]), &result)?;
+    println!("{result}");
     Ok(())
 }
 
@@ -843,13 +843,13 @@ fn select_best_hierarchical(args: &[String]) -> Result<(), String> {
                 &mut replay_provider(&exact),
             )
             .map_err(|e| format!("candidate {path}: {e}"))?;
-        let score = report.z2_prior_predictive_nll;
+        let score = report.z2_prior_marginal_nll;
         if !score.is_finite() {
             return Err(format!(
                 "candidate {path} has a non-finite validation score"
             ));
         }
-        println!("candidate={path} validation_z2_prior_predictive_nll={score:.8}");
+        println!("candidate={path} validation_z2_prior_marginal_nll={score:.8}");
         if best.as_ref().is_none_or(|(minimum, _)| score < *minimum) {
             best = Some((score, path));
         }
@@ -858,7 +858,7 @@ fn select_best_hierarchical(args: &[String]) -> Result<(), String> {
     // Hard-linking enforces create-new semantics. Any FS error is fatal.
     std::fs::hard_link(path, output).map_err(|e| e.to_string())?;
     println!(
-        "selected_checkpoint={} source={} validation_z2_prior_predictive_nll={score:.8}",
+        "selected_checkpoint={} source={} validation_z2_prior_marginal_nll={score:.8}",
         output.display(),
         path
     );
@@ -938,8 +938,7 @@ async fn main() {
         let result = match args[1].as_str() {
             "--train-behavioural" => Some(train_hierarchical(&args)),
             "--resume-behavioural" => Some(resume_hierarchical(&args)),
-            "--evaluate-behavioural" => Some(evaluate_hierarchical(&args, false)),
-            "--evaluate-unseen-behavioural" => Some(evaluate_hierarchical(&args, true)),
+            "--evaluate-behavioural" => Some(evaluate_hierarchical(&args)),
             "--select-best-behavioural" => Some(select_best_hierarchical(&args)),
             "--create-player-baseline" => Some(player_baseline_cli(&args, false)),
             "--advance-player-baseline" => Some(player_baseline_cli(&args, true)),
@@ -1073,8 +1072,8 @@ mod hierarchical_cli_tests {
             std::env::temp_dir().join(format!("lechiffre-hand-split-{}.json", std::process::id()));
         let original = serde_json::json!({"format": "first"});
         let replacement = serde_json::json!({"format": "second"});
-        commit_new_json_manifest(&path, &original).unwrap();
-        assert!(commit_new_json_manifest(&path, &replacement).is_err());
+        commit_new_json(&path, &original).unwrap();
+        assert!(commit_new_json(&path, &replacement).is_err());
         let actual: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(actual, original);

@@ -74,8 +74,14 @@ pub(super) struct SubjectSample {
     pub(super) query: Vec<FeaturizedHand>,
 }
 
-/// One deterministic trailing episode per selected subject, entirely inside
-/// the globally verified Train partition; support strictly precedes query.
+/// Exhaustive deterministic, Train-only episodes for the selected subjects.
+///
+/// The first `support_hands` Train hands provide evidence. Subsequent hands
+/// appear in exactly one Query block per subject per epoch. Support is the
+/// immediately preceding history and may include earlier Query hands; it never
+/// includes the current Query or any Validation/Test hand. The last Query block
+/// can be shorter; no real decision is discarded to fill a fixed-size batch.
+/// This order follows ingestion order, NOT a verified wall-clock chronology.
 pub(super) fn sample_subjects(
     dataset: &BehaviourParquetDataset,
     selected: &[u64],
@@ -95,12 +101,13 @@ pub(super) fn sample_subjects(
             .subjects
             .get(&id)
             .ok_or(TrainingDataError::UnknownSubject { subject_id: id })?;
-        let train = memberships
+        let mut train = memberships
             .iter()
             .filter(|membership| {
                 partitions.contains_train(dataset.hands[membership.hand_slot].hand_index)
             })
             .collect::<Vec<_>>();
+        train.sort_unstable_by_key(|membership| dataset.hands[membership.hand_slot].hand_index);
         let needed = episode
             .support_hands
             .checked_add(episode.query_hands)
@@ -113,42 +120,51 @@ pub(super) fn sample_subjects(
                 available_evaluation: 0,
             });
         }
-        let tail = &train[train.len() - needed..];
-        let support = tail[..episode.support_hands]
-            .iter()
-            .map(|membership| {
-                let hand = &dataset.hands[membership.hand_slot];
-                (
-                    hand.hand_index,
-                    hand.materialize(membership.subject_position),
-                )
-            })
-            .collect::<Vec<_>>();
-        let query = tail[episode.support_hands..]
-            .iter()
-            .map(|membership| {
-                dataset.hands[membership.hand_slot].materialize(membership.subject_position)
-            })
-            .collect::<Vec<_>>();
-        if !support
-            .iter()
-            .any(|(_, hand)| subject_decisions(hand).next().is_some())
-        {
-            return Err(TrainingDataError::NoSubjectDecisions {
-                subject_id: id,
-                partition: "support",
-            });
+        let before = result.len();
+        let mut start = episode.support_hands;
+        while start < train.len() {
+            let end = start.saturating_add(episode.query_hands).min(train.len());
+            let support = train[start - episode.support_hands..start]
+                .iter()
+                .map(|membership| {
+                    let hand = &dataset.hands[membership.hand_slot];
+                    (
+                        hand.hand_index,
+                        hand.materialize(membership.subject_position),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let query = train[start..end]
+                .iter()
+                .map(|membership| {
+                    dataset.hands[membership.hand_slot].materialize(membership.subject_position)
+                })
+                .collect::<Vec<_>>();
+            // An empty Query contains no target (and cannot contribute a gradient).
+            // Its hands are still eligible as historical Support for the next block.
+            if query
+                .iter()
+                .any(|hand| subject_decisions(hand).next().is_some())
+            {
+                if !support
+                    .iter()
+                    .any(|(_, hand)| subject_decisions(hand).next().is_some())
+                {
+                    return Err(TrainingDataError::NoSubjectDecisions {
+                        subject_id: id,
+                        partition: "support",
+                    });
+                }
+                result.push(SubjectSample { id, support, query });
+            }
+            start = end;
         }
-        if !query
-            .iter()
-            .any(|hand| subject_decisions(hand).next().is_some())
-        {
+        if result.len() == before {
             return Err(TrainingDataError::NoSubjectDecisions {
                 subject_id: id,
                 partition: "query",
             });
         }
-        result.push(SubjectSample { id, support, query });
     }
     Ok(result)
 }
@@ -379,5 +395,75 @@ mod tests {
         assert!(TrainingEpisodeConfig::new(0, 1).is_err());
         assert!(TrainingEpisodeConfig::new(1, 0).is_err());
         assert!(TrainingEpisodeConfig::new(1, 1).is_ok());
+    }
+
+    #[test]
+    fn train_episodes_exhaust_queries_without_duplicating_them() {
+        use super::super::{DatasetPartitions, PersistedHand, SubjectMembership};
+        use crate::behavioural::{EVENT_CONTINUOUS_WIDTH, HandId, Position};
+        use crate::datasets::behaviour_parquet::BehaviourParquetDatasetSummary;
+        use std::collections::{BTreeMap, HashSet};
+        let n = 20_usize;
+        let dataset = BehaviourParquetDataset {
+            summary: BehaviourParquetDatasetSummary {
+                hands_seen: n as u64,
+                hands_written: n as u64,
+                events_written: n as u64,
+                subject_hand_rows_written: n as u64,
+                dropped_hands_missing_timing: 0,
+                dropped_hands_invalid: 0,
+            },
+            hands: (0..n)
+                .map(|i| PersistedHand {
+                    hand_id: HandId::new(format!("h{i}")),
+                    hand_index: i as u64,
+                    players_at_table: 2,
+                    sequence_indexes: vec![0],
+                    categorical_without_subject: vec![[0, 4, 2, 0]],
+                    continuous: vec![[0.0; EVENT_CONTINUOUS_WIDTH]],
+                    continuous_present: vec![[1; EVENT_CONTINUOUS_WIDTH]],
+                    decision_time_ms: vec![100],
+                })
+                .collect(),
+            subjects: BTreeMap::from([(
+                42_u64,
+                (0..n)
+                    .map(|hand_slot| SubjectMembership {
+                        hand_slot,
+                        subject_position: Position::ButtonSmallBlind,
+                    })
+                    .collect(),
+            )]),
+            event_count: n,
+        };
+        let partitions = DatasetPartitions::canonical_for_test(&dataset);
+        let config = TrainingEpisodeConfig::new(3, 4).unwrap();
+        let episodes = sample_subjects(&dataset, &[42], &partitions, config).unwrap();
+        assert_eq!(episodes.len(), 3); // Train=14; Query=4+4+3
+        let mut query_ids = HashSet::new();
+        let mut query_indices = Vec::new();
+        for sample in &episodes {
+            assert_eq!(sample.id, 42);
+            assert_eq!(sample.support.len(), 3);
+            let last_support = sample.support.last().unwrap().0;
+            for hand in &sample.query {
+                let id = hand.hand_id().as_str();
+                let index = id.strip_prefix('h').unwrap().parse::<u64>().unwrap();
+                assert!(index > last_support);
+                assert!(partitions.contains_train(index));
+                assert!(query_ids.insert(id.to_owned()), "query hand repeated");
+                query_indices.push(index);
+            }
+            for (index, _) in &sample.support {
+                assert!(partitions.contains_train(*index));
+            }
+        }
+        assert_eq!(query_indices, (3..14).collect::<Vec<u64>>());
+        assert_eq!(
+            episodes.len(),
+            sample_subjects(&dataset, &[42], &partitions, config)
+                .unwrap()
+                .len()
+        );
     }
 }

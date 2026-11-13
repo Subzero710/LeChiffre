@@ -35,20 +35,12 @@ const SUBJECT_ID_SEMANTICS: &str = "pseudonymous_grouping_metadata_not_model_fea
 mod analysis;
 mod hand_split;
 pub use analysis::{
-    BehaviourDatasetAnalysisError, BehaviourDatasetStatistics, DatasetPartition,
-    FloatDistributionSummary, IntegerDistributionSummary, SPLIT_BASIS_POINTS,
-    SUBJECT_SPLIT_ALGORITHM_VERSION, SubjectDatasetSplit, SubjectSplitConfig,
-    SubjectSplitConfigError,
+    BehaviourDatasetAnalysisError, BehaviourDatasetStatistics, FloatDistributionSummary,
+    IntegerDistributionSummary, SPLIT_BASIS_POINTS,
 };
 pub use hand_split::{
     DatasetPartitions, EvaluationPartition, HAND_SPLIT_ALGORITHM_VERSION, HandPartitionEntry,
     HandSplitError, IngestionHandSplit,
-};
-
-mod sampling;
-pub use sampling::{
-    SUPPORT_QUERY_SAMPLING_ALGORITHM_VERSION, SupportQueryConfig, SupportQueryConfigError,
-    SupportQuerySample, SupportQuerySampleError,
 };
 
 mod baseline_adaptation;
@@ -57,15 +49,8 @@ pub use training_data::{ExactLegalityProvider, TrainingDataError, TrainingEpisod
 
 mod hierarchical_training;
 pub use hierarchical_training::{
-    HierarchicalEpochReport, HierarchicalPhase, HierarchicalTrainer, HierarchicalTrainingError,
-    HierarchicalValidationReport,
-};
-
-mod training_episode;
-pub use training_episode::{
-    BehaviourQueryContext, BehaviourQueryDecision, BehaviourQueryTarget, BehaviourTrainingEpisode,
-    BehaviourTrainingEpisodeError, QUERY_CONTEXT_CATEGORICAL_WIDTH, QUERY_CONTEXT_CONTINUOUS_WIDTH,
-    QueryContextCategoricalFeature, QueryContextContinuousFeature,
+    HierarchicalEpochReport, HierarchicalNllComponents, HierarchicalPhase, HierarchicalTrainer,
+    HierarchicalTrainingError, HierarchicalValidationReport, Z2_PRIOR_MARGINAL_SAMPLES,
 };
 
 /// Fully validated in-memory view of a committed behavioural Parquet dataset.

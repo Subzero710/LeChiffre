@@ -1036,6 +1036,17 @@ pub struct TrainingLoss {
     pub latent_gradient: Vec<f32>,
 }
 
+/// Read-only NLL decomposition without constructing or backpropagating model gradients.
+/// The joint total uses the exact same action mask, wager bins, and timing
+/// density as the training objective.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScoringLoss {
+    pub total: f64,
+    pub action: f64,
+    pub sizing: f64,
+    pub timing: f64,
+}
+
 /// Explicit, differentiable negative-log-likelihood and reverse-mode gradients.
 /// The training caller supplies each observed decision's *actual* legal space.
 fn loss_gradients(
@@ -1488,6 +1499,73 @@ impl NeuralBehaviourGenerator {
         loss_gradients_encoded(self, profile, observation, *legal).map(|(loss, _)| loss)
     }
 
+    /// Forward-only joint NLL for Monte Carlo validation. Never computes dL/dZ
+    /// or model gradients; use evaluate_observation_encoded for Z1 adaptation.
+    pub fn score_observation_encoded(
+        &self,
+        profile: &BehaviourProfile,
+        observation: &GeneratorObservation,
+        legal: &LegalActionSpace,
+    ) -> Result<ScoringLoss, GeneratorError> {
+        let (stack, to_call) = observation.validated_facts(*legal)?;
+        let encoded = encoded_context_features(
+            observation.street,
+            observation.actor_position,
+            &observation.context_values,
+            &observation.context_present,
+        );
+        let pass = self.forward_features(profile, encoded, *legal)?;
+        let action = &observation.observed;
+        let probability = pass.probabilities[usize::from(action_id(action.kind))];
+        if !probability.is_finite() || probability <= 0.0 {
+            return Err(GeneratorError::InvalidProbabilityMass);
+        }
+        let action_loss = -probability.ln();
+        let amount = match action.kind {
+            ActionKind::Fold | ActionKind::Check => 0.0,
+            ActionKind::Call => to_call.min(stack),
+            ActionKind::Bet | ActionKind::Raise => {
+                stack
+                    * action
+                        .sizing
+                        .ok_or(GeneratorError::InvalidObservedWager)?
+                        .amount_over_stack_before
+            }
+        };
+        let sizing_loss = if let Some(bounds) = legal.bounds(action.kind) {
+            let index = bounds.index(amount)?;
+            let raw = self
+                .parameters
+                .sizing
+                .forward(&sizing_input(&pass.state, action.kind));
+            sizing_nll(bounds, index, &raw)?.0
+        } else {
+            0.0
+        };
+        let timing_loss = if let Some(ms) = action.decision_time_ms {
+            let fraction = f64::from(amount / stack);
+            let raw =
+                self.parameters
+                    .timing
+                    .forward(&timing_input(&pass.state, action.kind, fraction));
+            let sigma = softplus(raw[1]) + MIN_TIMING_SCALE;
+            let residual = raw[0] - f64::from(ms).ln_1p();
+            0.5 * (residual / sigma).powi(2) + sigma.ln() + 0.5 * (2.0 * PI).ln()
+        } else {
+            0.0
+        };
+        let total = action_loss + sizing_loss + timing_loss;
+        if !total.is_finite() {
+            return Err(GeneratorError::NonFiniteGradient);
+        }
+        Ok(ScoringLoss {
+            total,
+            action: action_loss,
+            sizing: sizing_loss,
+            timing: timing_loss,
+        })
+    }
+
     /// Canonical encoded pre-action probabilities, without reading the target response.
     pub fn action_probabilities_encoded(
         &self,
@@ -1729,6 +1807,34 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn forward_only_scoring_matches_training_loss_components() {
+        let context = ctx();
+        let (context_values, context_present) = encode_context(&context);
+        let observation = GeneratorObservation {
+            street: context.street,
+            actor_position: context.actor_position,
+            context_values,
+            context_present,
+            observed: observed_bet(5.0),
+        };
+        let g = model();
+        let score = g
+            .score_observation_encoded(&profile(), &observation, &legal())
+            .unwrap();
+        let with_gradients = g
+            .evaluate_observation_encoded(&profile(), &observation, &legal())
+            .unwrap();
+        for (a, b) in [
+            (score.total, with_gradients.total),
+            (score.action, with_gradients.action),
+            (score.sizing, with_gradients.sizing),
+            (score.timing, with_gradients.timing),
+        ] {
+            assert!((a - b).abs() < 1e-12, "{a} vs {b}");
+        }
     }
 
     #[test]

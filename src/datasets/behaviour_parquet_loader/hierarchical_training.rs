@@ -4,6 +4,12 @@
 //! before its observations exist, and G/A gradients use one fixed model snapshot
 //! per batch. Versioned hierarchical checkpoints reject all obsolete A/G formats.
 use crate::behavioural::checkpoint::{exact_keys, float_array, number, unsigned};
+
+/// A fixed quadrature budget and independent evaluation stream are part of the
+/// v3 scoring contract. They never consume the training checkpoint RNG.
+pub const Z2_PRIOR_MARGINAL_SAMPLES: usize = 64;
+const VALIDATION_NOISE_SEED: u64 = 0x8c0a_f13e_61ad_90b7;
+
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::fmt;
@@ -40,14 +46,30 @@ pub struct HierarchicalEpochReport {
     pub mean_conditional_kl: Option<f64>,
 }
 
-/// These are different quantities: posterior reconstruction is not forecasting.
+/// Exact chain-rule NLL components on the *same* evaluated decisions.
+/// Sizing is conditional on a Bet/Raise and has its own denominator; when no wager is
+/// observed, sizing is explicitly absent (not silently assigned zero).
+#[derive(Debug, Clone, PartialEq)]
+pub struct HierarchicalNllComponents {
+    pub action: f64,
+    pub sizing: Option<f64>,
+    pub timing_log1p_ms: f64,
+}
+
+/// Z2 prior is the Monte Carlo marginal likelihood, not G evaluated at E[Z2].
+/// Posterior reconstruction is after observing the target, never forecasting.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HierarchicalValidationReport {
     pub decisions: usize,
+    pub wager_decisions: usize,
+    pub z2_prior_samples: usize,
     pub z0_predictive_nll: f64,
     pub z1_predictive_nll: f64,
-    pub z2_prior_predictive_nll: f64,
+    pub z2_prior_marginal_nll: f64,
     pub z2_posterior_reconstruction_nll: f64,
+    pub z0_components: HierarchicalNllComponents,
+    pub z1_components: HierarchicalNllComponents,
+    pub z2_prior_marginal_components: HierarchicalNllComponents,
     pub mean_conditional_kl: f64,
 }
 
@@ -212,7 +234,7 @@ impl HierarchicalTrainer {
     /// FNV-128 detects accidental model mismatches; it is not a cryptographic signature.
     pub fn model_id(&self) -> Result<String, HierarchicalTrainingError> {
         let data = serde_json::to_vec(&json!({
-            "format":"lechiffre.hierarchical.model.v2",
+            "format":"lechiffre.hierarchical.model.v3",
             "z0":self.blueprint.centre().as_slice(),
             "prior_std":self.blueprint.prior_std(),
             "generator":self.generator.checkpoint_value(),
@@ -225,7 +247,7 @@ impl HierarchicalTrainer {
         for byte in data {
             hash = (hash ^ u128::from(byte)).wrapping_mul(PRIME);
         }
-        Ok(format!("hierarchical-v2-{hash:032x}"))
+        Ok(format!("hierarchical-v3-{hash:032x}"))
     }
 
     /// Hierarchical-only checkpoint. Exact model, optimizer, RNG, phase, and dataset provenance.
@@ -234,7 +256,7 @@ impl HierarchicalTrainer {
             return Err(HierarchicalTrainingError::NotTrained);
         }
         let value = json!({
-            "format":"lechiffre.hierarchical.checkpoint.v2",
+            "format":"lechiffre.hierarchical.checkpoint.v3",
             "model_id":self.model_id()?,
             "blueprint":{"centre":self.blueprint.centre().as_slice(),
                          "prior_std":self.blueprint.prior_std()},
@@ -306,9 +328,9 @@ impl HierarchicalTrainer {
             ],
         )
         .map_err(bad)?;
-        if value["format"].as_str() != Some("lechiffre.hierarchical.checkpoint.v2") {
+        if value["format"].as_str() != Some("lechiffre.hierarchical.checkpoint.v3") {
             return Err(bad(
-                "obsolete or unknown checkpoint format: hierarchical v2 required".into(),
+                "obsolete or unknown checkpoint format: hierarchical v3 required".into(),
             ));
         }
         exact_keys(&value["blueprint"], &["centre", "prior_std"]).map_err(bad)?;
@@ -684,23 +706,6 @@ impl HierarchicalTrainer {
         Ok(state.baseline().clone())
     }
 
-    pub fn evaluate_unseen<P: ExactLegalityProvider>(
-        &self,
-        dataset: &BehaviourParquetDataset,
-        unseen_subjects: &[u64],
-        partitions: &DatasetPartitions,
-        partition: EvaluationPartition,
-        provider: &mut P,
-    ) -> Result<HierarchicalValidationReport, HierarchicalTrainingError> {
-        if let Some(&id) = unseen_subjects
-            .iter()
-            .find(|id| self.last_subjects.contains(*id))
-        {
-            return Err(HierarchicalTrainingError::PreviouslyTrainedSubject(id));
-        }
-        self.evaluate(dataset, unseen_subjects, partitions, partition, provider)
-    }
-
     /// Model parameters and evaluation baselines are read-only. Z1 uses only
     /// full hands inside Train; neither Validation nor Test may adapt the player.
     /// In particular Test cannot consume Validation as support.
@@ -714,9 +719,14 @@ impl HierarchicalTrainer {
     ) -> Result<HierarchicalValidationReport, HierarchicalTrainingError> {
         self.check_evaluation_dataset(dataset, partitions)?;
         selected_subjects(dataset, subjects)?;
-        let mut sum = [0.0_f64; 4];
+        let mut sum = [0.0_f64; 4]; // z0, z1, marginal prior, posterior reconstruction
+        let mut component_sums = [[0.0_f64; 3]; 3]; // z0, z1, marginal prior
         let mut kl = 0.0;
         let mut count = 0usize;
+        let mut wager_count = 0usize;
+        // The same standard-normal draws are used across candidate checkpoints.
+        // This stream never touches self.noise and cannot change a resumed run.
+        let mut eval_noise = NoiseStream::new(VALIDATION_NOISE_SEED)?;
         for &id in subjects {
             let memberships = dataset
                 .subjects
@@ -734,7 +744,13 @@ impl HierarchicalTrainer {
                     })
                 })
                 .collect::<Vec<_>>();
-            let baseline = self.personalize(id, &train_history, train_history.len(), provider)?;
+            // Use one explicit, checkpoint-bound evidence budget, rather than
+            // implicitly adapting on arbitrarily many Train hands at evaluation.
+            let evidence_hands = self
+                .last_episode
+                .ok_or(HierarchicalTrainingError::NotTrained)?
+                .support_hands;
+            let baseline = self.personalize(id, &train_history, evidence_hands, provider)?;
             let mut subject_decisions_seen = 0usize;
             for membership in memberships {
                 let hand = &dataset.hands[membership.hand_slot];
@@ -746,17 +762,67 @@ impl HierarchicalTrainer {
                     let observation = decode_decision(&observed, row)?;
                     let legal = lookup(provider, id, &observed, row)?;
                     let z2 = self.analyzer.infer_encoded(&observation, &baseline)?;
-                    let profiles = [
-                        self.blueprint.centre().clone(),
-                        baseline.profile().clone(),
-                        z2.prior().mean_profile()?,
-                        z2.posterior().mean_profile()?,
-                    ];
-                    for (total, profile) in sum.iter_mut().zip(&profiles) {
-                        *total += self
-                            .generator
-                            .evaluate_observation_encoded(profile, &observation, &legal)?
-                            .total;
+                    let z0 = self.generator.score_observation_encoded(
+                        self.blueprint.centre(),
+                        &observation,
+                        &legal,
+                    )?;
+                    let z1 = self.generator.score_observation_encoded(
+                        baseline.profile(),
+                        &observation,
+                        &legal,
+                    )?;
+                    let reconstruction_profile = z2.posterior().mean_profile()?;
+                    let posterior = self.generator.score_observation_encoded(
+                        &reconstruction_profile,
+                        &observation,
+                        &legal,
+                    )?;
+                    // Marginalize the joint likelihood before applying -log.
+                    // Conditional components use the exact chain rule:
+                    // NLL(action, sizing, timing) = NLL(action)
+                    // + NLL(sizing | action) + NLL(timing | action, sizing).
+                    // Marginalizing each head independently would be incorrect.
+                    let mut draws = Vec::with_capacity(Z2_PRIOR_MARGINAL_SAMPLES);
+                    for _ in 0..Z2_PRIOR_MARGINAL_SAMPLES {
+                        let noise = eval_noise.sample(self.generator.latent_config().dimension());
+                        let profile = z2.prior().sample(&noise)?;
+                        draws.push(self.generator.score_observation_encoded(
+                            &profile,
+                            &observation,
+                            &legal,
+                        )?);
+                    }
+                    let marginal = marginal_nll(draws.iter().map(|x| x.total))?;
+                    let marginal_action = marginal_nll(draws.iter().map(|x| x.action))?;
+                    let marginal_action_sizing =
+                        marginal_nll(draws.iter().map(|x| x.action + x.sizing))?;
+                    let conditional_sizing = marginal_action_sizing - marginal_action;
+                    let conditional_timing = marginal - marginal_action_sizing;
+                    let is_wager = matches!(
+                        observation.observed.kind,
+                        crate::behavioural::ActionKind::Bet | crate::behavioural::ActionKind::Raise
+                    );
+                    sum[0] += z0.total;
+                    sum[1] += z1.total;
+                    sum[2] += marginal;
+                    sum[3] += posterior.total;
+                    for (slot, loss) in [(0, &z0), (1, &z1)] {
+                        component_sums[slot][0] += loss.action;
+                        if is_wager {
+                            component_sums[slot][1] += loss.sizing;
+                        }
+                        component_sums[slot][2] += loss.timing;
+                    }
+                    component_sums[2][0] += marginal_action;
+                    if is_wager {
+                        component_sums[2][1] += conditional_sizing;
+                    }
+                    component_sums[2][2] += conditional_timing;
+                    if is_wager {
+                        wager_count = wager_count
+                            .checked_add(1)
+                            .ok_or(HierarchicalTrainingError::CountOverflow)?;
                     }
                     kl += z2.kl_to_prior()?;
                     count = count
@@ -774,18 +840,51 @@ impl HierarchicalTrainer {
         if count == 0 {
             return Err(HierarchicalTrainingError::EmptyValidation);
         }
-        if !kl.is_finite() || sum.iter().any(|v| !v.is_finite()) {
+        if !kl.is_finite()
+            || sum.iter().any(|v| !v.is_finite())
+            || component_sums.iter().flatten().any(|v| !v.is_finite())
+        {
             return Err(HierarchicalTrainingError::NonFiniteUpdate);
         }
+        let components = |values: [f64; 3]| HierarchicalNllComponents {
+            action: values[0] / count as f64,
+            sizing: (wager_count > 0).then(|| values[1] / wager_count as f64),
+            timing_log1p_ms: values[2] / count as f64,
+        };
         Ok(HierarchicalValidationReport {
             decisions: count,
+            wager_decisions: wager_count,
+            z2_prior_samples: Z2_PRIOR_MARGINAL_SAMPLES,
             z0_predictive_nll: sum[0] / count as f64,
             z1_predictive_nll: sum[1] / count as f64,
-            z2_prior_predictive_nll: sum[2] / count as f64,
+            z2_prior_marginal_nll: sum[2] / count as f64,
             z2_posterior_reconstruction_nll: sum[3] / count as f64,
+            z0_components: components(component_sums[0]),
+            z1_components: components(component_sums[1]),
+            z2_prior_marginal_components: components(component_sums[2]),
             mean_conditional_kl: kl / count as f64,
         })
     }
+}
+
+/// Stable negative log of the arithmetic mean of probabilities/densities.
+/// Each input is already a joint or conditional negative log likelihood.
+fn marginal_nll(losses: impl IntoIterator<Item = f64>) -> Result<f64, HierarchicalTrainingError> {
+    let losses = losses.into_iter().collect::<Vec<_>>();
+    if losses.is_empty() || losses.iter().any(|v| !v.is_finite()) {
+        return Err(HierarchicalTrainingError::NonFiniteUpdate);
+    }
+    let maximum = losses.iter().map(|v| -v).fold(f64::NEG_INFINITY, f64::max);
+    let mean_exp = losses
+        .iter()
+        .map(|loss| (-loss - maximum).exp())
+        .sum::<f64>()
+        / losses.len() as f64;
+    let result = -maximum - mean_exp.ln();
+    if !result.is_finite() {
+        return Err(HierarchicalTrainingError::NonFiniteUpdate);
+    }
+    Ok(result)
 }
 
 fn selected_subjects(
@@ -834,7 +933,6 @@ pub enum HierarchicalTrainingError {
     TrainingPartitionChanged,
     DatasetChanged,
     NotTrained,
-    PreviouslyTrainedSubject(u64),
     InvalidCheckpoint(String),
     CheckpointAlreadyExists(PathBuf),
     Io(io::Error),
@@ -1105,6 +1203,19 @@ mod tests {
             )
             .unwrap();
         assert_eq!(report.decisions, 1);
+        assert_eq!(report.z2_prior_samples, Z2_PRIOR_MARGINAL_SAMPLES);
+        assert!(report.z2_prior_marginal_nll.is_finite());
+        let repeat = trainer
+            .evaluate(
+                &dataset,
+                &[42],
+                &partitions,
+                EvaluationPartition::Validation,
+                &mut legal_source,
+            )
+            .unwrap();
+        assert_eq!(report, repeat);
+
         assert!(
             !seen
                 .borrow()
@@ -1126,12 +1237,30 @@ mod tests {
         for value in [
             report.z0_predictive_nll,
             report.z1_predictive_nll,
-            report.z2_prior_predictive_nll,
+            report.z2_prior_marginal_nll,
             report.z2_posterior_reconstruction_nll,
         ] {
             assert!(value.is_finite());
         }
         assert_eq!(trainer.completed_epochs(), (1, 1, 1));
+    }
+
+    #[test]
+    fn marginal_nll_uses_logmeanexp_not_mean_nll() {
+        let equal = marginal_nll([3.0, 3.0]).unwrap();
+        assert!((equal - 3.0).abs() < 1e-12);
+        let expected = -(((-0.1_f64).exp() + (-2.0_f64).exp()) / 2.0).ln();
+        assert!((marginal_nll([0.1, 2.0]).unwrap() - expected).abs() < 1e-12);
+        let action = marginal_nll([0.1, 1.0]).unwrap();
+        let action_sizing = marginal_nll([0.1 + 2.0, 1.0 + 0.5]).unwrap();
+        let joint = marginal_nll([0.1 + 2.0 + 0.7, 1.0 + 0.5 + 1.2]).unwrap();
+        let sizing_given_action = action_sizing - action;
+        let timing_given_action_sizing = joint - action_sizing;
+        assert!((action + sizing_given_action + timing_given_action_sizing - joint).abs() < 1e-12);
+        assert!(marginal_nll([f64::INFINITY]).is_err());
+        assert!(marginal_nll(std::iter::empty()).is_err());
+        let stable = marginal_nll([50_000.0, 50_001.0]).unwrap();
+        assert!(stable.is_finite());
     }
 
     #[test]
@@ -1251,13 +1380,18 @@ mod tests {
             .unwrap();
         assert_eq!(restored.completed_epochs(), (1, 1, 2));
         let mut obsolete: Value = serde_json::from_reader(File::open(&path).unwrap()).unwrap();
-        obsolete["format"] = json!("lechiffre.hierarchical.checkpoint.v1");
         let invalid_path = path.with_extension("obsolete.json");
-        std::fs::write(&invalid_path, serde_json::to_vec(&obsolete).unwrap()).unwrap();
-        assert!(matches!(
-            HierarchicalTrainer::load_checkpoint(&invalid_path),
-            Err(HierarchicalTrainingError::InvalidCheckpoint(_))
-        ));
+        for obsolete_version in [
+            "lechiffre.hierarchical.checkpoint.v1",
+            "lechiffre.hierarchical.checkpoint.v2",
+        ] {
+            obsolete["format"] = json!(obsolete_version);
+            std::fs::write(&invalid_path, serde_json::to_vec(&obsolete).unwrap()).unwrap();
+            assert!(matches!(
+                HierarchicalTrainer::load_checkpoint(&invalid_path),
+                Err(HierarchicalTrainingError::InvalidCheckpoint(_))
+            ));
+        }
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_file(&invalid_path).unwrap();
     }
