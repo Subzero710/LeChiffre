@@ -1186,6 +1186,111 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]
+    fn exact_legality_sidecar_seals_existing_parquet_and_rejects_tampering() {
+        use crate::behavioural::LegalActionSpace;
+        use crate::datasets::behaviour_parquet_loader::BehaviourParquetDataset;
+
+        let dir = temp_dataset_dir("attach-exact-legality");
+        let mut writer = BehaviourParquetDatasetWriter::create(&dir).unwrap();
+        writer
+            .write_hands(&[make_hand("hand-a", Some(501))], &subject_ids())
+            .unwrap();
+        writer.close().unwrap();
+
+        let dataset = BehaviourParquetDataset::open(&dir).unwrap();
+        assert!(dataset.legality_fingerprint().is_err());
+        assert!(
+            dataset
+                .exact_legal_actions(&HandId::new("hand-a"), 0)
+                .is_err()
+        );
+
+        let expected_call = LegalActionSpace {
+            fold: true,
+            check: false,
+            call: true,
+            bet: None,
+            raise: None,
+        };
+        let expected_check = LegalActionSpace {
+            fold: true,
+            check: true,
+            call: false,
+            bet: None,
+            raise: None,
+        };
+        let index = HashMap::from([
+            ((HandId::new("hand-a"), 0), expected_call),
+            ((HandId::new("hand-a"), 1), expected_check),
+        ]);
+        assert_eq!(
+            BehaviourParquetDataset::attach_exact_legality(&dir, &index).unwrap(),
+            2
+        );
+        assert!(BehaviourParquetDataset::attach_exact_legality(&dir, &index).is_err());
+        let sealed = BehaviourParquetDataset::open(&dir).unwrap();
+        assert_eq!(
+            sealed
+                .exact_legal_actions(&HandId::new("hand-a"), 0)
+                .unwrap(),
+            expected_call
+        );
+        assert_eq!(
+            sealed
+                .exact_legal_actions(&HandId::new("hand-a"), 1)
+                .unwrap(),
+            expected_check
+        );
+        assert_eq!(sealed.legality_fingerprint().unwrap().len(), 32);
+
+        let sidecar = dir.join(crate::datasets::behaviour_parquet_loader::EXACT_LEGALITY_FILE_NAME);
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&fs::read(&sidecar).unwrap()).unwrap();
+        json["decisions"][0]["check"] = serde_json::json!(true);
+        fs::write(&sidecar, serde_json::to_vec(&json).unwrap()).unwrap();
+        assert!(BehaviourParquetDataset::open(&dir).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn exact_legality_attachment_rejects_incomplete_and_wrong_replay() {
+        use crate::behavioural::LegalActionSpace;
+        use crate::datasets::behaviour_parquet_loader::BehaviourParquetDataset;
+        let dir = temp_dataset_dir("replay-mismatch");
+        let mut writer = BehaviourParquetDatasetWriter::create(&dir).unwrap();
+        writer
+            .write_hands(&[make_hand("hand-a", Some(100))], &subject_ids())
+            .unwrap();
+        writer.close().unwrap();
+        let call = LegalActionSpace {
+            fold: true,
+            check: false,
+            call: true,
+            bet: None,
+            raise: None,
+        };
+        let check = LegalActionSpace {
+            fold: true,
+            check: true,
+            call: false,
+            bet: None,
+            raise: None,
+        };
+        let incomplete = HashMap::from([((HandId::new("hand-a"), 0), call)]);
+        assert!(BehaviourParquetDataset::attach_exact_legality(&dir, &incomplete).is_err());
+        let incompatible = HashMap::from([
+            ((HandId::new("hand-a"), 0), check),
+            ((HandId::new("hand-a"), 1), call),
+        ]);
+        assert!(BehaviourParquetDataset::attach_exact_legality(&dir, &incompatible).is_err());
+        assert!(
+            !dir.join(crate::datasets::behaviour_parquet_loader::EXACT_LEGALITY_FILE_NAME)
+                .exists()
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn split_complete_persisted_hands_in_ingestion_order() {
         let dir = temp_dataset_dir("hand-split-integration");
         let hands = (0..20)

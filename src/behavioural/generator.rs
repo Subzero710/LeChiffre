@@ -308,6 +308,12 @@ pub struct GeneratorObservation {
 }
 
 impl GeneratorObservation {
+    /// Check exact pre-action legality and exact observed wager against the
+    /// stored chip grid, without requiring a Generator or calculating gradients.
+    pub fn validate_legality(&self, legal: LegalActionSpace) -> Result<(), GeneratorError> {
+        self.validated_facts(legal).map(|_| ())
+    }
+
     fn validated_facts(&self, legal: LegalActionSpace) -> Result<(f32, f32), GeneratorError> {
         if self.context_present.iter().any(|&v| v != 0 && v != 1)
             || self

@@ -475,6 +475,7 @@ mod tests {
             hands,
             subjects,
             event_count: n * 2,
+            exact_legality: None,
         }
     }
 

@@ -91,6 +91,13 @@ LeChiffre comprend un modèle comportemental hiérarchique utilisant un **Genera
 
 Le pipeline disponible dans le binaire `lechiffre` couvre l'import CSV/JSON pris en charge, l'export Parquet, l'entraînement hiérarchique, l'évaluation, la reprise de checkpoints et la persistance des baselines individuelles. L'entraînement exige un manifeste Train / Validation / Test (`lechiffre.ingestion-hand-split.v2`) validé contre le Parquet ; Support / Query ne sert qu'à former les épisodes internes à Train. Le test final doit être lancé explicitement sur le checkpoint sélectionné par Validation.
 
+L'export Parquet scelle maintenant la légalité exacte dans `exact_legality.v1.json`.
+Pour un Parquet déjà préparé, la commande `--attach-behaviour-legality` la fixe une
+seule fois depuis les mêmes historiques sources ; ensuite l'entraînement, la
+reprise et les évaluations **ne lisent plus les sources CSV/JSON**. Les checkpoints
+globaux sont versionnés v4 et refusent une légalité différente. Le manifeste 70/15/15
+existant reste valide, car les deux Parquet ne changent pas.
+
 Les fichiers `configs/hierarchical.example.json` et `configs/hierarchical-resume.example.json` sont **des exemples de structure**, pas des configurations universelles prêtes à entraîner un modèle sur n'importe quel dataset.
 
 Les datasets privés et les sorties ne sont **pas montés automatiquement**. Pour une commande qui lit ou écrit des données, fournir explicitement les chemins et montages Docker vers des répertoires existants. Le projet ne crée aucun dossier hôte par anticipation.

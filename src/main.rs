@@ -65,6 +65,7 @@ fn export_poker_with_the_boys_parquet(args: &[String]) {
     let mut source_rejected_hands = 0usize;
     let mut timing_dropped_hands = 0usize;
     let mut structurally_dropped_hands = 0usize;
+    let mut exact_legality = ExactReplayMap::new();
 
     for pair in args[3..].as_chunks::<2>().0 {
         let path = &pair[0];
@@ -90,6 +91,13 @@ fn export_poker_with_the_boys_parquet(args: &[String]) {
                 session_id, rejection.source_hand_id, rejection.reason
             );
         }
+
+        merge_exact_legality(&mut exact_legality, imported.exact_legal_actions).unwrap_or_else(
+            |error| {
+                eprintln!("invalid exact replay: {error}");
+                std::process::exit(1)
+            },
+        );
 
         for chunk in imported.hands.chunks(EXPORT_BATCH_HANDS) {
             let report = writer
@@ -143,6 +151,12 @@ fn export_poker_with_the_boys_parquet(args: &[String]) {
         summary.subject_hand_rows_written
     );
 
+    BehaviourParquetDataset::attach_exact_legality(output_dir, &exact_legality).unwrap_or_else(
+        |error| {
+            eprintln!("failed to seal exact legality in {output_dir}: {error}");
+            std::process::exit(1);
+        },
+    );
     let dataset = BehaviourParquetDataset::open(output_dir).unwrap_or_else(|error| {
         eprintln!("failed to reload committed dataset at {output_dir}: {error}");
         std::process::exit(1);
@@ -440,49 +454,59 @@ fn resume_configuration(path: &str) -> Result<ResumeConfig, String> {
     Ok(result)
 }
 
-fn exact_source_legality(
-    args: &[String],
-) -> Result<
-    std::collections::HashMap<
-        (lechiffre::behavioural::HandId, u32),
-        lechiffre::behavioural::LegalActionSpace,
-    >,
-    String,
-> {
+fn merge_exact_legality(target: &mut ExactReplayMap, next: ExactReplayMap) -> Result<(), String> {
     use std::collections::hash_map::Entry;
-    let mut all = std::collections::HashMap::new();
+    for (key, legal) in next {
+        match target.entry(key) {
+            Entry::Vacant(slot) => {
+                slot.insert(legal);
+            }
+            Entry::Occupied(slot) => {
+                let (hand, sequence) = slot.key();
+                return Err(format!(
+                    "duplicate exact replay legality for {hand}:{sequence}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Raw sources are read only for a one-time exact-legality attachment.
+/// Training, resume, validation, test and Z1 adaptation never call this.
+fn exact_source_legality(args: &[String]) -> Result<ExactReplayMap, String> {
     if args.is_empty() || !args.len().is_multiple_of(2) {
         return Err("expected one or more <file.csv|file.json> <session-id> pairs".into());
     }
+    let mut all = ExactReplayMap::new();
     for pair in args.as_chunks::<2>().0 {
         let imported = import_poker_with_the_boys_session(&pair[0], &pair[1]);
-        // An import rejection is local to one source hand. The matching hand
-        // cannot occur in a committed dataset produced by the same importer.
-        // Every retained decision must still resolve to exact replay legality.
         for rejection in &imported.rejected {
             eprintln!(
                 "excluded source hand session={} hand={}: {}",
                 pair[1], rejection.source_hand_id, rejection.reason
             );
         }
-        for (key, legal) in imported.exact_legal_actions {
-            match all.entry(key) {
-                Entry::Vacant(entry) => {
-                    entry.insert(legal);
-                }
-                Entry::Occupied(entry) => {
-                    let (hand, sequence) = entry.key();
-                    return Err(format!(
-                        "duplicate exact legality for hand {hand} decision {sequence}"
-                    ));
-                }
-            }
-        }
+        merge_exact_legality(&mut all, imported.exact_legal_actions)?;
     }
     if all.is_empty() {
         return Err("no exact replay legality was obtained".into());
     }
     Ok(all)
+}
+
+fn attach_behaviour_legality(args: &[String]) -> Result<(), String> {
+    if args.len() < 5 || !(args.len() - 3).is_multiple_of(2) {
+        return Err(
+            "usage: --attach-behaviour-legality <parquet-dir> <source.csv|.json> <session-id> ..."
+                .into(),
+        );
+    }
+    let replay = exact_source_legality(&args[3..])?;
+    let count = BehaviourParquetDataset::attach_exact_legality(&args[2], &replay)
+        .map_err(|error| error.to_string())?;
+    println!("exact_legality_sealed={} decisions={count}", args[2]);
+    Ok(())
 }
 
 fn print_hierarchical_epoch(
@@ -536,19 +560,18 @@ type ExactReplayMap = std::collections::HashMap<
     lechiffre::behavioural::LegalActionSpace,
 >;
 
-fn replay_provider<'a>(
-    exact: &'a ExactReplayMap,
+fn replay_provider(
+    dataset: &BehaviourParquetDataset,
 ) -> impl FnMut(
     u64,
     &lechiffre::behavioural::HandId,
     u32,
 ) -> Result<lechiffre::behavioural::LegalActionSpace, String>
-+ 'a {
-    move |_, hand, seq| {
-        exact
-            .get(&(hand.clone(), seq))
-            .copied()
-            .ok_or_else(|| format!("exact replay decision not found: {hand}:{seq}"))
++ '_ {
+    move |_, hand, sequence| {
+        dataset
+            .exact_legal_actions(hand, sequence)
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -563,7 +586,6 @@ fn execute_phases(
     personalization_histories: &[usize],
     momentary_history: usize,
     momentary_epochs: usize,
-    exact: &ExactReplayMap,
 ) -> Result<(), String> {
     for _ in 0..blueprint_epochs {
         let report = trainer
@@ -572,7 +594,7 @@ fn execute_phases(
                 subjects,
                 partitions,
                 episode,
-                &mut replay_provider(exact),
+                &mut replay_provider(dataset),
             )
             .map_err(|e| e.to_string())?;
         print_hierarchical_epoch(&report);
@@ -585,7 +607,7 @@ fn execute_phases(
                 partitions,
                 episode,
                 history,
-                &mut replay_provider(exact),
+                &mut replay_provider(dataset),
             )
             .map_err(|e| e.to_string())?;
         print_hierarchical_epoch(&report);
@@ -598,7 +620,7 @@ fn execute_phases(
                 partitions,
                 episode,
                 momentary_history,
-                &mut replay_provider(exact),
+                &mut replay_provider(dataset),
             )
             .map_err(|e| e.to_string())?;
         print_hierarchical_epoch(&report);
@@ -610,6 +632,9 @@ fn load_verified_partitions(
     dataset: &BehaviourParquetDataset,
     path: &str,
 ) -> Result<lechiffre::datasets::behaviour_parquet_loader::DatasetPartitions, String> {
+    dataset
+        .legality_fingerprint()
+        .map_err(|error| error.to_string())?;
     lechiffre::datasets::behaviour_parquet_loader::DatasetPartitions::read_manifest(dataset, path)
         .map_err(|e| e.to_string())
 }
@@ -633,13 +658,12 @@ fn train_hierarchical(args: &[String]) -> Result<(), String> {
     use lechiffre::datasets::behaviour_parquet_loader::{
         BehaviourParquetDataset, HierarchicalTrainer,
     };
-    if args.len() < 8 || !(args.len() - 6).is_multiple_of(2) {
-        return Err("usage: --train-behavioural <hierarchical-config.json> <parquet-dir> <manifest.json> <checkpoint-out.json> <source.csv|.json> <session-id> ...".into());
+    if args.len() != 6 {
+        return Err("usage: --train-behavioural <hierarchical-config.json> <parquet-dir> <manifest.json> <checkpoint-out.json>".into());
     }
     let run = run_configuration(&args[2])?;
     let dataset = BehaviourParquetDataset::open(&args[3]).map_err(|e| e.to_string())?;
     let partitions = load_verified_partitions(&dataset, &args[4])?;
-    let exact = exact_source_legality(&args[6..])?;
     let latent = BehaviourLatentConfig::new(run.latent_dimension).map_err(|e| e.to_string())?;
     let blueprint = BehaviourBlueprint::new(
         latent.profile(run.z0_initial).map_err(|e| e.to_string())?,
@@ -678,7 +702,6 @@ fn train_hierarchical(args: &[String]) -> Result<(), String> {
         &run.personalization_history_hands,
         run.momentary_history_hands,
         run.momentary_epochs,
-        &exact,
     )?;
     let report = trainer
         .evaluate(
@@ -686,7 +709,7 @@ fn train_hierarchical(args: &[String]) -> Result<(), String> {
             &run.subjects,
             &partitions,
             lechiffre::datasets::behaviour_parquet_loader::EvaluationPartition::Validation,
-            &mut replay_provider(&exact),
+            &mut replay_provider(&dataset),
         )
         .map_err(|e| e.to_string())?;
     print_hierarchical_validation(
@@ -708,8 +731,8 @@ fn resume_hierarchical(args: &[String]) -> Result<(), String> {
     use lechiffre::datasets::behaviour_parquet_loader::{
         BehaviourParquetDataset, HierarchicalTrainer,
     };
-    if args.len() < 9 || !(args.len() - 7).is_multiple_of(2) {
-        return Err("usage: --resume-behavioural <checkpoint-in.json> <parquet-dir> <manifest.json> <checkpoint-out.json> <resume-config.json> <source.csv|.json> <session-id> ...".into());
+    if args.len() != 7 {
+        return Err("usage: --resume-behavioural <checkpoint-in.json> <parquet-dir> <manifest.json> <checkpoint-out.json> <resume-config.json>".into());
     }
     let mut trainer = HierarchicalTrainer::load_checkpoint(&args[2]).map_err(|e| e.to_string())?;
     let dataset = BehaviourParquetDataset::open(&args[3]).map_err(|e| e.to_string())?;
@@ -719,7 +742,6 @@ fn resume_hierarchical(args: &[String]) -> Result<(), String> {
         .training_episode()
         .ok_or("checkpoint missing training episode")?;
     let subjects = trainer.training_subjects().to_vec();
-    let exact = exact_source_legality(&args[7..])?;
     execute_phases(
         &mut trainer,
         &dataset,
@@ -730,7 +752,6 @@ fn resume_hierarchical(args: &[String]) -> Result<(), String> {
         &config.personalization_history_hands,
         config.momentary_history_hands,
         config.momentary_extra_epochs,
-        &exact,
     )?;
     if trainer.completed_epochs().2 > 0 {
         let report = trainer
@@ -739,7 +760,7 @@ fn resume_hierarchical(args: &[String]) -> Result<(), String> {
                 &subjects,
                 &partitions,
                 lechiffre::datasets::behaviour_parquet_loader::EvaluationPartition::Validation,
-                &mut replay_provider(&exact),
+                &mut replay_provider(&dataset),
             )
             .map_err(|e| e.to_string())?;
         print_hierarchical_validation(
@@ -762,27 +783,28 @@ fn evaluate_hierarchical(args: &[String]) -> Result<(), String> {
     use lechiffre::datasets::behaviour_parquet_loader::{
         BehaviourParquetDataset, HierarchicalTrainer,
     };
-    if args.len() < 9 || !(args.len() - 7).is_multiple_of(2) {
-        return Err("usage: --evaluate-behavioural <checkpoint.json> <parquet-dir> <manifest.json> <validation|test> <new-report.json> <source.csv|.json> <session-id> ...".into());
+    if args.len() != 7 {
+        return Err("usage: --evaluate-behavioural <checkpoint.json> <parquet-dir> <manifest.json> <validation|test> <new-report.json>".into());
     }
     let trainer = HierarchicalTrainer::load_checkpoint(&args[2]).map_err(|e| e.to_string())?;
     let dataset = BehaviourParquetDataset::open(&args[3]).map_err(|e| e.to_string())?;
     let partitions = load_verified_partitions(&dataset, &args[4])?;
     let partition = evaluation_partition(&args[5])?;
-    let exact = exact_source_legality(&args[7..])?;
     let report = trainer
         .evaluate(
             &dataset,
             trainer.training_subjects(),
             &partitions,
             partition,
-            &mut replay_provider(&exact),
+            &mut replay_provider(&dataset),
         )
         .map_err(|e| e.to_string())?;
     let mut result = validation_report_value(partition, &report);
     result["model_id"] = serde_json::json!(trainer.model_id().map_err(|e| e.to_string())?);
     result["dataset_fingerprint"] = serde_json::json!(dataset.dataset_fingerprint());
     result["manifest_fingerprint"] = serde_json::json!(partitions.manifest_fingerprint());
+    result["legality_fingerprint"] =
+        serde_json::json!(dataset.legality_fingerprint().map_err(|e| e.to_string())?);
     commit_new_json(std::path::Path::new(&args[6]), &result)?;
     println!("{result}");
     Ok(())
@@ -792,8 +814,8 @@ fn evaluate_hierarchical(args: &[String]) -> Result<(), String> {
 /// Validation. Test is never evaluated, even when ranking candidates.
 fn select_best_hierarchical(args: &[String]) -> Result<(), String> {
     use lechiffre::datasets::behaviour_parquet_loader::{EvaluationPartition, HierarchicalTrainer};
-    if args.len() < 8 || !(args.len() - 6).is_multiple_of(2) {
-        return Err("usage: --select-best-behavioural <parquet-dir> <manifest.json> <selected-checkpoint-out.json> <checkpoint1,checkpoint2,...> <source.csv|.json> <session-id> ...".into());
+    if args.len() != 6 {
+        return Err("usage: --select-best-behavioural <parquet-dir> <manifest.json> <selected-checkpoint-out.json> <checkpoint1,checkpoint2,...>".into());
     }
     let dataset = BehaviourParquetDataset::open(&args[2]).map_err(|e| e.to_string())?;
     let partitions = load_verified_partitions(&dataset, &args[3])?;
@@ -815,7 +837,6 @@ fn select_best_hierarchical(args: &[String]) -> Result<(), String> {
     {
         return Err("candidate checkpoint paths must be unique".into());
     }
-    let exact = exact_source_legality(&args[6..])?;
     let mut best: Option<(f64, &str)> = None;
     let mut identity: Option<(
         Vec<u64>,
@@ -840,7 +861,7 @@ fn select_best_hierarchical(args: &[String]) -> Result<(), String> {
                 trainer.training_subjects(),
                 &partitions,
                 EvaluationPartition::Validation,
-                &mut replay_provider(&exact),
+                &mut replay_provider(&dataset),
             )
             .map_err(|e| format!("candidate {path}: {e}"))?;
         let score = report.z2_prior_marginal_nll;
@@ -870,12 +891,12 @@ fn player_baseline_cli(args: &[String], advance: bool) -> Result<(), String> {
     use lechiffre::datasets::behaviour_parquet_loader::{
         BehaviourParquetDataset, HierarchicalTrainer,
     };
-    let source_start = if advance { 8 } else { 7 };
-    if args.len() < source_start + 2 || !(args.len() - source_start).is_multiple_of(2) {
+    let expected_arguments = if advance { 8 } else { 7 };
+    if args.len() != expected_arguments {
         return Err(if advance {
-            "usage: --advance-player-baseline <model-checkpoint.json> <parquet-dir> <subject-id> <before-hand-index> <baseline-in.json> <baseline-out.json> <source.csv|.json> <session-id> ..."
+            "usage: --advance-player-baseline <model-checkpoint.json> <parquet-dir> <subject-id> <before-hand-index> <baseline-in.json> <baseline-out.json>"
         } else {
-            "usage: --create-player-baseline <model-checkpoint.json> <parquet-dir> <subject-id> <before-hand-index> <baseline-out.json> <source.csv|.json> <session-id> ..."
+            "usage: --create-player-baseline <model-checkpoint.json> <parquet-dir> <subject-id> <before-hand-index> <baseline-out.json>"
         }.into());
     }
     let trainer = HierarchicalTrainer::load_checkpoint(&args[2]).map_err(|e| e.to_string())?;
@@ -883,6 +904,9 @@ fn player_baseline_cli(args: &[String], advance: bool) -> Result<(), String> {
         return Err("model requires completed momentary training".into());
     }
     let dataset = BehaviourParquetDataset::open(&args[3]).map_err(|e| e.to_string())?;
+    trainer
+        .verify_dataset_legality(&dataset)
+        .map_err(|e| e.to_string())?;
     let subject = args[4].parse::<u64>().map_err(|_| "invalid subject id")?;
     let cutoff = args[5]
         .parse::<u64>()
@@ -897,7 +921,9 @@ fn player_baseline_cli(args: &[String], advance: bool) -> Result<(), String> {
     } else {
         adapter.initialize_player()
     };
-    let exact = exact_source_legality(&args[source_start..])?;
+    dataset
+        .legality_fingerprint()
+        .map_err(|error| error.to_string())?;
     dataset
         .advance_baseline_before(
             subject,
@@ -905,7 +931,7 @@ fn player_baseline_cli(args: &[String], advance: bool) -> Result<(), String> {
             trainer.generator(),
             &adapter,
             &mut state,
-            &mut replay_provider(&exact),
+            &mut replay_provider(&dataset),
         )
         .map_err(|e| e.to_string())?;
     let out = if advance { &args[7] } else { &args[6] };
@@ -927,6 +953,13 @@ fn player_baseline_cli(args: &[String], advance: bool) -> Result<(), String> {
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 && args[1] == "--attach-behaviour-legality" {
+        if let Err(error) = attach_behaviour_legality(&args) {
+            eprintln!("behavioural legality attachment failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if args.len() > 1 && args[1] == "--split-behaviour-dataset-hands" {
         if let Err(error) = split_behaviour_dataset_hands(&args) {
             eprintln!("behavioural hand split failed: {error}");
@@ -1078,6 +1111,65 @@ mod hierarchical_cli_tests {
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(actual, original);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn train_resume_evaluate_and_select_reject_source_arguments() {
+        let argv = |values: &[&str]| values.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert!(
+            train_hierarchical(&argv(&[
+                "lechiffre",
+                "--train-behavioural",
+                "config",
+                "parquet",
+                "manifest",
+                "model",
+                "source.csv",
+                "session"
+            ]))
+            .is_err()
+        );
+        assert!(
+            resume_hierarchical(&argv(&[
+                "lechiffre",
+                "--resume-behavioural",
+                "old",
+                "parquet",
+                "manifest",
+                "new",
+                "config",
+                "source.csv",
+                "session"
+            ]))
+            .is_err()
+        );
+        assert!(
+            evaluate_hierarchical(&argv(&[
+                "lechiffre",
+                "--evaluate-behavioural",
+                "model",
+                "parquet",
+                "manifest",
+                "validation",
+                "report",
+                "source.csv",
+                "session"
+            ]))
+            .is_err()
+        );
+        assert!(
+            select_best_hierarchical(&argv(&[
+                "lechiffre",
+                "--select-best-behavioural",
+                "parquet",
+                "manifest",
+                "selected",
+                "a,b",
+                "source.csv",
+                "session"
+            ]))
+            .is_err()
+        );
     }
 
     #[test]

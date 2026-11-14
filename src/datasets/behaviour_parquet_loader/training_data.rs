@@ -435,6 +435,7 @@ mod tests {
                     .collect(),
             )]),
             event_count: n,
+            exact_legality: None,
         };
         let partitions = DatasetPartitions::canonical_for_test(&dataset);
         let config = TrainingEpisodeConfig::new(3, 4).unwrap();

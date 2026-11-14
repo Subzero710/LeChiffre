@@ -91,6 +91,7 @@ pub struct HierarchicalTrainer {
     momentary_epochs: u64,
     last_episode: Option<TrainingEpisodeConfig>,
     manifest_fingerprint: Option<String>,
+    legality_fingerprint: Option<String>,
     last_subjects: Vec<u64>,
     dataset_fingerprint: Option<String>,
 }
@@ -139,6 +140,7 @@ impl HierarchicalTrainer {
             momentary_epochs: 0,
             last_episode: None,
             manifest_fingerprint: None,
+            legality_fingerprint: None,
             last_subjects: Vec::new(),
             dataset_fingerprint: None,
         })
@@ -179,6 +181,7 @@ impl HierarchicalTrainer {
         episode: TrainingEpisodeConfig,
     ) -> Result<(), HierarchicalTrainingError> {
         let fingerprint = dataset_fingerprint(dataset);
+        let legality = dataset.legality_fingerprint()?.to_owned();
         if self
             .dataset_fingerprint
             .as_ref()
@@ -196,6 +199,7 @@ impl HierarchicalTrainer {
                 return Err(HierarchicalTrainingError::DatasetChanged);
             }
             if self.manifest_fingerprint.as_deref() != Some(manifest)
+                || self.legality_fingerprint.as_deref() != Some(&legality)
                 || self.last_episode != Some(episode)
                 || self.last_subjects != subjects
             {
@@ -204,8 +208,24 @@ impl HierarchicalTrainer {
         } else {
             self.dataset_fingerprint = Some(fingerprint);
             self.manifest_fingerprint = Some(manifest.to_owned());
+            self.legality_fingerprint = Some(legality);
             self.last_episode = Some(episode);
             self.last_subjects = subjects.to_vec();
+        }
+        Ok(())
+    }
+
+    /// A persisted Z1 update must use the same dataset and exact legal action
+    /// bounds as the global checkpoint, even though it does not need the split.
+    pub fn verify_dataset_legality(
+        &self,
+        dataset: &BehaviourParquetDataset,
+    ) -> Result<(), HierarchicalTrainingError> {
+        if self.dataset_fingerprint.as_deref() != Some(dataset_fingerprint(dataset).as_str()) {
+            return Err(HierarchicalTrainingError::DatasetChanged);
+        }
+        if self.legality_fingerprint.as_deref() != Some(dataset.legality_fingerprint()?) {
+            return Err(HierarchicalTrainingError::TrainingPartitionChanged);
         }
         Ok(())
     }
@@ -218,9 +238,7 @@ impl HierarchicalTrainer {
         if self.momentary_epochs == 0 {
             return Err(HierarchicalTrainingError::NotTrained);
         }
-        if self.dataset_fingerprint.as_deref() != Some(dataset_fingerprint(dataset).as_str()) {
-            return Err(HierarchicalTrainingError::DatasetChanged);
-        }
+        self.verify_dataset_legality(dataset)?;
         partitions
             .verify_dataset(dataset)
             .map_err(|_| HierarchicalTrainingError::TrainingPartitionChanged)?;
@@ -234,7 +252,7 @@ impl HierarchicalTrainer {
     /// FNV-128 detects accidental model mismatches; it is not a cryptographic signature.
     pub fn model_id(&self) -> Result<String, HierarchicalTrainingError> {
         let data = serde_json::to_vec(&json!({
-            "format":"lechiffre.hierarchical.model.v3",
+            "format":"lechiffre.hierarchical.model.v4",
             "z0":self.blueprint.centre().as_slice(),
             "prior_std":self.blueprint.prior_std(),
             "generator":self.generator.checkpoint_value(),
@@ -247,7 +265,7 @@ impl HierarchicalTrainer {
         for byte in data {
             hash = (hash ^ u128::from(byte)).wrapping_mul(PRIME);
         }
-        Ok(format!("hierarchical-v3-{hash:032x}"))
+        Ok(format!("hierarchical-v4-{hash:032x}"))
     }
 
     /// Hierarchical-only checkpoint. Exact model, optimizer, RNG, phase, and dataset provenance.
@@ -256,7 +274,7 @@ impl HierarchicalTrainer {
             return Err(HierarchicalTrainingError::NotTrained);
         }
         let value = json!({
-            "format":"lechiffre.hierarchical.checkpoint.v3",
+            "format":"lechiffre.hierarchical.checkpoint.v4",
             "model_id":self.model_id()?,
             "blueprint":{"centre":self.blueprint.centre().as_slice(),
                          "prior_std":self.blueprint.prior_std()},
@@ -273,6 +291,7 @@ impl HierarchicalTrainer {
                       "momentary":self.momentary_epochs},
             "training_episode":self.last_episode.ok_or(HierarchicalTrainingError::NotTrained)?.checkpoint_value(),
             "manifest_fingerprint":self.manifest_fingerprint.as_ref().ok_or(HierarchicalTrainingError::NotTrained)?,
+            "legality_fingerprint":self.legality_fingerprint.as_ref().ok_or(HierarchicalTrainingError::NotTrained)?,
             "subjects":self.last_subjects,
             "dataset_fingerprint":self.dataset_fingerprint.as_ref().ok_or(HierarchicalTrainingError::NotTrained)?,
         });
@@ -323,14 +342,15 @@ impl HierarchicalTrainer {
                 "epochs",
                 "training_episode",
                 "manifest_fingerprint",
+                "legality_fingerprint",
                 "subjects",
                 "dataset_fingerprint",
             ],
         )
         .map_err(bad)?;
-        if value["format"].as_str() != Some("lechiffre.hierarchical.checkpoint.v3") {
+        if value["format"].as_str() != Some("lechiffre.hierarchical.checkpoint.v4") {
             return Err(bad(
-                "obsolete or unknown checkpoint format: hierarchical v3 required".into(),
+                "obsolete or unknown checkpoint format: hierarchical v4 required".into(),
             ));
         }
         exact_keys(&value["blueprint"], &["centre", "prior_std"]).map_err(bad)?;
@@ -395,6 +415,13 @@ impl HierarchicalTrainer {
                 .as_str()
                 .filter(|s| s.len() == 32 && s.bytes().all(|c| c.is_ascii_hexdigit()))
                 .ok_or_else(|| bad("invalid manifest fingerprint".into()))?
+                .to_owned(),
+        );
+        trainer.legality_fingerprint = Some(
+            value["legality_fingerprint"]
+                .as_str()
+                .filter(|s| s.len() == 32 && s.bytes().all(|c| c.is_ascii_hexdigit()))
+                .ok_or_else(|| bad("invalid exact legality fingerprint".into()))?
                 .to_owned(),
         );
         trainer.last_subjects = value["subjects"]
@@ -955,6 +982,7 @@ pub enum HierarchicalTrainingError {
     Baseline(BaselineAdaptationError),
     Profile(BehaviourProfileError),
     Data(TrainingDataError),
+    Legality(super::exact_legality::ExactLegalityError),
 }
 impl fmt::Display for HierarchicalTrainingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -965,6 +993,7 @@ impl fmt::Display for HierarchicalTrainingError {
             }
             Self::Io(source) => write!(f, "I/O: {source}"),
             Self::Json(source) => write!(f, "JSON: {source}"),
+            Self::Legality(source) => write!(f, "exact replay legality: {source}"),
             other => write!(f, "{other:?}"),
         }
     }
@@ -1000,6 +1029,12 @@ impl From<BehaviourProfileError> for HierarchicalTrainingError {
         Self::Profile(value)
     }
 }
+impl From<super::exact_legality::ExactLegalityError> for HierarchicalTrainingError {
+    fn from(value: super::exact_legality::ExactLegalityError) -> Self {
+        Self::Legality(value)
+    }
+}
+
 impl From<TrainingDataError> for HierarchicalTrainingError {
     fn from(value: TrainingDataError) -> Self {
         Self::Data(value)
@@ -1137,6 +1172,10 @@ mod tests {
             hands,
             subjects: BTreeMap::from([(42, memberships)]),
             event_count: 9,
+            exact_legality: Some(super::super::exact_legality::ExactLegalityIndex {
+                by_decision: std::collections::HashMap::new(),
+                fingerprint: "00000000000000000000000000000001".to_owned(),
+            }),
         }
     }
 
@@ -1384,6 +1423,7 @@ mod tests {
         for obsolete_version in [
             "lechiffre.hierarchical.checkpoint.v1",
             "lechiffre.hierarchical.checkpoint.v2",
+            "lechiffre.hierarchical.checkpoint.v3",
         ] {
             obsolete["format"] = json!(obsolete_version);
             std::fs::write(&invalid_path, serde_json::to_vec(&obsolete).unwrap()).unwrap();
@@ -1416,6 +1456,22 @@ mod tests {
             Err(HierarchicalTrainingError::DatasetChanged)
         ));
         assert_eq!(trainer.completed_epochs(), (1, 0, 0));
+        let mut changed_legality = dataset();
+        changed_legality
+            .exact_legality
+            .as_mut()
+            .unwrap()
+            .fingerprint = "00000000000000000000000000000002".into();
+        assert!(matches!(
+            trainer.train_blueprint_epoch(
+                &changed_legality,
+                &[42],
+                &partitions,
+                episode,
+                &mut provider
+            ),
+            Err(HierarchicalTrainingError::TrainingPartitionChanged)
+        ));
         let changed_episode = TrainingEpisodeConfig::new(2, 3).unwrap();
         assert!(matches!(
             trainer.train_blueprint_epoch(

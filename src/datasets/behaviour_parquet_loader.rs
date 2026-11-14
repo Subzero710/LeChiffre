@@ -33,11 +33,13 @@ const HAND_INDEX_SEMANTICS: &str =
 const SUBJECT_ID_SEMANTICS: &str = "pseudonymous_grouping_metadata_not_model_feature";
 
 mod analysis;
+mod exact_legality;
 mod hand_split;
 pub use analysis::{
     BehaviourDatasetAnalysisError, BehaviourDatasetStatistics, FloatDistributionSummary,
     IntegerDistributionSummary, SPLIT_BASIS_POINTS,
 };
+pub use exact_legality::{EXACT_LEGALITY_FILE_NAME, ExactLegalityError};
 pub use hand_split::{
     DatasetPartitions, EvaluationPartition, HAND_SPLIT_ALGORITHM_VERSION, HandPartitionEntry,
     HandSplitError, IngestionHandSplit,
@@ -63,6 +65,7 @@ pub struct BehaviourParquetDataset {
     hands: Vec<PersistedHand>,
     subjects: BTreeMap<u64, Vec<SubjectMembership>>,
     event_count: usize,
+    exact_legality: Option<exact_legality::ExactLegalityIndex>,
 }
 
 impl BehaviourParquetDataset {
@@ -78,12 +81,15 @@ impl BehaviourParquetDataset {
         let (summary, hands, event_count) = read_events(&events_path)?;
         let subjects = read_subjects(&subjects_path, summary, &hands)?;
 
-        Ok(Self {
+        let mut dataset = Self {
             summary,
             hands,
             subjects,
             event_count,
-        })
+            exact_legality: None,
+        };
+        dataset.exact_legality = exact_legality::read_index(root, &dataset)?;
+        Ok(dataset)
     }
 
     pub fn summary(&self) -> BehaviourParquetDatasetSummary {
@@ -1114,6 +1120,7 @@ pub enum BehaviourParquetLoadError {
     },
     Arrow(ArrowError),
     Parquet(ParquetError),
+    ExactLegality(exact_legality::ExactLegalityError),
     MissingSuccessMarker {
         path: PathBuf,
     },
@@ -1266,6 +1273,7 @@ impl fmt::Display for BehaviourParquetLoadError {
             Self::Io { path, source } => write!(f, "failed to read {}: {source}", path.display()),
             Self::Arrow(error) => write!(f, "Arrow decoding failed: {error}"),
             Self::Parquet(error) => write!(f, "Parquet decoding failed: {error}"),
+            Self::ExactLegality(error) => write!(f, "exact replay legality failed: {error}"),
             Self::MissingSuccessMarker { path } => {
                 write!(
                     f,
@@ -1467,8 +1475,15 @@ impl std::error::Error for BehaviourParquetLoadError {
             Self::Io { source, .. } => Some(source),
             Self::Arrow(error) => Some(error),
             Self::Parquet(error) => Some(error),
+            Self::ExactLegality(error) => Some(error),
             _ => None,
         }
+    }
+}
+
+impl From<exact_legality::ExactLegalityError> for BehaviourParquetLoadError {
+    fn from(error: exact_legality::ExactLegalityError) -> Self {
+        Self::ExactLegality(error)
     }
 }
 

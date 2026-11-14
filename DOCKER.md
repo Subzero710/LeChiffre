@@ -66,21 +66,37 @@ sudo docker compose run --rm -T \
   /host/chemin/vers/source.csv id-session
 ```
 
-For subsequent training, use the same *explicit* `--user` and `--volume` options,
-with the existing CLI's exact arguments. For example:
+## Exact legality embedded in the dataset
+
+The `--export-poker-with-the-boys-parquet` CLI now seals the exact rs-poker
+legality sidecar automatically. For previously exported Parquet data, attach
+that evidence **once**, supplying the original source/session pairs:
 
 ```sh
 sudo docker compose run --rm -T \
   --user "$(id -u):$(id -g)" --volume "$PWD:/host" \
-  behavioural \
-  --train-behavioural /host/chemin/vers/config.json \
-  /host/chemin/vers/parquet-existant /host/chemin/vers/nouveau-modele.json \
-  /host/chemin/vers/source.csv id-session
+  behavioural --attach-behaviour-legality \
+  /host/path/to/existing-parquet \
+  /host/path/to/original-session.csv actual-session-id
 ```
 
-The paths above are **examples**, not paths asserted to exist. Pass real,
-existing input paths; outputs are created by the program only when requested. The CLI retains its strict exact-legality, chronological split,
-checkpoint and resume checks. See `docs/BEHAVIOURAL_ENGINE.md`.
+The source and session values above illustrate the required positional CLI
+arguments; use the real source inputs from ingestion. The attachment does **not**
+change `events.parquet`, `subjects.parquet`, or the v2 hand split manifest.
+
+**Training and evaluation require no source arguments at all:**
+
+```sh
+sudo docker compose run --rm -T \
+  --user "$(id -u):$(id -g)" --volume "$PWD:/host" \
+  behavioural --train-behavioural \
+  /host/path/to/config.json /host/path/to/existing-parquet \
+  /host/path/to/hand-split-v2.json /host/path/to/model-v4.json
+```
+
+Missing, truncated or incompatible replay evidence is a fatal error. No action
+mask or chip range is derived from the observed action. The loaded dataset and
+the checkpoint are both bound to the legality fingerprint.
 
 The explicit `--volume` form can create an absent host **source** path with
 some Compose versions; therefore mount **only a path you have checked already
