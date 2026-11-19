@@ -81,6 +81,36 @@ Le mode interactif de l'Arena peut afficher un tableau de bord dans le terminal.
 
 Documentation détaillée du moteur : [README de rs-poker](vendor/rs-poker/README.md) et [gestion des jetons, rake, historiques et replay](vendor/rs-poker/docs/MONEY_AND_HISTORY.md).
 
+## NoRegrets
+
+NoRegrets entraîne un blueprint hors ligne avec `rs-poker`, puis l'utilise en partie sans recherche stratégique en ligne. Les commandes suivantes s'exécutent depuis la racine du dépôt avec Rust et Cargo installés.
+
+**Entraîner un modèle à 6 joueurs et 100 BB :**
+
+```sh
+cargo run --release --locked --manifest-path crates/lechiffre-noregrets/Cargo.toml -- train-agent --players 6 --stack 200 --iterations 100000 --seed 42 --out runs/noregrets
+```
+
+**Jouer une table de 6 joueurs :**
+
+```sh
+cargo run --release --locked --manifest-path crates/lechiffre-noregrets/Cargo.toml -- table --agents agents/noregrets.json agents/calling.json agents/calling.json agents/random.json agents/folding.json agents/equity.json --hands 6000 --seed 123 --out runs/table-noregrets
+```
+
+**Comparer avec permutation des sièges :**
+
+```sh
+cargo run --release --locked --manifest-path crates/lechiffre-noregrets/Cargo.toml --features gui --bin lechiffre-arena -- compare --agents agents/noregrets.json agents/calling.json agents/calling.json agents/random.json agents/folding.json agents/equity.json -p 6 -n 10 --seed 123 --no-tui --out runs/comparaison-noregrets
+```
+
+**Lancer les tests :**
+
+```sh
+cargo test --locked --manifest-path crates/lechiffre-noregrets/Cargo.toml --features gui
+```
+
+`--stack` est exprimé en jetons : `200` = `100 BB`. L'entraînement remplace le modèle dans `runs/noregrets` ; chaque table ou comparaison nécessite un nouveau dossier de sortie.
+
 ## Behavioral Engine Z₀ / Z₁ / Z₂
 
 LeChiffre comprend un modèle comportemental hiérarchique utilisant un **Generator G** et un **Analyzer A**, dans un même espace latent :
