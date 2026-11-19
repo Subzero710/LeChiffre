@@ -1,7 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Hooks must work on machines without Docker, sudo or a Rust toolchain.
-# Validate only staged whitespace; Rust formatting, Clippy and tests run in CI.
 cd "$(git rev-parse --show-toplevel)"
+
+# rustfmt changes the worktree, not the Git index. Do not include unrelated
+# unstaged Rust edits in the commit when staging the formatting corrections.
+if ! git diff --quiet -- '*.rs'; then
+    echo 'pre-commit: unstaged Rust changes detected; stage or stash them first.' >&2
+    exit 1
+fi
+
+echo 'pre-commit: cargo fmt --all'
+cargo fmt --all
+
+# Every tracked Rust change after the check above was made by rustfmt.
+# Include formatting from files not originally staged, too.
+echo 'pre-commit: stage rustfmt changes'
+git add -u -- '*.rs'
+
+echo 'pre-commit: cargo fmt --all -- --check'
+cargo fmt --all -- --check
+
+echo 'pre-commit: cargo clippy --locked --all-targets --all-features -- -D warnings'
+cargo clippy --locked --all-targets --all-features -- -D warnings
+
+echo 'pre-commit: git diff --cached --check'
 git diff --cached --check
+
+echo 'pre-commit: formatting and Clippy OK (tests in CI)'

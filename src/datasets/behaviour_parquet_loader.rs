@@ -34,14 +34,14 @@ const SUBJECT_ID_SEMANTICS: &str = "pseudonymous_grouping_metadata_not_model_fea
 
 mod analysis;
 mod hand_split;
-pub use hand_split::{
-    HandPartitionEntry, HandSplitError, IngestionHandSplit, HAND_SPLIT_ALGORITHM_VERSION,
-};
 pub use analysis::{
     BehaviourDatasetAnalysisError, BehaviourDatasetStatistics, DatasetPartition,
     FloatDistributionSummary, IntegerDistributionSummary, SPLIT_BASIS_POINTS,
     SUBJECT_SPLIT_ALGORITHM_VERSION, SubjectDatasetSplit, SubjectSplitConfig,
     SubjectSplitConfigError,
+};
+pub use hand_split::{
+    HAND_SPLIT_ALGORITHM_VERSION, HandPartitionEntry, HandSplitError, IngestionHandSplit,
 };
 
 mod sampling;

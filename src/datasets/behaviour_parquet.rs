@@ -1195,9 +1195,11 @@ mod tests {
         writer.write_hands(&hands, &subject_ids()).unwrap();
         writer.close().unwrap();
 
-        let loaded = crate::datasets::behaviour_parquet_loader::BehaviourParquetDataset::open(&dir)
+        let loaded =
+            crate::datasets::behaviour_parquet_loader::BehaviourParquetDataset::open(&dir).unwrap();
+        let split = loaded
+            .split_hands_by_ingestion(7_000, 1_500, 1_500)
             .unwrap();
-        let split = loaded.split_hands_by_ingestion(7_000, 1_500, 1_500).unwrap();
         assert_eq!(split.train().len(), 14);
         assert_eq!(split.validation().len(), 3);
         assert_eq!(split.test().len(), 3);
