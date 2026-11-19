@@ -217,9 +217,8 @@ impl Autopsy {
     pub fn report(&self) -> String {
         let streets = ["preflop", "flop", "turn", "river"];
         let kinds = ["we fold", "they fold", "showdown"];
-        let mut s = String::from(
-            "loss autopsy (per ending street/kind: hands, total bb, bb/hand):\n",
-        );
+        let mut s =
+            String::from("loss autopsy (per ending street/kind: hands, total bb, bb/hand):\n");
         for (si, street) in streets.iter().enumerate() {
             for (ki, kind) in kinds.iter().enumerate() {
                 let n = self.count[si][ki];
@@ -322,10 +321,12 @@ impl HandState {
                     .collect()
             })
             .unwrap_or_default();
-        for (i, &c) in board.iter().enumerate().skip(self.board_forced) {
-            self.table.real.force_board_card(i, c);
-            self.table.shadow.force_board_card(i, c);
-        }
+        self.table.real.set_public_board(&board, self.our_seat)?;
+        self.table.shadow.set_public_board(&board, self.our_seat)?;
+        self.table
+            .round
+            .real
+            .set_public_board(&board, self.our_seat)?;
         if board.len() > self.board_forced {
             let newly = &board[self.board_forced..];
             self.tracker.exclude(newly);

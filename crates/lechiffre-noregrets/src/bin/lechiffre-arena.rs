@@ -4,7 +4,7 @@
 //! Mixed NoRegrets / stock rs_poker agents, with the original rs_poker TUI.
 use clap::{Parser, Subcommand};
 use lechiffre_noregrets::{
-    arena_config::prepare_directory,
+    arena_config::AgentSelection,
     comparison::PreparedComparison,
     table_arena::{PreparedTable, TableHand, TableReport},
 };
@@ -35,7 +35,8 @@ struct Cli {
 enum Command {
     /// Comparateur natif rs_poker : toutes les permutations des profils aux sieges.
     Compare {
-        agents_dir: PathBuf,
+        #[command(flatten)]
+        selection: AgentSelection,
         /// Joueurs par table, independamment du nombre de profils du dossier.
         #[arg(short = 'p', long = "players", default_value_t = 6)]
         players: usize,
@@ -53,9 +54,10 @@ enum Command {
         #[command(flatten)]
         display: tui::TuiFlags,
     },
-    /// Un fichier JSON par siege, ordre alphabetique des fichiers (2 a 6).
+    /// Choisir 2 a 6 profils dans agents/ ou un dossier JSON existant.
     Table {
-        agents_dir: PathBuf,
+        #[command(flatten)]
+        selection: AgentSelection,
         /// Nombre total de mains, multiple du nombre de joueurs.
         #[arg(long, default_value_t = 6000)]
         hands: u64,
@@ -274,7 +276,7 @@ async fn run_graphical(job: Job, out: PathBuf) -> Result<(), String> {
 async fn run() -> Result<(), String> {
     let (job, out, display) = match Cli::parse().command {
         Command::Table {
-            agents_dir,
+            selection,
             hands,
             seed,
             stack,
@@ -282,7 +284,7 @@ async fn run() -> Result<(), String> {
             out,
             display,
         } => {
-            let table = prepare_directory(&agents_dir, stack, reference.as_deref())?;
+            let table = PreparedTable::new(selection.load()?, stack, reference.as_deref())?;
             let n = table.players() as u64;
             if hands < 2 * n || !hands.is_multiple_of(n) {
                 return Err(format!(
@@ -293,7 +295,7 @@ async fn run() -> Result<(), String> {
             (Job::Table { table, hands, seed }, out, display)
         }
         Command::Compare {
-            agents_dir,
+            selection,
             players,
             num_games,
             seed,
@@ -302,8 +304,8 @@ async fn run() -> Result<(), String> {
             out,
             display,
         } => {
-            let prepared = PreparedComparison::from_directory(
-                &agents_dir,
+            let prepared = PreparedComparison::new(
+                selection.load()?,
                 players,
                 num_games,
                 stack,

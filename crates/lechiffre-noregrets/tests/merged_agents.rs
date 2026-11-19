@@ -1,6 +1,6 @@
 //! Regression coverage for the merge of Generated agents and Equity.
 use lechiffre_noregrets::{
-    arena_config::built_in_reference, comparison::PreparedComparison, table_arena::PreparedTable,
+    comparison::PreparedComparison, rs_agent::AgentReference, table_arena::PreparedTable,
 };
 use rs_poker::arena::{
     Agent, GameState,
@@ -20,7 +20,7 @@ fn two_calling_files_make_six_separate_profiles() {
     for (file, config) in [
         (
             "noregrets.json",
-            json!({"type":"noregrets","name":"Blueprint"}),
+            json!({"type":"noregrets","name":"Blueprint","reference":reference(6)}),
         ),
         ("equity.json", equity()),
         ("calling.json", json!({"type":"calling","name":"Calling"})),
@@ -92,7 +92,7 @@ fn rotation_accepts_names_of_generated_and_equity_agents() {
 async fn equity_and_two_callers_play_with_noregrets_at_six_seats() {
     let table = PreparedTable::new(
         vec![
-            json!({"type":"noregrets","name":"Blueprint"}),
+            json!({"type":"noregrets","name":"Blueprint","reference":reference(6)}),
             equity(),
             json!({"type":"calling"}),
             json!({"type":"calling"}),
@@ -100,7 +100,7 @@ async fn equity_and_two_callers_play_with_noregrets_at_six_seats() {
             json!({"type":"all_in"}),
         ],
         None,
-        built_in_reference(6).as_deref(),
+        None,
     )
     .unwrap();
     let report = table.run(12, 42).await.unwrap();
@@ -113,7 +113,10 @@ async fn equity_and_two_callers_play_with_noregrets_at_six_seats() {
 #[tokio::test]
 async fn native_comparison_runs_equity_against_generated_blueprint() {
     let prepared = PreparedComparison::new(
-        vec![json!({"type":"noregrets","name":"Blueprint"}), equity()],
+        vec![
+            json!({"type":"noregrets","name":"Blueprint","reference":reference(2)}),
+            equity(),
+        ],
         2,
         2,
         None,
@@ -137,4 +140,20 @@ async fn native_comparison_runs_equity_against_generated_blueprint() {
             .sum::<i64>(),
         0
     );
+}
+
+fn reference(n: usize) -> std::path::PathBuf {
+    static TWO: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    static SIX: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    let slot = if n == 2 { &TWO } else { &SIX };
+    slot.get_or_init(|| {
+        let p =
+            std::env::temp_dir().join(format!("noregrets-merged-model-{n}-{}", std::process::id()));
+        AgentReference::train_for_players(2, 42, 20, n)
+            .unwrap()
+            .save(&p)
+            .unwrap();
+        p
+    })
+    .clone()
 }

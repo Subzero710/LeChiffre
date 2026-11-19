@@ -1,78 +1,86 @@
-//! JSON-per-agent tables, compatible with the stock rs_poker config files.
+//! Shared agent catalog. A profile may be selected more than once, without copies.
 use crate::table_arena::PreparedTable;
+use clap::Args;
 use serde_json::Value;
 use std::{
     fs,
     path::{Path, PathBuf},
 };
 
-pub fn load_directory(path: &Path) -> Result<Vec<Value>, String> {
-    let configs = load_profile_pool(path)?;
-    if !(2..=6).contains(&configs.len()) {
-        return Err(format!(
-            "select 2 to 6 JSON files in {}; found {}",
-            path.display(),
-            configs.len()
-        ));
-    }
-    Ok(configs)
+#[derive(Args)]
+pub struct AgentSelection {
+    /// Existing directory of JSON profiles (optional when --agents is used).
+    #[arg(
+        value_name = "AGENTS_DIR",
+        required_unless_present = "agents",
+        conflicts_with = "agents"
+    )]
+    pub agents_dir: Option<PathBuf>,
+    /// Select profiles directly from agents/. Repeating a path selects another player.
+    #[arg(long,num_args=2..,value_delimiter=',',conflicts_with="agents_dir")]
+    pub agents: Vec<PathBuf>,
 }
-
-/// A comparison pool may contain more profiles than seats at a table.
-pub fn load_profile_pool(path: &Path) -> Result<Vec<Value>, String> {
-    let mut files = fs::read_dir(path)
-        .map_err(|e| format!("{}: {e}", path.display()))?
-        .map(|e| e.map(|e| e.path()))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-    files.retain(|p| p.is_file() && p.extension().is_some_and(|e| e == "json"));
-    files.sort();
-    if files.len() < 2 {
-        return Err(format!(
-            "select at least 2 JSON files in {}; found {}",
-            path.display(),
-            files.len()
-        ));
+impl AgentSelection {
+    pub fn load(&self) -> Result<Vec<Value>, String> {
+        if let Some(dir) = &self.agents_dir {
+            load_profile_pool(dir)
+        } else {
+            load_profile_files(&self.agents)
+        }
     }
-    files
-        .into_iter()
-        .map(|file| {
+}
+pub fn default_reference() -> PathBuf {
+    PathBuf::from("runs/noregrets")
+}
+pub fn load_profile_files(paths: &[PathBuf]) -> Result<Vec<Value>, String> {
+    if paths.len() < 2 {
+        return Err("select at least two agent profiles".into());
+    }
+    paths
+        .iter()
+        .map(|path| {
+            let bytes = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
             let mut value: Value =
-                serde_json::from_slice(&fs::read(&file).map_err(|e| e.to_string())?)
-                    .map_err(|e| format!("{}: {e}", file.display()))?;
+                serde_json::from_slice(bytes).map_err(|e| format!("{}: {e}", path.display()))?;
             if !value.is_object() {
-                return Err(format!("{}: expected an agent JSON object", file.display()));
+                return Err(format!("{}: expected an agent object", path.display()));
             }
             if value.get("name").is_none() {
-                value["name"] =
-                    Value::String(file.file_stem().unwrap().to_string_lossy().into_owned());
+                value["name"] = Value::String(
+                    path.file_stem()
+                        .ok_or("profile file name")?
+                        .to_string_lossy()
+                        .into_owned(),
+                );
             }
             Ok(value)
         })
         .collect()
 }
-
-/// The supplied 2-player and 6-player bootstrap models remain separate.
-pub fn built_in_reference(players: usize) -> Option<PathBuf> {
-    let name = match players {
-        2 => "noregrets-hu10bb-agent-10000-seed42",
-        6 => "noregrets-6max-10bb-agent-10000-seed42",
-        _ => return None,
-    };
-    Some(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../references")
-            .join(name),
-    )
+pub fn load_profile_pool(path: &Path) -> Result<Vec<Value>, String> {
+    let mut files = fs::read_dir(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .map(|x| x.map(|v| v.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    files.retain(|p| p.is_file() && p.extension().is_some_and(|x| x == "json"));
+    files.sort();
+    load_profile_files(&files)
 }
-
+pub fn load_directory(path: &Path) -> Result<Vec<Value>, String> {
+    let v = load_profile_pool(path)?;
+    if v.len() > 6 {
+        return Err(
+            "a fixed table has at most six players; use --agents to select profiles".into(),
+        );
+    }
+    Ok(v)
+}
 pub fn prepare_directory(
     path: &Path,
     stack: Option<u32>,
     reference: Option<&Path>,
 ) -> Result<PreparedTable, String> {
-    let values = load_directory(path)?;
-    let built_in = built_in_reference(values.len());
-    let reference = reference.or(built_in.as_deref());
-    PreparedTable::new(values, stack, reference)
+    PreparedTable::new(load_directory(path)?, stack, reference)
 }

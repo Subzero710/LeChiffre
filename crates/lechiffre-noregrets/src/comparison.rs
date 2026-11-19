@@ -1,6 +1,6 @@
 //! NoRegrets profiles plugged into rs_poker's native seat-permutation runner.
 use crate::{
-    arena_config::{built_in_reference, load_profile_pool},
+    arena_config::{default_reference, load_profile_pool},
     rs_agent::{AgentReference, NoRegretsAgent},
     table_arena::{Bot, PreparedTable},
 };
@@ -91,12 +91,12 @@ impl PreparedComparison {
         permutations
             .checked_mul(num_games)
             .ok_or("total game count overflows this platform")?;
-        let default_model = built_in_reference(players);
+        let default_model = default_reference();
         let prepared = PreparedTable::prepare_profiles(
             configs,
             players,
             stack,
-            reference.or(default_model.as_deref()),
+            reference.or(Some(default_model.as_path())),
         )?;
         let stack = prepared.stack;
         let names: std::collections::HashSet<_> = prepared.seats.iter().map(|s| &s.label).collect();

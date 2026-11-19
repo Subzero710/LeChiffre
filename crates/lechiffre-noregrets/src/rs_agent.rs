@@ -18,13 +18,18 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
+
+pub const FORMAT: &str = "noregrets-rs-poker-v3";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentMetadata {
     pub format: String,
+    #[serde(default)]
+    pub engine: String,
     pub source: String,
     pub iterations: u64,
     pub seed: u64,
@@ -63,8 +68,15 @@ impl AgentReference {
         stack: u32,
         num_players: usize,
     ) -> Result<Self, String> {
-        if iterations == 0 || stack <= 2 || !(2..=6).contains(&num_players) {
-            return Err("positive iterations, stack > 2 and 2..6 players required".into());
+        if iterations == 0
+            || stack <= 2
+            || !(2..=6).contains(&num_players)
+            || u64::from(stack) * num_players as u64 > u64::from(u32::MAX)
+        {
+            return Err(
+                "positive iterations, stack > 2, 2..6 players and total chips <= u32::MAX required"
+                    .into(),
+            );
         }
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(1)
@@ -95,12 +107,8 @@ impl AgentReference {
             Ok(Self {
                 policy: Policy::new(bp, abs),
                 metadata: AgentMetadata {
-                    format: if num_players == 2 {
-                        "noregrets-rs-agent-hu-unlimited-v1"
-                    } else {
-                        "noregrets-rs-agent-unlimited-v2"
-                    }
-                    .into(),
+                    format: FORMAT.into(),
+                    engine: "rs_poker".into(),
                     source: UPSTREAM_COMMIT.into(),
                     iterations,
                     seed,
@@ -113,41 +121,104 @@ impl AgentReference {
             })
         })
     }
+    /// Publish a completed training to the same path, preserving unrelated files.
+    /// Back up both current model files and roll back on publication failure.
     pub fn save(&self, path: &Path) -> Result<(), String> {
-        if let Some(p) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            fs::create_dir_all(p).map_err(|e| e.to_string())?;
-        }
-        fs::create_dir(path).map_err(|e| e.to_string())?;
-        self.policy
-            .blueprint
-            .save(path.join("blueprint.bin").to_str().ok_or("invalid path")?)
+        fs::create_dir_all(path).map_err(|e| e.to_string())?;
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos();
+        let staging = path.join(format!(".replace-{}-{nonce}", std::process::id()));
+        fs::create_dir(&staging).map_err(|e| e.to_string())?;
+        let names = ["blueprint.bin", "agent-reference.json"];
+        let backups: Vec<PathBuf> = names
+            .iter()
+            .map(|name| staging.join(format!("{name}.previous")))
+            .collect();
+        let mut old = [false; 2];
+        let mut published = [false; 2];
+        let result = (|| -> Result<(), String> {
+            self.policy
+                .blueprint
+                .save(staging.join(names[0]).to_str().ok_or("invalid path")?)
+                .map_err(|e| e.to_string())?;
+            let mut metadata = self.metadata.clone();
+            metadata.blueprint_sha256 = format!(
+                "{:x}",
+                Sha256::digest(fs::read(staging.join(names[0])).map_err(|e| e.to_string())?)
+            );
+            fs::write(
+                staging.join(names[1]),
+                serde_json::to_vec_pretty(&metadata).map_err(|e| e.to_string())?,
+            )
             .map_err(|e| e.to_string())?;
-        let mut m = self.metadata.clone();
-        m.blueprint_sha256 = format!(
-            "{:x}",
-            Sha256::digest(fs::read(path.join("blueprint.bin")).map_err(|e| e.to_string())?)
-        );
-        fs::write(
-            path.join("agent-reference.json"),
-            serde_json::to_vec_pretty(&m).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())
+            for name in names {
+                fs::OpenOptions::new()
+                    .write(true)
+                    .open(staging.join(name))
+                    .and_then(|f| f.sync_all())
+                    .map_err(|e| e.to_string())?;
+            }
+            for i in 0..2 {
+                if path.join(names[i]).exists() {
+                    if !path.join(names[i]).is_file() {
+                        return Err(format!("{} is not a regular model file", names[i]));
+                    }
+                    fs::rename(path.join(names[i]), &backups[i]).map_err(|e| e.to_string())?;
+                    old[i] = true;
+                }
+            }
+            for i in 0..2 {
+                fs::rename(staging.join(names[i]), path.join(names[i]))
+                    .map_err(|e| e.to_string())?;
+                published[i] = true;
+            }
+            Ok(())
+        })();
+        if let Err(e) = result {
+            let mut errors = Vec::new();
+            for i in 0..2 {
+                if published[i] {
+                    if let Err(e) = fs::remove_file(path.join(names[i])) {
+                        errors.push(e.to_string());
+                    }
+                }
+                if old[i] {
+                    if let Err(e) = fs::rename(&backups[i], path.join(names[i])) {
+                        errors.push(e.to_string());
+                    }
+                }
+            }
+            if errors.is_empty() {
+                let _ = fs::remove_dir_all(&staging);
+            }
+            return Err(format!(
+                "model replacement failed: {e}; rollback errors: {errors:?}; staging: {}",
+                staging.display()
+            ));
+        }
+        fs::remove_dir_all(staging).map_err(|e| e.to_string())
     }
     pub fn load(path: &Path) -> Result<Self, String> {
         let m: AgentMetadata =
             serde_json::from_slice(&fs::read(path.join("agent-reference.json")).map_err(|e| {
-                format!("Native agent reference required (not the reduced SD-CFR reference): {e}")
+                format!(
+                    "NoRegrets model required at {}: run train-agent first ({e})",
+                    path.display()
+                )
             })?)
             .map_err(|e| e.to_string())?;
+        if m.format != FORMAT || m.engine != "rs_poker" {
+            return Err("ancien modele NoRegrets : reentrainer avec rs-poker (train-agent)".into());
+        }
         let bytes = fs::read(path.join("blueprint.bin")).map_err(|e| e.to_string())?;
         if format!("{:x}", Sha256::digest(bytes)) != m.blueprint_sha256 {
             return Err("blueprint SHA-256 mismatch".into());
         }
         let bp = Blueprint::load(path.join("blueprint.bin").to_str().ok_or("invalid path")?)
             .map_err(|e| e.to_string())?;
-        let supported = (m.format == "noregrets-rs-agent-hu-unlimited-v1" && m.num_players == 2)
-            || m.format == "noregrets-rs-agent-unlimited-v2";
-        if !supported
+        if m.format != FORMAT
             || !(2..=6).contains(&m.num_players)
             || m.source != UPSTREAM_COMMIT
             || bp.num_players != m.num_players

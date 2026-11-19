@@ -130,9 +130,10 @@ async fn reject_wrong_models_and_unbalanced_or_empty_tables() {
     let table = PreparedTable::new(vec![json!({"type":"calling"}); 6], None, None).unwrap();
     assert!(table.run(13, 1).await.is_err());
     assert!(table.run(6, 1).await.is_err());
-    let old = AgentReference::load(std::path::Path::new(
-        "../../references/noregrets-hu10bb-agent-10000-seed42",
-    ))
-    .unwrap();
-    assert_eq!(old.metadata.num_players, 2);
+    assert!(
+        AgentReference::load(std::path::Path::new(
+            "../../references/noregrets-hu10bb-agent-10000-seed42",
+        ))
+        .is_err()
+    );
 }

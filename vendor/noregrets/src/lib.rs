@@ -1,5 +1,4 @@
-//! NoRegrets, exposed as a library for LeChiffre's reference comparison.
-//! See LECHIFFRE_UPSTREAM.md for the pinned source and local changes.
+//! NoRegrets algorithms with an rs_poker-backed Hand compatibility API.
 pub mod ablate;
 pub mod abstraction;
 pub mod aivat;

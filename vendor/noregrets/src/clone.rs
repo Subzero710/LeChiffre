@@ -71,7 +71,9 @@ fn replay_hand(v: &Value, abs: &Abstraction) -> Result<Vec<Decision>, String> {
     deck[1] = our[1];
     deck[2] = bot[0];
     deck[3] = bot[1];
-    let mut idx = 4;
+    // Supply the observed runout before replay; rs_poker deals each street.
+    deck[4..4 + board.len()].copy_from_slice(&board);
+    let mut idx = 4 + board.len();
     for c in 0..52u8 {
         if !used[c as usize] {
             deck[idx] = c;
@@ -83,11 +85,6 @@ fn replay_hand(v: &Value, abs: &Abstraction) -> Result<Vec<Decision>, String> {
     }
     let button = if client_pos == 1 { 0 } else { 1 };
     let mut table = Table::new(&cfg, button, deck);
-    for (i, &c) in board.iter().enumerate() {
-        table.real.force_board_card(i, c);
-        table.shadow.force_board_card(i, c);
-    }
-
     let mut rng = SmallRng::seed_from_u64(0); // bucket draws are key-seeded
     let mut out = Vec::new();
     for inc in acts {
@@ -171,8 +168,8 @@ pub fn build(
         };
         stats.hands += 1;
         // Deterministic even split over the hand index.
-        let is_held = holdout > 0.0
-            && ((i + 1) as f64 * holdout).floor() > (i as f64 * holdout).floor();
+        let is_held =
+            holdout > 0.0 && ((i + 1) as f64 * holdout).floor() > (i as f64 * holdout).floor();
         if is_held {
             held.extend(decisions);
             continue;

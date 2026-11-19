@@ -19,17 +19,19 @@ enum Command {
         seed: u64,
         #[arg(long, default_value_t = 20)]
         stack: u32,
-        #[arg(long, default_value_t = 2)]
+        #[arg(long, default_value_t = 6)]
         players: usize,
-        #[arg(long)]
+        #[arg(long, default_value = "runs/noregrets")]
         out: PathBuf,
     },
     /// Choisir chaque siege d'une table de 2 a 6 joueurs.
     Table {
-        #[arg(long, required_unless_present = "table_config")]
+        #[arg(long, required_unless_present_any = ["table_config", "agents"], conflicts_with_all = ["table_config", "agents"])]
         players: Option<String>,
-        #[arg(long, conflicts_with = "players")]
+        #[arg(long, conflicts_with_all = ["players", "agents"])]
         table_config: Option<PathBuf>,
+        #[arg(long, num_args=2.., value_delimiter=',', conflicts_with_all=["players", "table_config"])]
+        agents: Vec<PathBuf>,
         #[arg(long)]
         reference: Option<PathBuf>,
         #[arg(long)]
@@ -72,9 +74,6 @@ async fn run() -> Result<(), String> {
             players,
             out,
         } => {
-            if out.exists() {
-                return Err("output directory already exists".into());
-            }
             let r = AgentReference::train_for_players(iterations, seed, stack, players)?;
             r.save(&out)?;
             println!(
@@ -86,6 +85,7 @@ async fn run() -> Result<(), String> {
         Command::Table {
             players,
             table_config,
+            agents,
             reference,
             stack,
             hands,
@@ -95,7 +95,12 @@ async fn run() -> Result<(), String> {
             if out.exists() {
                 return Err("output directory already exists".into());
             }
-            let (values, stack) = if let Some(path) = table_config {
+            let (values, stack) = if !agents.is_empty() {
+                (
+                    lechiffre_noregrets::arena_config::load_profile_files(&agents)?,
+                    stack,
+                )
+            } else if let Some(path) = table_config {
                 #[derive(serde::Deserialize)]
                 struct Config {
                     players: Vec<serde_json::Value>,
