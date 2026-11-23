@@ -1,11 +1,13 @@
-//! Fast 7-card hand evaluator.
+//! NoRegrets evaluator API delegated to rs_poker.
 //!
 //! `eval7` returns a u32 where a higher value is a strictly better hand.
-//! Encoding: category << 20 | up to five 4-bit rank values, most significant first.
+//! Encoding: category << 20 | rs_poker opaque subrank (higher is better).
 //! Categories: 0 high card, 1 pair, 2 two pair, 3 trips, 4 straight,
 //! 5 flush, 6 full house, 7 quads, 8 straight flush.
 
-use crate::cards::{rank, suit, Card};
+use crate::cards::Card;
+#[cfg(test)]
+use crate::cards::{rank, suit};
 
 pub const CAT_HIGH: u32 = 0;
 pub const CAT_PAIR: u32 = 1;
@@ -17,153 +19,14 @@ pub const CAT_FULL_HOUSE: u32 = 6;
 pub const CAT_QUADS: u32 = 7;
 pub const CAT_STRAIGHT_FLUSH: u32 = 8;
 
-#[inline(always)]
-fn pack(cat: u32, ranks: &[u32]) -> u32 {
-    let mut v = cat << 20;
-    let mut shift = 16;
-    for &r in ranks {
-        v |= r << shift;
-        shift -= 4;
-    }
-    v
-}
-
-/// Highest rank of a 5-in-a-row within a 13-bit rank mask, or None.
-/// Handles the wheel (A-2-3-4-5) where the high card is the 5 (rank index 3).
-#[inline(always)]
-fn straight_high(mask: u16) -> Option<u32> {
-    // Check from ace-high down to six-high.
-    for high in (4..=12u32).rev() {
-        let need = 0b11111u16 << (high - 4);
-        if mask & need == need {
-            return Some(high);
-        }
-    }
-    // Wheel: A,2,3,4,5 -> bits 12,0,1,2,3
-    let wheel = (1u16 << 12) | 0b1111;
-    if mask & wheel == wheel {
-        return Some(3);
-    }
-    None
-}
-
-/// Take the top `n` set bits of a 13-bit mask, highest first.
-#[inline(always)]
-fn top_ranks(mask: u16, n: usize, out: &mut [u32; 5]) -> usize {
-    let mut cnt = 0;
-    for r in (0..13u32).rev() {
-        if mask & (1 << r) != 0 {
-            out[cnt] = r;
-            cnt += 1;
-            if cnt == n {
-                break;
-            }
-        }
-    }
-    cnt
-}
-
-/// Evaluate the best 5-card hand from exactly 7 cards.
+/// Evaluate through rs_poker's native perfect-hash evaluator.
+/// Category stays in bits 20.. for NoRegrets' public category() helper.
+/// The low bits are rs_poker's opaque, ordered subrank.
 pub fn eval7(cards: &[Card; 7]) -> u32 {
-    let mut counts = [0u8; 13];
-    let mut suit_masks = [0u16; 4];
-    for &c in cards {
-        counts[rank(c) as usize] += 1;
-        suit_masks[suit(c) as usize] |= 1 << rank(c);
-    }
-
-    // Flush / straight flush
-    for sm in suit_masks {
-        if sm.count_ones() >= 5 {
-            if let Some(h) = straight_high(sm) {
-                return pack(CAT_STRAIGHT_FLUSH, &[h]);
-            }
-            let mut tops = [0u32; 5];
-            top_ranks(sm, 5, &mut tops);
-            return pack(CAT_FLUSH, &tops);
-        }
-    }
-
-    let mut rank_mask: u16 = 0;
-    let mut quad: i32 = -1;
-    let mut trips_hi: i32 = -1;
-    let mut trips_lo: i32 = -1;
-    let mut pair_hi: i32 = -1;
-    let mut pair_lo: i32 = -1;
-    for r in (0..13usize).rev() {
-        let n = counts[r];
-        if n == 0 {
-            continue;
-        }
-        rank_mask |= 1 << r;
-        match n {
-            4 => quad = r as i32,
-            3 => {
-                if trips_hi < 0 {
-                    trips_hi = r as i32;
-                } else if trips_lo < 0 {
-                    trips_lo = r as i32;
-                }
-            }
-            2 => {
-                if pair_hi < 0 {
-                    pair_hi = r as i32;
-                } else if pair_lo < 0 {
-                    pair_lo = r as i32;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    if quad >= 0 {
-        // Best kicker among remaining ranks
-        let kicker_mask = rank_mask & !(1u16 << quad);
-        let mut tops = [0u32; 5];
-        top_ranks(kicker_mask, 1, &mut tops);
-        return pack(CAT_QUADS, &[quad as u32, tops[0]]);
-    }
-
-    // Full house: trips + (second trips as pair, or best pair)
-    if trips_hi >= 0 {
-        let pair_part = if trips_lo >= 0 {
-            trips_lo.max(pair_hi)
-        } else {
-            pair_hi
-        };
-        if pair_part >= 0 {
-            return pack(CAT_FULL_HOUSE, &[trips_hi as u32, pair_part as u32]);
-        }
-    }
-
-    if let Some(h) = straight_high(rank_mask) {
-        return pack(CAT_STRAIGHT, &[h]);
-    }
-
-    if trips_hi >= 0 {
-        let kicker_mask = rank_mask & !(1u16 << trips_hi);
-        let mut tops = [0u32; 5];
-        top_ranks(kicker_mask, 2, &mut tops);
-        return pack(CAT_TRIPS, &[trips_hi as u32, tops[0], tops[1]]);
-    }
-
-    if pair_hi >= 0 && pair_lo >= 0 {
-        let kicker_mask = rank_mask & !(1u16 << pair_hi) & !(1u16 << pair_lo);
-        let mut tops = [0u32; 5];
-        top_ranks(kicker_mask, 1, &mut tops);
-        return pack(CAT_TWO_PAIR, &[pair_hi as u32, pair_lo as u32, tops[0]]);
-    }
-
-    if pair_hi >= 0 {
-        let kicker_mask = rank_mask & !(1u16 << pair_hi);
-        let mut tops = [0u32; 5];
-        top_ranks(kicker_mask, 3, &mut tops);
-        return pack(CAT_PAIR, &[pair_hi as u32, tops[0], tops[1], tops[2]]);
-    }
-
-    let mut tops = [0u32; 5];
-    top_ranks(rank_mask, 5, &mut tops);
-    pack(CAT_HIGH, &tops)
+    use rs_poker::core::Rankable;
+    let native = cards.map(crate::engine::to_rs_card);
+    let raw = u32::from(native.as_slice().rank().to_raw());
+    (((raw >> 12) - 1) << 20) | (raw & 0xfff)
 }
 
 /// Convenience: evaluate 2 hole cards + 3..5 board cards (pads via best-of available

@@ -280,7 +280,7 @@ fn standard_state(hole: [Card; 2], board: &[Card]) -> (crate::engine::Hand, Vec<
     }
     let mut h = crate::engine::Hand::new(&cfg, 0, deck);
     let mut hist = Vec::with_capacity(8);
-    let mut limp_check = |h: &mut crate::engine::Hand, hist: &mut Vec<u8>| {
+    let limp_check = |h: &mut crate::engine::Hand, hist: &mut Vec<u8>| {
         for _ in 0..2 {
             h.apply(crate::engine::PlayerAction::CheckCall);
             hist.push(AbsAction::CheckCall.token());
@@ -332,8 +332,14 @@ fn train_street_centroids(
             deck.shuffle(&mut rng);
             let hole = [deck[0], deck[1]];
             let board = deck[2..2 + board_len].to_vec();
-            equity_quantiles(hole, &board, cfg.dist_runouts, cfg.runout_rollouts, &mut rng)
-                .to_vec()
+            equity_quantiles(
+                hole,
+                &board,
+                cfg.dist_runouts,
+                cfg.runout_rollouts,
+                &mut rng,
+            )
+            .to_vec()
         })
         .collect();
     kmedians(&points, cfg.postflop_buckets as usize, 25, seed)
@@ -393,7 +399,9 @@ impl Abstraction {
                 .par_iter()
                 .flat_map_iter(|&hole| {
                     let mut out = Vec::new();
-                    let rest: Vec<Card> = (0..52u8).filter(|&c| c != hole[0] && c != hole[1]).collect();
+                    let rest: Vec<Card> = (0..52u8)
+                        .filter(|&c| c != hole[0] && c != hole[1])
+                        .collect();
                     let mut idx = vec![0usize; street_len];
                     for (i, v) in idx.iter_mut().enumerate() {
                         *v = i;
@@ -554,9 +562,13 @@ impl Abstraction {
     /// Isolated adapter; the original NoRegrets menus keep their behavior.
     fn lechiffre_actions(&self, h: &Hand) -> Vec<AbsAction> {
         let mut acts = Vec::with_capacity(6);
-        if !h.can_check() { acts.push(AbsAction::Fold); }
+        if !h.can_check() {
+            acts.push(AbsAction::Fold);
+        }
         acts.push(AbsAction::CheckCall);
-        if h.n_raises() >= 1 { return acts; }
+        if h.n_raises() >= 1 {
+            return acts;
+        }
         if let Some((_, hi)) = h.raise_bounds() {
             let mut seen = Vec::new();
             for a in [AbsAction::MinRaise, AbsAction::Bet(2), AbsAction::Bet(4)] {
@@ -638,9 +650,10 @@ impl Abstraction {
                 nearest_centroid(&f, cents)
             }
             Some(cents) if cents.first().map(|v| v.len()) != Some(QUANTILES) => {
-                let sc = self.strat.as_ref().expect(
-                    "strategic centroids need the previous blueprint (--strat-prev)",
-                );
+                let sc = self
+                    .strat
+                    .as_ref()
+                    .expect("strategic centroids need the previous blueprint (--strat-prev)");
                 let f = strategic_fingerprint(sc, hole, board, &mut krng);
                 nearest_centroid(&f, cents)
             }
@@ -751,10 +764,30 @@ pub fn preflop_bucket(hole: [Card; 2]) -> u16 {
 
 /// All 24 permutations of the four suits.
 const SUIT_PERMS: [[u8; 4]; 24] = [
-    [0, 1, 2, 3], [0, 1, 3, 2], [0, 2, 1, 3], [0, 2, 3, 1], [0, 3, 1, 2], [0, 3, 2, 1],
-    [1, 0, 2, 3], [1, 0, 3, 2], [1, 2, 0, 3], [1, 2, 3, 0], [1, 3, 0, 2], [1, 3, 2, 0],
-    [2, 0, 1, 3], [2, 0, 3, 1], [2, 1, 0, 3], [2, 1, 3, 0], [2, 3, 0, 1], [2, 3, 1, 0],
-    [3, 0, 1, 2], [3, 0, 2, 1], [3, 1, 0, 2], [3, 1, 2, 0], [3, 2, 0, 1], [3, 2, 1, 0],
+    [0, 1, 2, 3],
+    [0, 1, 3, 2],
+    [0, 2, 1, 3],
+    [0, 2, 3, 1],
+    [0, 3, 1, 2],
+    [0, 3, 2, 1],
+    [1, 0, 2, 3],
+    [1, 0, 3, 2],
+    [1, 2, 0, 3],
+    [1, 2, 3, 0],
+    [1, 3, 0, 2],
+    [1, 3, 2, 0],
+    [2, 0, 1, 3],
+    [2, 0, 3, 1],
+    [2, 1, 0, 3],
+    [2, 1, 3, 0],
+    [2, 3, 0, 1],
+    [2, 3, 1, 0],
+    [3, 0, 1, 2],
+    [3, 0, 2, 1],
+    [3, 1, 0, 2],
+    [3, 1, 2, 0],
+    [3, 2, 0, 1],
+    [3, 2, 1, 0],
 ];
 
 /// Canonical key for a (hole, board) pair under suit isomorphism: the
@@ -871,7 +904,10 @@ fn canonical_board(board: &[Card]) -> (u64, [u8; 4]) {
 }
 
 fn apply_perm(board: &[Card], perm: &[u8; 4]) -> Vec<Card> {
-    board.iter().map(|&c| (c & !3) | perm[(c & 3) as usize]).collect()
+    board
+        .iter()
+        .map(|&c| (c & !3) | perm[(c & 3) as usize])
+        .collect()
 }
 
 /// Exact river-equity bucket for every hole combo on `board` in one O(N)
@@ -1153,7 +1189,14 @@ fn train_street_combined(
             deck.shuffle(&mut rng);
             let hole = [deck[0], deck[1]];
             let board = deck[2..2 + board_len].to_vec();
-            combined_features(hole, &board, cfg.dist_runouts, cfg.runout_rollouts, &mut rng).to_vec()
+            combined_features(
+                hole,
+                &board,
+                cfg.dist_runouts,
+                cfg.runout_rollouts,
+                &mut rng,
+            )
+            .to_vec()
         })
         .collect();
     kmedians(&points, cfg.postflop_buckets as usize, 25, seed)
@@ -1463,8 +1506,14 @@ mod tests {
             a.concrete(&h, AbsAction::Bet(2)),
             PlayerAction::RaiseTo(225)
         );
-        assert_eq!(a.concrete(&h, AbsAction::AllIn), PlayerAction::RaiseTo(10_000));
-        assert_eq!(a.concrete(&h, AbsAction::CheckCall), PlayerAction::CheckCall);
+        assert_eq!(
+            a.concrete(&h, AbsAction::AllIn),
+            PlayerAction::RaiseTo(10_000)
+        );
+        assert_eq!(
+            a.concrete(&h, AbsAction::CheckCall),
+            PlayerAction::CheckCall
+        );
     }
 
     #[test]
@@ -1660,10 +1709,7 @@ mod tests {
         assert_eq!(cents.len(), 3);
         // Every true center must have a learned centroid within L1 0.05*Q.
         for c in &centers {
-            let best = cents
-                .iter()
-                .map(|k| l1(k, c))
-                .fold(f64::MAX, f64::min);
+            let best = cents.iter().map(|k| l1(k, c)).fold(f64::MAX, f64::min);
             assert!(best < 0.05 * QUANTILES as f64, "centroid too far: {}", best);
         }
         // Centroids come out sorted by mean (bucket index ~ strength order).
@@ -1744,15 +1790,26 @@ mod tests {
         let iso_hole = [make_card(12, 3), make_card(11, 3)];
         let iso_flop = [make_card(9, 2), make_card(3, 1), make_card(7, 3)];
         assert_eq!(b.bucket(iso_hole, &iso_flop, &mut rng), lazy);
-        assert_eq!(b.canon_entries().len(), 1, "no new canonical entry was computed");
+        assert_eq!(
+            b.canon_entries().len(),
+            1,
+            "no new canonical entry was computed"
+        );
         // Representative test: canonical iff identity key is minimal.
         assert_eq!(
             identity_key(hole, &flop) == canonical_cards_key(hole, &flop),
             canonical_cards_key(hole, &flop) == identity_key(hole, &flop)
         );
-        let table = BucketTable { cfg: a.cfg.clone(), centroids: None, entries };
+        let table = BucketTable {
+            cfg: a.cfg.clone(),
+            centroids: None,
+            entries,
+        };
         assert!(table.matches(&a.cfg));
-        assert!(!table.matches(&AbsConfig { postflop_buckets: 13, ..a.cfg.clone() }));
+        assert!(!table.matches(&AbsConfig {
+            postflop_buckets: 13,
+            ..a.cfg.clone()
+        }));
     }
 
     #[test]
@@ -1849,7 +1906,11 @@ mod tests {
         let f_set = strategic_fingerprint(&sc, [set[0], set[1]], &board, &mut rng);
         let f_air = strategic_fingerprint(&sc, [air[0], air[1]], &board, &mut rng);
         assert_eq!(f_set.len(), f_air.len());
-        assert_ne!(f_set.len(), QUANTILES, "dimension must not collide with equity features");
+        assert_ne!(
+            f_set.len(),
+            QUANTILES,
+            "dimension must not collide with equity features"
+        );
         // Value features live in the last three slots: [mean, std, winfrac].
         let n = f_set.len();
         assert!(
@@ -1885,7 +1946,10 @@ mod tests {
         let bs = a.bucket([set[0], set[1]], &board, &mut rng);
         let ba = a.bucket([air[0], air[1]], &board, &mut rng);
         assert!(bs < 6 && ba < 6);
-        assert_ne!(bs, ba, "monster and air should land in different strategic buckets");
+        assert_ne!(
+            bs, ba,
+            "monster and air should land in different strategic buckets"
+        );
         // Cache stability across the suit-symmetric lookup.
         assert_eq!(bs, a.bucket([set[1], set[0]], &board, &mut rng));
     }

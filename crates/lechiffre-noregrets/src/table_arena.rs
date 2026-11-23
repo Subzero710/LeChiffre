@@ -81,6 +81,8 @@ impl PreparedTable {
         if !(2..=6).contains(&n) {
             return Err("choose 2 to 6 players, one configuration per seat".into());
         }
+        let default_path = crate::arena_config::default_reference();
+        let default_reference = default_reference.or(Some(default_path.as_path()));
         let mut seats = Vec::new();
         let mut common_stack = stack;
         for value in configs {
@@ -138,7 +140,7 @@ impl PreparedTable {
         let labels: Vec<_> = seats.iter().map(|s| s.label.clone()).collect();
         for (p, seat) in seats.iter_mut().enumerate() {
             if labels.iter().filter(|name| **name == seat.label).count() > 1 {
-                seat.label = format!("{} (siege {})", seat.label, p + 1);
+                seat.label = format!("{} (profil {})", seat.label, p + 1);
             }
             seat.config["name"] = serde_json::json!(seat.label);
             if let Bot::Existing(cfg) = &mut seat.bot {

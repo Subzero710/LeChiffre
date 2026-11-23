@@ -1,5 +1,5 @@
 use smallvec::SmallVec;
-use std::fmt;
+use std::{collections::VecDeque, fmt};
 
 use tracing::{Level, event, instrument};
 
@@ -55,6 +55,7 @@ pub struct HoldemSimulation {
     pub agents: Vec<Box<dyn Agent>>,
     pub game_state: GameState,
     pub deck: Deck,
+    pub(crate) deal_order: Option<VecDeque<Card>>,
     pub historians: Vec<Box<dyn Historian>>,
     pub panic_on_historian_error: bool,
     /// The RNG this simulation deals from. Owned so `run()` can be `async` and
@@ -63,6 +64,24 @@ pub struct HoldemSimulation {
 }
 
 impl HoldemSimulation {
+    /// Supply deterministic future deals for replay or branching traversals.
+    /// Cards must be distinct and still present in the remaining deck.
+    /// A supplied sequence is strict: exhaustion never falls back to randomness.
+    pub fn set_deal_order(
+        &mut self,
+        cards: impl IntoIterator<Item = Card>,
+    ) -> Result<(), &'static str> {
+        let cards: VecDeque<_> = cards.into_iter().collect();
+        let mut available = self.deck;
+        for card in &cards {
+            if !available.remove(card) {
+                return Err("duplicate or unavailable ordered card");
+            }
+        }
+        self.deal_order = Some(cards);
+        Ok(())
+    }
+
     pub fn more_rounds(&self) -> bool {
         !matches!(self.game_state.round, Round::Complete)
     }
@@ -123,6 +142,50 @@ impl HoldemSimulation {
             // There's nothing left to do to this.
             Round::Complete => (),
         }
+    }
+
+    /// Advance forced events using the same rules as `run`, pausing before
+    /// the next player action. This supports external-sampling traversals.
+    /// Call `run_agent_action` to play an action, then call this method again.
+    pub async fn advance_to_decision(&mut self) -> bool {
+        loop {
+            if !self.more_rounds() {
+                return false;
+            }
+            if (self.game_state.player_active | self.game_state.player_all_in).count() == 1
+                && !matches!(
+                    self.game_state.round,
+                    Round::Starting | Round::Ante | Round::DealPreflop
+                )
+            {
+                self.distribute_pots(false).await;
+                self.end_game().await;
+                return false;
+            }
+            match self.game_state.round {
+                Round::Preflop => {
+                    self.post_blinds().await;
+                    if !self.betting_round_is_forced_complete() && self.needs_action() {
+                        return true;
+                    }
+                    self.advance_round().await;
+                }
+                Round::Flop | Round::Turn | Round::River => {
+                    if !self.betting_round_is_forced_complete() && self.needs_action() {
+                        return true;
+                    }
+                    self.advance_round().await;
+                }
+                _ => self.run_round().await,
+            }
+        }
+    }
+
+    fn betting_round_is_forced_complete(&self) -> bool {
+        self.game_state.player_active.count() < 2
+            && !self.game_state.player_active.ones().any(|idx| {
+                self.game_state.round_data.player_bet[idx] < self.game_state.round_data.bet
+            })
     }
 
     async fn start(&mut self) {
@@ -202,7 +265,7 @@ impl HoldemSimulation {
         self.advance_round().await
     }
 
-    async fn preflop(&mut self) {
+    async fn post_blinds(&mut self) {
         // Forced seats are determined by dealt players, including players
         // already all-in from the ante. Such a player can post a zero blind.
         let dealt = self.game_state.player_active | self.game_state.player_all_in;
@@ -251,7 +314,10 @@ impl HoldemSimulation {
             }))
             .await;
         }
+    }
 
+    async fn preflop(&mut self) {
+        self.post_blinds().await;
         self.run_betting_round().await;
         self.advance_round().await;
     }
@@ -365,7 +431,14 @@ impl HoldemSimulation {
         let deck = &mut self.deck;
         let mut rng = &mut *self.rng;
         let mut cards: SmallVec<[Card; 5]> = (0..num_cards)
-            .map(|_| deck.deal(&mut rng).unwrap())
+            .map(|_| match self.deal_order.as_mut() {
+                Some(order) => {
+                    let card = order.pop_front().expect("ordered deal exhausted");
+                    assert!(deck.remove(&card), "ordered card absent from deck");
+                    card
+                }
+                None => deck.deal(&mut rng).unwrap(),
+            })
             .collect();
 
         // Keep the cards sorted in min to max order
@@ -386,13 +459,8 @@ impl HoldemSimulation {
     /// hasn't been called), active players must still fold or call.
     async fn run_betting_round(&mut self) {
         let current_round = self.game_state.round;
-        if self.game_state.player_active.count() < 2 {
-            let has_unmatched_bet = self.game_state.player_active.ones().any(|idx| {
-                self.game_state.round_data.player_bet[idx] < self.game_state.round_data.bet
-            });
-            if !has_unmatched_bet {
-                return;
-            }
+        if self.betting_round_is_forced_complete() {
+            return;
         }
         while self.needs_action() && self.game_state.round == current_round {
             self.run_single_agent().await;

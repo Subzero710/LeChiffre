@@ -6,6 +6,8 @@ license = "MIT"
 description = "Pluribus-style 2-6 player no-limit hold'em bot (6-max primary): Linear MCCFR blueprint + online subgame resolving"
 
 [dependencies]
+rs_poker = { path = "../rs-poker", default-features = false, features = ["arena", "serde"] }
+futures-executor = "0.3"
 rand = { version = "0.9", features = ["small_rng"] }
 mimalloc = "0.1"
 rayon = "1.10"

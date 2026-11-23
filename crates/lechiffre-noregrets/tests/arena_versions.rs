@@ -104,7 +104,12 @@ async fn stock_only_default_model_and_cancelled_runs() {
         &root.join("01.json"),
         json!({"type":"noregrets","name":"Default-HU"}),
     );
-    let report = prepare_directory(&root, None, None)
+    let model = root.join("default-model");
+    AgentReference::train_for_players(2, 8, 20, 2)
+        .unwrap()
+        .save(&model)
+        .unwrap();
+    let report = prepare_directory(&root, None, Some(&model))
         .unwrap()
         .run(4, 8)
         .await
