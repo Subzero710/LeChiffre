@@ -33,6 +33,8 @@ pub struct AgentMetadata {
     pub source: String,
     pub iterations: u64,
     pub seed: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub training_threads: Option<usize>,
     #[serde(default = "heads_up")]
     pub num_players: usize,
     pub stack: u32,
@@ -68,20 +70,31 @@ impl AgentReference {
         stack: u32,
         num_players: usize,
     ) -> Result<Self, String> {
+        Self::train_for_players_with_threads(iterations, seed, stack, num_players, 1)
+    }
+    pub fn train_for_players_with_threads(
+        iterations: u64,
+        seed: u64,
+        stack: u32,
+        num_players: usize,
+        threads: usize,
+    ) -> Result<Self, String> {
         if iterations == 0
+            || threads == 0
             || stack <= 2
             || !(2..=6).contains(&num_players)
             || u64::from(stack) * num_players as u64 > u64::from(u32::MAX)
         {
             return Err(
-                "positive iterations, stack > 2, 2..6 players and total chips <= u32::MAX required"
+                "positive iterations and threads, stack > 2, 2..6 players and total chips <= u32::MAX required"
                     .into(),
             );
         }
         let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(1)
+            .num_threads(threads)
             .build()
             .map_err(|e| e.to_string())?;
+        let training_threads = pool.current_num_threads();
         pool.install(|| {
             let abs = Arc::new(Abstraction::new(AbsConfig {
                 cache_cap: 200_000,
@@ -96,7 +109,6 @@ impl AgentReference {
                     bb: 2,
                 },
                 seed,
-                prune_after: u64::MAX,
                 ..TrainConfig::default()
             };
             let trainer = Trainer::new(abs.clone(), cfg);
@@ -112,6 +124,7 @@ impl AgentReference {
                     source: UPSTREAM_COMMIT.into(),
                     iterations,
                     seed,
+                    training_threads: Some(training_threads),
                     num_players,
                     stack,
                     small_blind: 1,

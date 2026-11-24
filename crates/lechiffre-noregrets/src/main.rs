@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use lechiffre_noregrets::{rs_agent::AgentReference, rs_arena, table_arena::PreparedTable};
-use std::{fs, path::PathBuf};
+use std::{fs, num::NonZeroUsize, path::PathBuf};
 
 #[derive(Parser)]
 #[command(about = "NoRegrets : Agent rs_poker, matchs contre agents existants")]
@@ -21,6 +21,9 @@ enum Command {
         stack: u32,
         #[arg(long, default_value_t = 6)]
         players: usize,
+        /// Threads d'entrainement ; par defaut, parallelisme disponible.
+        #[arg(long)]
+        threads: Option<NonZeroUsize>,
         #[arg(long, default_value = "runs/noregrets")]
         out: PathBuf,
     },
@@ -72,9 +75,16 @@ async fn run() -> Result<(), String> {
             seed,
             stack,
             players,
+            threads,
             out,
         } => {
-            let r = AgentReference::train_for_players(iterations, seed, stack, players)?;
+            let threads = threads.map(NonZeroUsize::get).unwrap_or_else(|| {
+                std::thread::available_parallelism().map_or(1, NonZeroUsize::get)
+            });
+            eprintln!("Entrainement NoRegrets : {threads} thread(s), {iterations} parcours.");
+            let r = AgentReference::train_for_players_with_threads(
+                iterations, seed, stack, players, threads,
+            )?;
             r.save(&out)?;
             println!(
                 "NoRegrets Agent sauvegarde : {} ; {players} joueurs, {} BB, relances libres",

@@ -88,8 +88,10 @@ NoRegrets entraîne un blueprint hors ligne avec `rs-poker`, puis l'utilise en p
 **Entraîner un modèle à 6 joueurs et 100 BB :**
 
 ```sh
-cargo run --release --locked --manifest-path crates/lechiffre-noregrets/Cargo.toml -- train-agent --players 6 --stack 200 --iterations 100000 --seed 42 --out runs/noregrets
+cargo run --release --locked --manifest-path crates/lechiffre-noregrets/Cargo.toml -- train-agent --players 6 --stack 200 --iterations 1000000 --threads 4 --seed 42 --out runs/noregrets
 ```
+
+Sans `--threads`, le lanceur utilise le parallélisme disponible. Avec plusieurs threads, une même graine ne garantit pas un blueprint identique. Le pruning natif est autorisé après 200 000 parcours.
 
 **Jouer une table de 6 joueurs :**
 
