@@ -71,7 +71,7 @@ impl TrainingEpisodeConfig {
 pub(super) struct SubjectSample {
     pub(super) id: u64,
     pub(super) support: Vec<(u64, FeaturizedHand)>,
-    pub(super) query: Vec<FeaturizedHand>,
+    pub(super) query: Vec<(u64, FeaturizedHand)>,
 }
 
 /// Exhaustive deterministic, Train-only episodes for the selected subjects.
@@ -137,14 +137,18 @@ pub(super) fn sample_subjects(
             let query = train[start..end]
                 .iter()
                 .map(|membership| {
-                    dataset.hands[membership.hand_slot].materialize(membership.subject_position)
+                    let hand = &dataset.hands[membership.hand_slot];
+                    (
+                        hand.hand_index,
+                        hand.materialize(membership.subject_position),
+                    )
                 })
                 .collect::<Vec<_>>();
             // An empty Query contains no target (and cannot contribute a gradient).
             // Its hands are still eligible as historical Support for the next block.
             if query
                 .iter()
-                .any(|hand| subject_decisions(hand).next().is_some())
+                .any(|(_, hand)| subject_decisions(hand).next().is_some())
             {
                 if !support
                     .iter()
@@ -447,9 +451,10 @@ mod tests {
             assert_eq!(sample.id, 42);
             assert_eq!(sample.support.len(), 3);
             let last_support = sample.support.last().unwrap().0;
-            for hand in &sample.query {
+            for (hand_index, hand) in &sample.query {
                 let id = hand.hand_id().as_str();
                 let index = id.strip_prefix('h').unwrap().parse::<u64>().unwrap();
+                assert_eq!(*hand_index, index);
                 assert!(index > last_support);
                 assert!(partitions.contains_train(index));
                 assert!(query_ids.insert(id.to_owned()), "query hand repeated");

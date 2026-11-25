@@ -130,7 +130,7 @@ reprise et les évaluations **ne lisent plus les sources CSV/JSON**. Les checkpo
 globaux sont versionnés v6 et refusent une légalité différente. Le manifeste 70/15/15
 existant reste valide, car les deux Parquet ne changent pas.
 
-Le Blueprint entraîne Z₀/G en mini-batches sur tout Train ; Personalization entraîne G uniquement à partir de Z₁ et Momentary uniquement à partir de Z₂. Les scores des niveaux précédents sont mesurés, sans objectif auxiliaire. La commande `--evaluate-blueprint` permet de contrôler la référence avant Z₂, et `--benchmark-behavioural` mesure NLL et accuracy sur Validation à plusieurs budgets d'historique Z₁, sans utiliser Test.
+Le Blueprint entraîne Z₀/G en mini-batches sur tout Train ; Personalization entraîne G uniquement à partir de Z₁, avec des mini-batches de décisions Query entrelacées par ordre d'ingestion (même taille que Blueprint) et un Z₁ recalculé par épisode pour chaque snapshot de G. Momentary entraîne G uniquement à partir de Z₂. Les scores des niveaux précédents sont mesurés, sans objectif auxiliaire. La commande `--evaluate-blueprint` permet de contrôler la référence avant Z₂, et `--benchmark-behavioural` mesure NLL et accuracy sur Validation à plusieurs budgets d'historique Z₁, sans utiliser Test.
 
 Les fichiers `configs/hierarchical.example.json` et `configs/hierarchical-resume.example.json` sont **des exemples de structure**, pas des configurations universelles prêtes à entraîner un modèle sur n'importe quel dataset.
 

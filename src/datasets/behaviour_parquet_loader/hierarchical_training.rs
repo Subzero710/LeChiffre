@@ -12,7 +12,7 @@ pub const Z2_PRIOR_MARGINAL_SAMPLES: usize = 64;
 const VALIDATION_NOISE_SEED: u64 = 0x8c0a_f13e_61ad_90b7;
 
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -82,7 +82,8 @@ pub struct HierarchicalValidationReport {
     pub mean_conditional_kl: f64,
 }
 
-/// Explicit population mini-batch size. Each phase has its own fixed objective.
+/// Explicit decision mini-batch size for Blueprint and Personalization.
+/// Each phase has its own fixed objective.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HierarchicalOptimizationConfig {
     blueprint_batch_decisions: usize,
@@ -680,10 +681,11 @@ impl HierarchicalTrainer {
         Ok(nll_sum)
     }
 
-    /// First-order personalization training: adapt a private Z1 on the latest
-    /// `history_hands` from internal Train support, then update G on
-    /// internal Train query hands using only the Z1 likelihood. Zero is valid
-    /// (exact Z1=Z0); too few hands is an error.
+    /// First-order personalization training: globally order the internal Train
+    /// Query decisions by (hand_index, subject_id, sequence_index), then batch
+    /// them exactly as in Blueprint. Adapt each participating episode's Z1 from
+    /// its own preceding Support using the current immutable G batch snapshot.
+    /// Only the Query Z1 likelihood updates G. Zero history is exact Z1=Z0.
     /// Use different *explicit* history_hands across epochs (0,10,100,1000...).
     pub fn train_personalization_epoch<P: ExactLegalityProvider>(
         &mut self,
@@ -703,38 +705,65 @@ impl HierarchicalTrainer {
         let samples = sample_subjects(dataset, subjects, partitions, episode)?;
         let mut working = self.clone();
         working.bind_training_context(dataset, subjects, partitions, episode)?;
-        let mut sum_nll = 0.0;
-        let mut count = 0usize;
-        for sample in &samples {
-            let baseline =
-                working.personalize(sample.id, &sample.support, history_hands, provider)?;
-            let mut batch = GeneratorGradientBatch::new(&working.generator);
-            let mut query_count = 0usize;
-            let mut query_nll = 0.0;
-            for hand in &sample.query {
+        // Episodes define evidence, not optimizer steps. Flatten only Query rows;
+        // preserve the episode index so each row retains its exact Support.
+        let mut query = Vec::new();
+        for (sample_index, sample) in samples.iter().enumerate() {
+            for (hand_index, hand) in &sample.query {
                 for row in subject_decisions(hand) {
-                    let observation = decode_decision(hand, row)?;
-                    let legal = lookup(provider, sample.id, hand, row)?;
-                    let loss = batch.accumulate_encoded(
-                        &working.generator,
-                        baseline.profile(),
-                        &observation,
-                        &legal,
-                    )?;
-                    query_count += 1;
-                    query_nll += loss.total;
+                    let key = (*hand_index, sample.id, hand.sequence_indexes()[row]);
+                    query.push((key, sample_index, hand, row));
                 }
             }
-            sum_nll += query_nll;
-            count = count
-                .checked_add(query_count)
-                .ok_or(HierarchicalTrainingError::CountOverflow)?;
+        }
+        query.sort_unstable_by_key(|entry| entry.0);
+        if let Some(pair) = query.windows(2).find(|pair| pair[0].0 == pair[1].0) {
+            let (hand_index, subject_id, sequence_index) = pair[0].0;
+            return Err(HierarchicalTrainingError::DuplicateQueryDecision {
+                hand_index,
+                subject_id,
+                sequence_index,
+            });
+        }
+        let count = query.len();
+        if count == 0 {
+            return Err(HierarchicalTrainingError::EmptyTraining);
+        }
+        let mut sum_nll = 0.0;
+        let mut optimizer_steps = 0;
+        for chunk in query.chunks(working.optimization.blueprint_batch_decisions) {
+            let mut batch = GeneratorGradientBatch::new(&working.generator);
+            // Rebuild this cache for every optimizer step, including when an
+            // episode spans two batches. No stale Z1 crosses a G update.
+            let mut baselines = HashMap::<usize, PlayerBaseline>::new();
+            for &(_, sample_index, hand, row) in chunk {
+                let sample = &samples[sample_index];
+                let baseline = match baselines.entry(sample_index) {
+                    Entry::Occupied(entry) => entry.into_mut(),
+                    Entry::Vacant(entry) => entry.insert(working.personalize(
+                        sample.id,
+                        &sample.support,
+                        history_hands,
+                        provider,
+                    )?),
+                };
+                let observation = decode_decision(hand, row)?;
+                let legal = lookup(provider, sample.id, hand, row)?;
+                let loss = batch.accumulate_encoded(
+                    &working.generator,
+                    baseline.profile(),
+                    &observation,
+                    &legal,
+                )?;
+                sum_nll += loss.total;
+            }
             working
                 .generator_adam
                 .apply_batch(&mut working.generator, batch)?;
+            optimizer_steps += 1;
         }
-        if count == 0 {
-            return Err(HierarchicalTrainingError::EmptyTraining);
+        if !sum_nll.is_finite() {
+            return Err(HierarchicalTrainingError::NonFiniteUpdate);
         }
         working.personalization_epochs = working
             .personalization_epochs
@@ -744,7 +773,7 @@ impl HierarchicalTrainer {
         Ok(HierarchicalEpochReport {
             phase: HierarchicalPhase::Personalization,
             decisions: count,
-            optimizer_steps: samples.len(),
+            optimizer_steps,
             mean_nll: sum_nll / count as f64,
             mean_conditional_kl: None,
         })
@@ -1284,7 +1313,7 @@ fn collect_query<P: ExactLegalityProvider>(
     provider: &mut P,
 ) -> Result<Vec<(GeneratorObservation, LegalActionSpace)>, HierarchicalTrainingError> {
     let mut result = Vec::new();
-    for hand in &sample.query {
+    for (_, hand) in &sample.query {
         for row in subject_decisions(hand) {
             result.push((
                 decode_decision(hand, row)?,
@@ -1313,6 +1342,11 @@ pub enum HierarchicalTrainingError {
     LatentDimensionMismatch,
     UnknownSubject(u64),
     DuplicateSubject(u64),
+    DuplicateQueryDecision {
+        hand_index: u64,
+        subject_id: u64,
+        sequence_index: u32,
+    },
     InsufficientHistory {
         subject: u64,
         required: usize,
@@ -1899,6 +1933,126 @@ mod tests {
         );
         assert_eq!(actual.blueprint, original_blueprint);
         assert_eq!(actual.analyzer.checkpoint_value(), original_analyzer);
+    }
+
+    #[test]
+    fn personalization_mixes_subjects_and_refreshes_z1_per_batch() {
+        use super::super::SubjectMembership;
+        use crate::behavioural::ContinuousFeature;
+        use crate::behavioural::codebook::position_id;
+
+        let mut data = dataset();
+        // Two subjects with different timing histories, both present in every hand.
+        for hand in &mut data.hands {
+            let mut categorical = hand.categorical_without_subject[0];
+            categorical[1] = i64::from(position_id(Position::BigBlind));
+            let mut continuous = hand.continuous[0];
+            continuous[ContinuousFeature::DecisionTimeMs as usize] = 6000.0;
+            let present = hand.continuous_present[0];
+            hand.categorical_without_subject.push(categorical);
+            hand.sequence_indexes.push(1);
+            hand.continuous.push(continuous);
+            hand.continuous_present.push(present);
+            hand.decision_time_ms.push(6000);
+        }
+        let hand_count = data.hands.len();
+        data.event_count += hand_count;
+        data.summary.events_written += hand_count as u64;
+        data.summary.subject_hand_rows_written += hand_count as u64;
+        data.subjects.insert(
+            99,
+            (0..hand_count)
+                .map(|hand_slot| SubjectMembership {
+                    hand_slot,
+                    subject_position: Position::BigBlind,
+                })
+                .collect(),
+        );
+        let partitions = DatasetPartitions::canonical_for_test(&data);
+        let episode = TrainingEpisodeConfig::new(2, 3).unwrap();
+        let mut initial = trainer();
+        initial.optimization = HierarchicalOptimizationConfig::new(3).unwrap();
+        let subjects = [99, 42]; // deliberately opposite the ingestion tie-break
+        let mut provider = |_: u64,
+                            _: &crate::behavioural::HandId,
+                            _: u32|
+         -> Result<_, &'static str> { Ok(decision(600).1) };
+        initial
+            .train_blueprint_epoch(&data, &subjects, &partitions, episode, &mut provider)
+            .unwrap();
+        // Train hands 0..6; Support 0,1 -> Query 2,3,4; Support 3,4 -> Query 5.
+        // The order below is independent of the production sampler and sorter.
+        let ordered = (2_usize..6)
+            .flat_map(|index| {
+                [
+                    (index, 42, Position::Button, 0),
+                    (index, 99, Position::BigBlind, 1),
+                ]
+            })
+            .collect::<Vec<_>>();
+        for history in [0, 2] {
+            let mut actual = initial.clone();
+            let mut expected = initial.clone();
+            let mut nll = 0.0;
+            for chunk in ordered.chunks(3) {
+                let mut batch = GeneratorGradientBatch::new(&expected.generator);
+                for &(index, id, position, row) in chunk {
+                    let support_start = if index < 5 { 0 } else { 3 };
+                    let support = (support_start..support_start + 2)
+                        .map(|i| {
+                            (
+                                data.hands[i].hand_index,
+                                data.hands[i].materialize(position),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    // Deliberately recompute per decision instead of caching.
+                    let baseline = expected
+                        .personalize(id, &support, history, &mut provider)
+                        .unwrap();
+                    let hand = data.hands[index].materialize(position);
+                    let observation = decode_decision(&hand, row).unwrap();
+                    let legal = lookup(&mut provider, id, &hand, row).unwrap();
+                    nll += batch
+                        .accumulate_encoded(
+                            &expected.generator,
+                            baseline.profile(),
+                            &observation,
+                            &legal,
+                        )
+                        .unwrap()
+                        .total;
+                }
+                expected
+                    .generator_adam
+                    .apply_batch(&mut expected.generator, batch)
+                    .unwrap();
+            }
+            let report = actual
+                .train_personalization_epoch(
+                    &data,
+                    &subjects,
+                    &partitions,
+                    episode,
+                    history,
+                    &mut provider,
+                )
+                .unwrap();
+            assert_eq!(report.decisions, 8);
+            assert_eq!(report.optimizer_steps, 3); // 3 + 3 + 2
+            assert_eq!(report.mean_nll, nll / 8.0);
+            assert_eq!(
+                actual.generator.parameters(),
+                expected.generator.parameters()
+            );
+            assert_eq!(
+                actual.generator_adam.checkpoint_value(),
+                expected.generator_adam.checkpoint_value()
+            );
+            assert_eq!(actual.blueprint, initial.blueprint);
+            assert_eq!(actual.analyzer.parameters(), initial.analyzer.parameters());
+            assert_eq!(actual.completed_epochs(), (1, 1, 0));
+        }
     }
 
     #[test]
