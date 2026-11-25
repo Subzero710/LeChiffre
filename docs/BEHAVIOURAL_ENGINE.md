@@ -14,9 +14,11 @@ Aucune carte privée, carte publique, nom de joueur ou identifiant n'entre dans 
 
 Le seul trainer est `HierarchicalTrainer` dans `src/datasets/behaviour_parquet_loader/hierarchical_training.rs`.
 
-1. **Blueprint** : `train_blueprint_epoch()` met à jour Z₀ et G sur le passé de la population.
-2. **Personnalisation** : `train_personalization_epoch()` construit Z₁ avec `history_hands` mains strictement antérieures à la frontière query, puis entraîne G sur les décisions Query internes à Train. Les longueurs sont explicitement variées d'une époque à l'autre : zéro est autorisé et signifie Z₁=Z₀.
-3. **Momentané** : `train_momentary_epoch()` entraîne A et G à partir du prior, du posterior et d'une KL conditionnelle, toujours à paramètres fixes pendant la construction d'un batch. Le prior ne lit pas l'action actuelle.
+1. **Blueprint** : `train_blueprint_epoch()` met à jour Z₀ et G sur toutes les décisions Train, y compris celles des sujets non sélectionnés pour Personalization. Les mini-batches déterministes suivent l'ordre d'ingestion des mains, puis l'ordre des sujets dans la main. `blueprint_batch_decisions` est obligatoire ; le dernier mini-batch incomplet est utilisé. Le nombre de décisions doit égaler la couverture Train et `optimizer_steps` indique le nombre réel de mises à jour.
+2. **Personnalisation** : `train_personalization_epoch()` construit Z₁ avec `history_hands` mains strictement antérieures à la frontière Query, puis entraîne G sur les décisions Query internes à Train avec les objectifs Z₀ et Z₁. Les longueurs sont explicitement variées d'une époque à l'autre : zéro est autorisé et signifie Z₁=Z₀. Le vecteur Z₀ reste figé.
+3. **Momentané** : `train_momentary_epoch()` entraîne A et G à partir du prior, du posterior et d'une KL conditionnelle, toujours à paramètres fixes pendant la construction d'un batch. Le prior ne lit pas l'action actuelle. Les objectifs de G incluent aussi les références Z₀ et Z₁. Z₁ reste adapté directement via G sur Support, sans dépendance aux Z₂ inférés.
+
+Les clés obligatoires `generator_z0_weight`, `generator_z1_weight`, `generator_z2_weight` pondèrent la moyenne des gradients de G, à poids strictement positifs. Personalization utilise les deux premières ; Momentary utilise les trois, avec la moitié du poids Z₂ pour chacun du prior et du posterior. A conserve son objectif propre (moyenne prior/posterior et KL conditionnelle). Ces objectifs auxiliaires ne garantissent pas une absence de régression : il faut la mesurer. `mean_nll` reste la NLL de la phase (Z₀, Z₁, ou moyenne des tirages prior/posterior), et non la moyenne pondérée de tous les objectifs de G.
 
 La séparation globale est **Train / Validation / Test** sur des mains entières, par manifeste validé. Support et Query sont des rôles locaux **strictement à l'intérieur de Train** : le sampler de `training_data.rs` crée des Query successives non dupliquées pour chaque joueur, en prenant pour chaque Query un Support constitué des `support_hands` mains Train immédiatement précédentes. Le dernier bloc Query peut contenir moins de `query_hands` mains. Les mains qui n'ont pas de décision cible peuvent servir de Support. Une main rejetée à l'import ou structurellement invalide ne fournit aucun événement. Toute décision exploitée requiert un `LegalActionSpace` issu du replay exact `rs-poker`, jamais inféré à partir de l'action observée.
 
@@ -75,44 +77,58 @@ Advance-Baseline fonctionnent sans CSV/JSON ni session-id.** La lecture vérifie
 la version, les identités, le nombre et l'ordre de toutes les décisions, les
 limites exactes, l'empreinte du dataset et celle de la légalité. Si la légalité
 manque ou ne correspond pas, aucun entraînement ni évaluation ne démarre.
-Les checkpoints globaux sont strictement versionnés v4, avec empreinte séparée
+Les checkpoints globaux sont strictement versionnés v5, avec empreinte séparée
 de la légalité pour refuser une reprise sur d'autres bornes de jeu.
 
-Le blueprint Z₀/G apprend uniquement sur Train. Z₁ est adapté sur chaque Support de Train et G/A sont entraînés sur toutes les Query distinctes de Train. En Validation et Test, tous les poids sont figés et Z₁ n'utilise que les dernières `support_hands` mains Train de chaque joueur, un budget explicite lié au checkpoint. **Test ne consomme jamais Validation comme historique.** La métrique Z₂ posterior demeure une reconstruction après observation.
+Le blueprint Z₀/G apprend uniquement sur Train. Z₁ est adapté sur chaque Support de Train et G/A sont entraînés sur toutes les Query distinctes de Train. En Validation et Test, tous les poids sont figés et Z₁ n'utilise que les dernières `support_hands` mains Train exploitables de chaque joueur (au moins une décision du sujet), un budget explicite lié au checkpoint. Un historique insuffisant est une erreur. **Test ne consomme jamais Validation comme historique.** La métrique Z₂ posterior demeure une reconstruction après observation.
 
 ### Configuration explicite
 
 `configs/hierarchical.example.json` contient **toutes les clés obligatoires**. Les anciennes clés `first_query_hand_index`, `first_evaluation_hand_index` et `evaluation_hands` sont refusées ; `support_hands` et `query_hands` décrivent désormais un épisode interne à Train. Il s'agit d'un exemple de syntaxe, non d'hyperparamètres optimisés pour des données réelles : les nombres de mains par épisode et les pseudonymes doivent être remplacés par les valeurs de ton dataset. Toute clé inconnue, clé manquante ou champ de longueur incorrecte entraîne une erreur.
 
 ```bash
-cargo run --release -- --train-behavioural configs/hierarchical.example.json data/parquet hand-split-v2.json model-v4.json
+cargo run --release -- --train-behavioural configs/hierarchical.example.json data/parquet hand-split-v2.json model-v5.json
 ```
 
-Le fichier de checkpoint n'est écrit qu'après l'exécution des phases et la validation sur la partition Validation. L'ordre d'ingestion ne constitue pas une preuve de chronologie temporelle. L'application refuse de remplacer un chemin existant.
+Chaque époque Blueprint et Personalization imprime une validation de Z₀ sur la cohorte de sujets sélectionnés ; chaque époque Personalization imprime aussi une validation de Z₁ avec `support_hands` mains exploitables. Les scores ne consultent jamais Test. Une campagne peut s'arrêter à Blueprint (`personalization_history_hands: []`, `momentary_epochs: 0`) ou à Personalization (`momentary_epochs: 0`). Le checkpoint est alors enregistré et peut être repris avec une configuration de reprise explicite ; aucun retour à une phase antérieure n'est accepté.
+
+```bash
+cargo run --release -- --evaluate-blueprint blueprint-v5.json data/parquet hand-split-v2.json blueprint-validation.json
+```
+
+L'ordre d'ingestion ne constitue pas une preuve de chronologie temporelle. L'application refuse de remplacer un chemin existant.
 
 ### Validation, Test et score probabiliste Z₂
 
 ```bash
 # Rapport JSON créé sans remplacement du fichier existant :
-cargo run --release -- --evaluate-behavioural model-v4.json data/parquet hand-split-v2.json validation validation-report-v3.json
+cargo run --release -- --evaluate-behavioural model-v5.json data/parquet hand-split-v2.json validation validation-report-v4.json
 
 # Test final, une seule fois le checkpoint sélectionné :
-cargo run --release -- --evaluate-behavioural selected-v4.json data/parquet hand-split-v2.json test test-report-v3.json
+cargo run --release -- --evaluate-behavioural selected-v5.json data/parquet hand-split-v2.json test test-report-v3.json
 
 # Sélection du meilleur checkpoint selon la NLL *marginale* du prior Z₂ :
-cargo run --release -- --select-best-behavioural data/parquet hand-split-v2.json selected-v4.json model-a.json,model-b.json
+cargo run --release -- --select-best-behavioural data/parquet hand-split-v2.json selected-v5.json model-a.json,model-b.json
 ```
 
-L'évaluation calcule `z0_predictive_nll`, `z1_predictive_nll` et `z2_prior_marginal_nll` sur les mêmes décisions. Pour ce dernier score, 64 tirages indépendants de la loi prior de Z₂ passent par G ; l'intégration Monte Carlo est réalisée par log-mean-exp stable. Les tirages viennent d'un flux déterministe propre à l'évaluation et ne modifient jamais la reprise d'entraînement. Le score `z2_posterior_reconstruction_nll` reste **une reconstruction après observation**, jamais une prédiction prospective ni un critère de sélection. Les métriques action, sizing conditionnel aux mises/relances et timing sont séparées avec leurs dénominateurs exacts dans le JSON `lechiffre.behavioural.validation.v3`. Le timing utilise la densité normale en `log1p(ms)` (pas une masse discrète en millisecondes arrondies). La décomposition marginale utilise la règle de chaîne : NLL(action), NLL(sizing | action) et NLL(timing | action, sizing). La moyenne jointe égale la moyenne action + la fréquence de mises/relances × la moyenne sizing conditionnelle + la moyenne timing.
+L'évaluation calcule `z0_predictive_nll`, `z1_predictive_nll` et `z2_prior_marginal_nll` sur les mêmes décisions. Pour ce dernier score, 64 tirages indépendants de la loi prior de Z₂ passent par G ; l'intégration Monte Carlo est réalisée par log-mean-exp stable. Les tirages viennent d'un flux déterministe propre à l'évaluation et ne modifient jamais la reprise d'entraînement. Le score `z2_posterior_reconstruction_nll` reste **une reconstruction après observation**, jamais une prédiction prospective ni un critère de sélection. Les métriques action, sizing conditionnel aux mises/relances et timing sont séparées avec leurs dénominateurs exacts dans le JSON `lechiffre.behavioural.validation.v4`. Le timing utilise la densité normale en `log1p(ms)` (pas une masse discrète en millisecondes arrondies). La décomposition marginale utilise la règle de chaîne : NLL(action), NLL(sizing | action) et NLL(timing | action, sizing). La moyenne jointe égale la moyenne action + la fréquence de mises/relances × la moyenne sizing conditionnelle + la moyenne timing.
+
+Le benchmark d'historique compare exactement les mêmes décisions Validation pour tous les budgets explicites (zéro, puis valeurs strictement croissantes). Chaque Z₁ est construit depuis Z₀ avec les dernières mains exploitables Train, puis figé. Aucun sujet n'est écarté pour satisfaire un budget trop grand. Les trois accuracies d'action utilisent l'argmax, pour Z₂ après moyenne des cinq probabilités d'action sur les 64 tirages du prior ; les mêmes tirages sont réutilisés entre budgets. NLL et accuracy mesurent les prédictions et non une vérité terrain de l'espace latent. Ce benchmark mesure l'effet de la quantité d'historique, pas un replay en ligne ni une généralisation à des joueurs inconnus.
+
+```bash
+cargo run --release -- --benchmark-behavioural model-v5.json data/parquet hand-split-v2.json 0,1,10,50,100 history-benchmark.json
+```
+
+Le format `lechiffre.behavioural.history-benchmark.v1` contient les rapports, identifiants et empreintes de la campagne. La sélection existante par NLL Z₂ seule ne qualifie pas le modèle aux trois niveaux : vérifier séparément la préservation des références avant Test.
 
 La commande `--evaluate-unseen-behavioural` a été supprimée : elle ne garantissait pas la séparation des joueurs reliés par des mains communes. Le protocole courant mesure des nouvelles mains de joueurs présents dans Train ; un benchmark **réellement** indépendant par joueur exige une définition distincte de partitions par groupes disjoints. Aucun résultat de ce type n'est revendiqué par le test actuel.
 
 ### Sauvegarde et reprise
 
-Le format unique est `lechiffre.hierarchical.checkpoint.v4`. Les anciens checkpoints v1/v2/v3 sont refusés sans migration implicite, car la légalité du dataset est maintenant liée au checkpoint. Les modèles doivent être réentraînés. Il sauvegarde Z₀, A, G, les états Adam complets, les paramètres d'adaptation, les trois compteurs d'époques, l'état du flux pseudo-aléatoire, l'épisode Support/Query, la liste des sujets, l'empreinte exacte du dataset, celle de la légalité scellée et celle du manifeste validé. Le modèle est relié à un identifiant déterministe (`model_id`) fondé sur ses paramètres ; l'empreinte n'est pas une signature cryptographique.
+Le format unique est `lechiffre.hierarchical.checkpoint.v5`. Les anciens checkpoints v1/v2/v3/v4 sont refusés sans migration implicite. V5 lie au checkpoint la taille de mini-batch Blueprint et les trois poids d'objectif de G. Les modèles doivent être réentraînés. Il sauvegarde Z₀, A, G, les états Adam complets, les paramètres d'adaptation, les trois compteurs d'époques, l'état du flux pseudo-aléatoire, l'épisode Support/Query, la liste des sujets, l'empreinte exacte du dataset, celle de la légalité scellée et celle du manifeste validé. Le modèle est relié à un identifiant déterministe (`model_id`) fondé sur ses paramètres ; l'empreinte n'est pas une signature cryptographique.
 
 ```bash
-cargo run --release -- --resume-behavioural model-v4.json data/parquet hand-split-v2.json resumed-v4.json configs/hierarchical-resume.example.json
+cargo run --release -- --resume-behavioural model-v5.json data/parquet hand-split-v2.json resumed-v5.json configs/hierarchical-resume.example.json
 ```
 
 La configuration de reprise est stricte. Les phases ne peuvent pas être rejouées dans le mauvais ordre. Les changements de dataset, de sujets, d'épisode Support/Query ou de manifeste sont rejetés. Le checkpoint `lechiffre.ag.checkpoint` est **incompatible et explicitement refusé**.
@@ -123,10 +139,10 @@ Chaque `PlayerBaselineState` possède le vecteur, l'incertitude, la précision d
 
 ```bash
 # Première construction (depuis Z₀, avant la main d'index 800)
-cargo run --release -- --create-player-baseline model-v4.json data/parquet 42 800 player42-v1.json
+cargo run --release -- --create-player-baseline model-v5.json data/parquet 42 800 player42-v1.json
 
 # Mise à jour uniquement sur les mains nouvelles d'index < 1000
-cargo run --release -- --advance-player-baseline model-v4.json data/parquet 42 1000 player42-v1.json player42-v2.json
+cargo run --release -- --advance-player-baseline model-v5.json data/parquet 42 1000 player42-v1.json player42-v2.json
 ```
 
 Les profils sont liés au **model_id exact** et au `subject_id` pseudonyme. Toute discordance est bloquante. Le nouvel état est écrit atomiquement dans un fichier inédit : ni l'entrée, ni le modèle, ni les poids A/G ne sont modifiés. Une erreur de légalité ou de décodage annule l'intégralité de la mise à jour. Le dernier index déjà couvert interdit de rejouer les mêmes mains. Un autre modèle global nécessite une personnalisation distincte ; les coordonnées Z₁ ne sont pas interchangeables entre versions.

@@ -91,7 +91,7 @@ sudo docker compose run --rm -T \
   --user "$(id -u):$(id -g)" --volume "$PWD:/host" \
   behavioural --train-behavioural \
   /host/path/to/config.json /host/path/to/existing-parquet \
-  /host/path/to/hand-split-v2.json /host/path/to/model-v4.json
+  /host/path/to/hand-split-v2.json /host/path/to/model-v5.json
 ```
 
 Missing, truncated or incompatible replay evidence is a fatal error. No action

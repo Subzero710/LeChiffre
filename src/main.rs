@@ -255,6 +255,7 @@ fn split_behaviour_dataset_hands(args: &[String]) -> Result<(), String> {
 /// Strict hierarchical run specification. No compatibility with the old A/G config.
 struct BehaviourRunConfig {
     episode: lechiffre::datasets::behaviour_parquet_loader::TrainingEpisodeConfig,
+    optimization: lechiffre::datasets::behaviour_parquet_loader::HierarchicalOptimizationConfig,
     latent_dimension: usize,
     generator_hidden: usize,
     analyzer_hidden: usize,
@@ -339,7 +340,9 @@ fn config_f32_vec(v: &serde_json::Value, key: &str) -> Result<Vec<f32>, String> 
         .collect()
 }
 fn run_configuration(path: &str) -> Result<BehaviourRunConfig, String> {
-    use lechiffre::datasets::behaviour_parquet_loader::TrainingEpisodeConfig;
+    use lechiffre::datasets::behaviour_parquet_loader::{
+        HierarchicalOptimizationConfig, TrainingEpisodeConfig,
+    };
     let v = configuration_object(path)?;
     let keys = [
         "latent_dimension",
@@ -357,6 +360,10 @@ fn run_configuration(path: &str) -> Result<BehaviourRunConfig, String> {
         "support_hands",
         "query_hands",
         "blueprint_epochs",
+        "blueprint_batch_decisions",
+        "generator_z0_weight",
+        "generator_z1_weight",
+        "generator_z2_weight",
         "personalization_history_hands",
         "momentary_history_hands",
         "momentary_epochs",
@@ -368,6 +375,13 @@ fn run_configuration(path: &str) -> Result<BehaviourRunConfig, String> {
         config_usize(&v, "query_hands")?,
     )
     .map_err(|e| e.to_string())?;
+    let optimization = HierarchicalOptimizationConfig::new(
+        config_usize(&v, "blueprint_batch_decisions")?,
+        config_float(&v, "generator_z0_weight")?,
+        config_float(&v, "generator_z1_weight")?,
+        config_float(&v, "generator_z2_weight")?,
+    )
+    .map_err(|e| e.to_string())?;
     let history = config_sizes(&v, "personalization_history_hands")?;
     let momentary_history = config_usize(&v, "momentary_history_hands")?;
     let dim = config_usize(&v, "latent_dimension")?;
@@ -375,8 +389,7 @@ fn run_configuration(path: &str) -> Result<BehaviourRunConfig, String> {
     let std = config_f32_vec(&v, "z0_prior_std")?;
     let subjects = config_unsigned_list(&v, "subject_ids")?;
     if config_usize(&v, "blueprint_epochs")? == 0
-        || history.is_empty()
-        || config_usize(&v, "momentary_epochs")? == 0
+        || (history.is_empty() && config_usize(&v, "momentary_epochs")? > 0)
         || dim == 0
         || initial.len() != dim
         || std.len() != dim
@@ -398,10 +411,11 @@ fn run_configuration(path: &str) -> Result<BehaviourRunConfig, String> {
             Err(_) => true,
         })
     {
-        return Err("invalid hierarchical configuration: all phases, model dimensions, and rates are strictly required".into());
+        return Err("invalid hierarchical configuration: explicit valid phases, model dimensions, and rates required".into());
     }
     Ok(BehaviourRunConfig {
         episode,
+        optimization,
         latent_dimension: dim,
         generator_hidden: config_usize(&v, "generator_hidden")?,
         analyzer_hidden: config_usize(&v, "analyzer_hidden")?,
@@ -513,8 +527,8 @@ fn print_hierarchical_epoch(
     r: &lechiffre::datasets::behaviour_parquet_loader::HierarchicalEpochReport,
 ) {
     println!(
-        "phase={:?} decisions={} mean_nll={:.8} conditional_KL={:?}",
-        r.phase, r.decisions, r.mean_nll, r.mean_conditional_kl
+        "phase={:?} decisions={} optimizer_steps={} mean_nll={:.8} conditional_KL={:?}",
+        r.phase, r.decisions, r.optimizer_steps, r.mean_nll, r.mean_conditional_kl
     );
 }
 fn validation_report_value(
@@ -527,7 +541,7 @@ fn validation_report_value(
                           "timing_log1p_ms":c.timing_log1p_ms})
         };
     serde_json::json!({
-        "format":"lechiffre.behavioural.validation.v3",
+        "format":"lechiffre.behavioural.validation.v4",
         "partition":match partition {
             lechiffre::datasets::behaviour_parquet_loader::EvaluationPartition::Validation => "validation",
             lechiffre::datasets::behaviour_parquet_loader::EvaluationPartition::Test => "test",
@@ -535,6 +549,10 @@ fn validation_report_value(
         "decisions":r.decisions,
         "wager_decisions":r.wager_decisions,
         "z2_prior_samples":r.z2_prior_samples,
+        "history_hands":r.history_hands,
+        "z0_action_accuracy":r.z0_action_accuracy,
+        "z1_action_accuracy":r.z1_action_accuracy,
+        "z2_prior_action_accuracy":r.z2_prior_action_accuracy,
         "z0_predictive_nll":r.z0_predictive_nll,
         "z1_predictive_nll":r.z1_predictive_nll,
         "z2_prior_marginal_nll":r.z2_prior_marginal_nll,
@@ -545,6 +563,43 @@ fn validation_report_value(
         "mean_conditional_kl":r.mean_conditional_kl,
         "timing_measure":"normal_density_in_log1p_milliseconds",
         "sampling":"deterministic_common_standard_normal_stream",
+        "ordering":"ingestion_not_verified_chronological",
+    })
+}
+
+fn blueprint_report_value(
+    r: &lechiffre::datasets::behaviour_parquet_loader::ReferenceValidationReport,
+) -> serde_json::Value {
+    serde_json::json!({
+        "format":"lechiffre.behavioural.blueprint-validation.v1",
+        "partition":"validation",
+        "ordering":"ingestion_not_verified_chronological",
+        "decisions":r.decisions,
+        "wager_decisions":r.wager_decisions,
+        "z0_predictive_nll":r.predictive_nll,
+        "z0_action_accuracy":r.action_accuracy,
+        "z0_components":{"action":r.components.action,"sizing_given_wager":r.components.sizing,
+                         "timing_log1p_ms":r.components.timing_log1p_ms},
+        "timing_measure":"normal_density_in_log1p_milliseconds",
+    })
+}
+
+fn personalization_report_value(
+    r: &lechiffre::datasets::behaviour_parquet_loader::ReferenceValidationReport,
+    history_hands: usize,
+) -> serde_json::Value {
+    serde_json::json!({
+        "format":"lechiffre.behavioural.personalization-validation.v1",
+        "partition":"validation",
+        "history_hands":history_hands,
+        "decisions":r.decisions,
+        "wager_decisions":r.wager_decisions,
+        "z1_predictive_nll":r.predictive_nll,
+        "z1_action_accuracy":r.action_accuracy,
+        "z1_components":{"action":r.components.action,"sizing_given_wager":r.components.sizing,
+                         "timing_log1p_ms":r.components.timing_log1p_ms},
+        "timing_measure":"normal_density_in_log1p_milliseconds",
+        "ordering":"ingestion_not_verified_chronological",
     })
 }
 
@@ -587,6 +642,18 @@ fn execute_phases(
     momentary_history: usize,
     momentary_epochs: usize,
 ) -> Result<(), String> {
+    let (b, p, m) = trainer.completed_epochs();
+    if (blueprint_epochs > 0 && (p > 0 || m > 0))
+        || (!personalization_histories.is_empty() && m > 0)
+        || (b == 0 && blueprint_epochs == 0)
+        || (momentary_epochs > 0 && p == 0 && personalization_histories.is_empty())
+        || personalization_histories
+            .iter()
+            .any(|&n| n > episode.support_hands)
+        || momentary_history > episode.support_hands
+    {
+        return Err("invalid training phase transition or history budget".into());
+    }
     for _ in 0..blueprint_epochs {
         let report = trainer
             .train_blueprint_epoch(
@@ -598,6 +665,10 @@ fn execute_phases(
             )
             .map_err(|e| e.to_string())?;
         print_hierarchical_epoch(&report);
+        let validation = trainer
+            .evaluate_blueprint(dataset, partitions, &mut replay_provider(dataset))
+            .map_err(|e| e.to_string())?;
+        println!("{}", blueprint_report_value(&validation));
     }
     for &history in personalization_histories {
         let report = trainer
@@ -611,6 +682,22 @@ fn execute_phases(
             )
             .map_err(|e| e.to_string())?;
         print_hierarchical_epoch(&report);
+        let validation = trainer
+            .evaluate_blueprint(dataset, partitions, &mut replay_provider(dataset))
+            .map_err(|e| e.to_string())?;
+        println!("{}", blueprint_report_value(&validation));
+        let validation = trainer
+            .evaluate_personalization(
+                dataset,
+                partitions,
+                episode.support_hands,
+                &mut replay_provider(dataset),
+            )
+            .map_err(|e| e.to_string())?;
+        println!(
+            "{}",
+            personalization_report_value(&validation, episode.support_hands)
+        );
     }
     for _ in 0..momentary_epochs {
         let report = trainer
@@ -661,6 +748,9 @@ fn train_hierarchical(args: &[String]) -> Result<(), String> {
     if args.len() != 6 {
         return Err("usage: --train-behavioural <hierarchical-config.json> <parquet-dir> <manifest.json> <checkpoint-out.json>".into());
     }
+    if std::path::Path::new(&args[5]).exists() {
+        return Err(format!("checkpoint already exists: {}", args[5]));
+    }
     let run = run_configuration(&args[2])?;
     let dataset = BehaviourParquetDataset::open(&args[3]).map_err(|e| e.to_string())?;
     let partitions = load_verified_partitions(&dataset, &args[4])?;
@@ -689,6 +779,7 @@ fn train_hierarchical(args: &[String]) -> Result<(), String> {
         baseline,
         run.blueprint_lr,
         run.beta_kl,
+        run.optimization,
         noise_seed,
     )
     .map_err(|e| e.to_string())?;
@@ -703,19 +794,21 @@ fn train_hierarchical(args: &[String]) -> Result<(), String> {
         run.momentary_history_hands,
         run.momentary_epochs,
     )?;
-    let report = trainer
-        .evaluate(
-            &dataset,
-            &run.subjects,
-            &partitions,
+    if trainer.completed_epochs().2 > 0 {
+        let report = trainer
+            .evaluate(
+                &dataset,
+                &run.subjects,
+                &partitions,
+                lechiffre::datasets::behaviour_parquet_loader::EvaluationPartition::Validation,
+                &mut replay_provider(&dataset),
+            )
+            .map_err(|e| e.to_string())?;
+        print_hierarchical_validation(
             lechiffre::datasets::behaviour_parquet_loader::EvaluationPartition::Validation,
-            &mut replay_provider(&dataset),
-        )
-        .map_err(|e| e.to_string())?;
-    print_hierarchical_validation(
-        lechiffre::datasets::behaviour_parquet_loader::EvaluationPartition::Validation,
-        &report,
-    );
+            &report,
+        );
+    }
     trainer
         .save_checkpoint(&args[5])
         .map_err(|e| e.to_string())?;
@@ -733,6 +826,9 @@ fn resume_hierarchical(args: &[String]) -> Result<(), String> {
     };
     if args.len() != 7 {
         return Err("usage: --resume-behavioural <checkpoint-in.json> <parquet-dir> <manifest.json> <checkpoint-out.json> <resume-config.json>".into());
+    }
+    if std::path::Path::new(&args[5]).exists() {
+        return Err(format!("checkpoint already exists: {}", args[5]));
     }
     let mut trainer = HierarchicalTrainer::load_checkpoint(&args[2]).map_err(|e| e.to_string())?;
     let dataset = BehaviourParquetDataset::open(&args[3]).map_err(|e| e.to_string())?;
@@ -807,6 +903,82 @@ fn evaluate_hierarchical(args: &[String]) -> Result<(), String> {
         serde_json::json!(dataset.legality_fingerprint().map_err(|e| e.to_string())?);
     commit_new_json(std::path::Path::new(&args[6]), &result)?;
     println!("{result}");
+    Ok(())
+}
+
+fn evaluate_blueprint_cli(args: &[String]) -> Result<(), String> {
+    use lechiffre::datasets::behaviour_parquet_loader::HierarchicalTrainer;
+    if args.len() != 6 {
+        return Err("usage: --evaluate-blueprint <checkpoint.json> <parquet-dir> <manifest.json> <new-report.json>".into());
+    }
+    let trainer = HierarchicalTrainer::load_checkpoint(&args[2]).map_err(|e| e.to_string())?;
+    let dataset = BehaviourParquetDataset::open(&args[3]).map_err(|e| e.to_string())?;
+    let partitions = load_verified_partitions(&dataset, &args[4])?;
+    let report = trainer
+        .evaluate_blueprint(&dataset, &partitions, &mut replay_provider(&dataset))
+        .map_err(|e| e.to_string())?;
+    let mut result = blueprint_report_value(&report);
+    result["model_id"] = serde_json::json!(trainer.model_id().map_err(|e| e.to_string())?);
+    result["dataset_fingerprint"] = serde_json::json!(dataset.dataset_fingerprint());
+    result["manifest_fingerprint"] = serde_json::json!(partitions.manifest_fingerprint());
+    result["legality_fingerprint"] =
+        serde_json::json!(dataset.legality_fingerprint().map_err(|e| e.to_string())?);
+    commit_new_json(std::path::Path::new(&args[5]), &result)?;
+    println!("{result}");
+    Ok(())
+}
+
+fn benchmark_hierarchical(args: &[String]) -> Result<(), String> {
+    use lechiffre::datasets::behaviour_parquet_loader::{EvaluationPartition, HierarchicalTrainer};
+    if args.len() != 7 {
+        return Err("usage: --benchmark-behavioural <checkpoint.json> <parquet-dir> <manifest.json> <history1,history2,...> <new-report.json>".into());
+    }
+    if std::path::Path::new(&args[6]).exists() {
+        return Err(format!("benchmark report already exists: {}", args[6]));
+    }
+    let histories = args[5]
+        .split(',')
+        .map(|n| n.parse::<usize>())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "history budgets must be unsigned integers")?;
+    if histories.len() < 2
+        || histories.first() != Some(&0)
+        || histories.windows(2).any(|w| w[0] >= w[1])
+    {
+        return Err("history budgets must start at zero and increase strictly".into());
+    }
+    let trainer = HierarchicalTrainer::load_checkpoint(&args[2]).map_err(|e| e.to_string())?;
+    let dataset = BehaviourParquetDataset::open(&args[3]).map_err(|e| e.to_string())?;
+    let partitions = load_verified_partitions(&dataset, &args[4])?;
+    let mut rows = Vec::new();
+    for history in histories {
+        let report = trainer
+            .evaluate_with_history(
+                &dataset,
+                trainer.training_subjects(),
+                &partitions,
+                EvaluationPartition::Validation,
+                history,
+                &mut replay_provider(&dataset),
+            )
+            .map_err(|e| format!("history={history}: {e}"))?;
+        let row = validation_report_value(EvaluationPartition::Validation, &report);
+        println!("{row}");
+        rows.push(row);
+    }
+    let result = serde_json::json!({
+        "format":"lechiffre.behavioural.history-benchmark.v1",
+        "partition":"validation",
+        "model_id":trainer.model_id().map_err(|e| e.to_string())?,
+        "dataset_fingerprint":dataset.dataset_fingerprint(),
+        "manifest_fingerprint":partitions.manifest_fingerprint(),
+        "legality_fingerprint":dataset.legality_fingerprint().map_err(|e| e.to_string())?,
+        "subject_ids":trainer.training_subjects(),
+        "ordering":"ingestion_not_verified_chronological",
+        "history":"latest_exploitable_train_hands_per_subject",
+        "reports":rows,
+    });
+    commit_new_json(std::path::Path::new(&args[6]), &result)?;
     Ok(())
 }
 
@@ -972,6 +1144,8 @@ async fn main() {
             "--train-behavioural" => Some(train_hierarchical(&args)),
             "--resume-behavioural" => Some(resume_hierarchical(&args)),
             "--evaluate-behavioural" => Some(evaluate_hierarchical(&args)),
+            "--evaluate-blueprint" => Some(evaluate_blueprint_cli(&args)),
+            "--benchmark-behavioural" => Some(benchmark_hierarchical(&args)),
             "--select-best-behavioural" => Some(select_best_hierarchical(&args)),
             "--create-player-baseline" => Some(player_baseline_cli(&args, false)),
             "--advance-player-baseline" => Some(player_baseline_cli(&args, true)),
@@ -1182,6 +1356,18 @@ mod hierarchical_cli_tests {
             serde_json::from_str(include_str!("../configs/hierarchical.example.json")).unwrap();
         std::fs::write(&p, serde_json::to_vec(&original).unwrap()).unwrap();
         assert!(run_configuration(p.to_str().unwrap()).is_ok());
+        let mut blueprint_only = original.clone();
+        blueprint_only["personalization_history_hands"] = serde_json::json!([]);
+        blueprint_only["momentary_epochs"] = serde_json::json!(0);
+        std::fs::write(&p, serde_json::to_vec(&blueprint_only).unwrap()).unwrap();
+        assert!(run_configuration(p.to_str().unwrap()).is_ok());
+        blueprint_only["momentary_epochs"] = serde_json::json!(1);
+        std::fs::write(&p, serde_json::to_vec(&blueprint_only).unwrap()).unwrap();
+        assert!(run_configuration(p.to_str().unwrap()).is_err());
+        let mut invalid_weight = original.clone();
+        invalid_weight["generator_z0_weight"] = serde_json::json!(0.0);
+        std::fs::write(&p, serde_json::to_vec(&invalid_weight).unwrap()).unwrap();
+        assert!(run_configuration(p.to_str().unwrap()).is_err());
         let mut missing = original.clone();
         missing.as_object_mut().unwrap().remove("z0_initial");
         std::fs::write(&p, serde_json::to_vec(&missing).unwrap()).unwrap();

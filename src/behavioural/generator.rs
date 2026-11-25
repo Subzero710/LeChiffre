@@ -863,6 +863,7 @@ pub struct GeneratorGradientBatch {
     parameter_snapshot: GeneratorParameters,
     gradients: Gradients,
     observations: usize,
+    total_weight: f64,
     loss_total: f64,
     loss_action: f64,
     loss_sizing: f64,
@@ -876,6 +877,7 @@ impl GeneratorGradientBatch {
             parameter_snapshot: model.parameters.clone(),
             gradients: Gradients::new(&model.parameters),
             observations: 0,
+            total_weight: 0.0,
             loss_total: 0.0,
             loss_action: 0.0,
             loss_sizing: 0.0,
@@ -899,9 +901,22 @@ impl GeneratorGradientBatch {
         observation: &GeneratorObservation,
         legal: &LegalActionSpace,
     ) -> Result<TrainingLoss, GeneratorError> {
+        self.accumulate_weighted_encoded(model, profile, observation, legal, 1.0)
+    }
+
+    /// Accumulate a positive, explicit objective weight. The returned loss and
+    /// latent gradient are unweighted; callers may use them for a separate A objective.
+    pub fn accumulate_weighted_encoded(
+        &mut self,
+        model: &NeuralBehaviourGenerator,
+        profile: &BehaviourProfile,
+        observation: &GeneratorObservation,
+        legal: &LegalActionSpace,
+        weight: f64,
+    ) -> Result<TrainingLoss, GeneratorError> {
         self.check_model(model)?;
         let (loss, gradients) = loss_gradients_encoded(model, profile, observation, *legal)?;
-        self.add_loss_gradients(loss, gradients)
+        self.add_loss_gradients(loss, gradients, weight)
     }
 
     pub fn accumulate(
@@ -914,7 +929,7 @@ impl GeneratorGradientBatch {
     ) -> Result<TrainingLoss, GeneratorError> {
         self.check_model(model)?;
         let (loss, gradients) = loss_gradients(model, profile, context, *legal, observed)?;
-        self.add_loss_gradients(loss, gradients)
+        self.add_loss_gradients(loss, gradients, 1.0)
     }
 
     fn check_model(&self, model: &NeuralBehaviourGenerator) -> Result<(), GeneratorError> {
@@ -930,35 +945,40 @@ impl GeneratorGradientBatch {
         &mut self,
         loss: TrainingLoss,
         gradients: Gradients,
+        weight: f64,
     ) -> Result<TrainingLoss, GeneratorError> {
+        let total_weight = self.total_weight + weight;
+        if !weight.is_finite() || weight <= 0.0 || !total_weight.is_finite() {
+            return Err(GeneratorError::InvalidBatchWeight);
+        }
         let observations = self
             .observations
             .checked_add(1)
             .ok_or(GeneratorError::BatchCountOverflow)?;
         let mut summed = self.gradients.clone();
-        fn sum_layer(target: &mut LayerGradients, source: &LayerGradients) {
+        fn sum_layer(target: &mut LayerGradients, source: &LayerGradients, weight: f64) {
             for (total, delta) in target.weights.iter_mut().zip(&source.weights) {
-                *total += delta;
+                *total += weight * delta;
             }
             for (total, delta) in target.bias.iter_mut().zip(&source.bias) {
-                *total += delta;
+                *total += weight * delta;
             }
         }
-        sum_layer(&mut summed.state, &gradients.state);
-        sum_layer(&mut summed.action, &gradients.action);
-        sum_layer(&mut summed.sizing, &gradients.sizing);
-        sum_layer(&mut summed.timing, &gradients.timing);
+        sum_layer(&mut summed.state, &gradients.state, weight);
+        sum_layer(&mut summed.action, &gradients.action, weight);
+        sum_layer(&mut summed.sizing, &gradients.sizing, weight);
+        sum_layer(&mut summed.timing, &gradients.timing, weight);
         let totals = [
-            self.loss_total + loss.total,
-            self.loss_action + loss.action,
-            self.loss_sizing + loss.sizing,
-            self.loss_timing + loss.timing,
+            self.loss_total + weight * loss.total,
+            self.loss_action + weight * loss.action,
+            self.loss_sizing + weight * loss.sizing,
+            self.loss_timing + weight * loss.timing,
         ];
         let next_latent = self
             .latent_gradient_sum
             .iter()
             .zip(&loss.latent_gradient)
-            .map(|(&current, &delta)| current + f64::from(delta))
+            .map(|(&current, &delta)| current + weight * f64::from(delta))
             .collect::<Vec<_>>();
         let finite_layer = |layer: &LayerGradients| {
             layer
@@ -982,6 +1002,7 @@ impl GeneratorGradientBatch {
         }
         self.gradients = summed;
         self.observations = observations;
+        self.total_weight = total_weight;
         self.loss_total = totals[0];
         self.loss_action = totals[1];
         self.loss_sizing = totals[2];
@@ -994,7 +1015,7 @@ impl GeneratorGradientBatch {
         if self.observations == 0 {
             return Err(GeneratorError::EmptyBatch);
         }
-        let n = self.observations as f64;
+        let n = self.total_weight;
         let latent_gradient = self
             .latent_gradient_sum
             .iter()
@@ -1017,7 +1038,7 @@ impl GeneratorGradientBatch {
             return Err(GeneratorError::EmptyBatch);
         }
         let mut result = self.gradients.clone();
-        let n = self.observations as f64;
+        let n = self.total_weight;
         for layer in [
             &mut result.state,
             &mut result.action,
@@ -1513,6 +1534,17 @@ impl NeuralBehaviourGenerator {
         observation: &GeneratorObservation,
         legal: &LegalActionSpace,
     ) -> Result<ScoringLoss, GeneratorError> {
+        self.score_observation_with_probabilities_encoded(profile, observation, legal)
+            .map(|(loss, _)| loss)
+    }
+
+    /// The same forward pass also exposes its pre-action distribution for accuracy.
+    pub fn score_observation_with_probabilities_encoded(
+        &self,
+        profile: &BehaviourProfile,
+        observation: &GeneratorObservation,
+        legal: &LegalActionSpace,
+    ) -> Result<(ScoringLoss, [f64; ACTION_COUNT]), GeneratorError> {
         let (stack, to_call) = observation.validated_facts(*legal)?;
         let encoded = encoded_context_features(
             observation.street,
@@ -1564,12 +1596,15 @@ impl NeuralBehaviourGenerator {
         if !total.is_finite() {
             return Err(GeneratorError::NonFiniteGradient);
         }
-        Ok(ScoringLoss {
-            total,
-            action: action_loss,
-            sizing: sizing_loss,
-            timing: timing_loss,
-        })
+        Ok((
+            ScoringLoss {
+                total,
+                action: action_loss,
+                sizing: sizing_loss,
+                timing: timing_loss,
+            },
+            pass.probabilities,
+        ))
     }
 
     /// Canonical encoded pre-action probabilities, without reading the target response.
@@ -1729,6 +1764,7 @@ pub enum GeneratorError {
     OptimizerModelMismatch,
     BatchModelChanged,
     BatchCountOverflow,
+    InvalidBatchWeight,
     EmptyBatch,
 }
 impl fmt::Display for GeneratorError {
@@ -1864,6 +1900,59 @@ mod tests {
         assert!((result.total - avg.total).abs() < 1e-12);
         assert_eq!(adam.steps(), 1);
         assert_ne!(*generator.parameters(), original);
+    }
+
+    #[test]
+    fn weighted_batch_matches_repeated_observations() {
+        let generator = model();
+        let mut weighted = GeneratorGradientBatch::new(&generator);
+        let mut repeated = GeneratorGradientBatch::new(&generator);
+        for (amount, weight) in [(5.0, 2), (7.0, 1)] {
+            let (loss, gradients) = loss_gradients(
+                &generator,
+                &profile(),
+                &ctx(),
+                legal(),
+                &observed_bet(amount),
+            )
+            .unwrap();
+            weighted
+                .add_loss_gradients(loss.clone(), gradients.clone(), f64::from(weight))
+                .unwrap();
+            for _ in 0..weight {
+                repeated
+                    .add_loss_gradients(loss.clone(), gradients.clone(), 1.0)
+                    .unwrap();
+            }
+        }
+        assert_eq!(weighted.len(), 2);
+        let a = weighted.mean_loss().unwrap();
+        let b = repeated.mean_loss().unwrap();
+        assert!((a.total - b.total).abs() < 1e-12);
+        let a = weighted.averaged_gradients().unwrap();
+        let b = repeated.averaged_gradients().unwrap();
+        for (a, b) in [
+            (&a.state, &b.state),
+            (&a.action, &b.action),
+            (&a.sizing, &b.sizing),
+            (&a.timing, &b.timing),
+        ] {
+            assert!(
+                a.weights
+                    .iter()
+                    .chain(&a.bias)
+                    .zip(b.weights.iter().chain(&b.bias))
+                    .all(|(x, y)| (x - y).abs() < 1e-12)
+            );
+        }
+        let (loss, gradients) =
+            loss_gradients(&generator, &profile(), &ctx(), legal(), &observed_bet(5.0)).unwrap();
+        let before = weighted.mean_loss().unwrap();
+        assert!(matches!(
+            weighted.add_loss_gradients(loss, gradients, 0.0),
+            Err(GeneratorError::InvalidBatchWeight)
+        ));
+        assert_eq!(weighted.mean_loss().unwrap(), before);
     }
 
     #[test]

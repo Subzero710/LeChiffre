@@ -51,8 +51,9 @@ pub use training_data::{ExactLegalityProvider, TrainingDataError, TrainingEpisod
 
 mod hierarchical_training;
 pub use hierarchical_training::{
-    HierarchicalEpochReport, HierarchicalNllComponents, HierarchicalPhase, HierarchicalTrainer,
-    HierarchicalTrainingError, HierarchicalValidationReport, Z2_PRIOR_MARGINAL_SAMPLES,
+    HierarchicalEpochReport, HierarchicalNllComponents, HierarchicalOptimizationConfig,
+    HierarchicalPhase, HierarchicalTrainer, HierarchicalTrainingError,
+    HierarchicalValidationReport, ReferenceValidationReport, Z2_PRIOR_MARGINAL_SAMPLES,
 };
 
 /// Fully validated in-memory view of a committed behavioural Parquet dataset.

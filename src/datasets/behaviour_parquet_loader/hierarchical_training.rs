@@ -1,9 +1,10 @@
-//! Hierarchical Z0/Z1/Z2 training: strictly chronological public observations.
+//! Hierarchical Z0/Z1/Z2 training: ordered public observations (ingestion order).
 //!
 //! Training is deliberately divided into explicit phases. No profile is used
 //! before its observations exist, and G/A gradients use one fixed model snapshot
 //! per batch. Versioned hierarchical checkpoints reject all obsolete A/G formats.
-use crate::behavioural::checkpoint::{exact_keys, float_array, number, unsigned};
+use crate::behavioural::checkpoint::{dimension, exact_keys, float_array, number, unsigned};
+use crate::behavioural::codebook::action_id;
 
 /// A fixed quadrature budget and independent evaluation stream are part of the
 /// v3 scoring contract. They never consume the training checkpoint RNG.
@@ -23,11 +24,11 @@ use super::training_data::{
 };
 use super::{BehaviourParquetDataset, DatasetPartitions, EvaluationPartition};
 use crate::behavioural::{
-    Adam, AnalyzerAdam, AnalyzerError, AnalyzerGradientBatch, BaselineAdaptationConfig,
-    BaselineAdaptationError, BehaviourBlueprint, BehaviourLatentModel, BehaviourProfileError,
-    GeneratorError, GeneratorGradientBatch, GeneratorObservation, LegalActionSpace,
-    NeuralBehaviourAnalyzer, NeuralBehaviourGenerator, NoiseStream, PlayerBaseline,
-    PlayerBaselineAdapter,
+    ACTION_COUNT, Adam, AnalyzerAdam, AnalyzerError, AnalyzerGradientBatch,
+    BaselineAdaptationConfig, BaselineAdaptationError, BehaviourBlueprint, BehaviourLatentModel,
+    BehaviourProfileError, GeneratorError, GeneratorGradientBatch, GeneratorObservation,
+    LegalActionSpace, NeuralBehaviourAnalyzer, NeuralBehaviourGenerator, NoiseStream,
+    PlayerBaseline, PlayerBaselineAdapter,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +42,10 @@ pub enum HierarchicalPhase {
 pub struct HierarchicalEpochReport {
     pub phase: HierarchicalPhase,
     pub decisions: usize,
+    /// G optimizer steps in this epoch (A steps coincide during Momentary).
+    pub optimizer_steps: usize,
+    /// Blueprint: Z0 NLL; Personalization: Z1 NLL; Momentary: mean prior/posterior
+    /// sampled NLL. Does not include the auxiliary G reference terms or KL.
     pub mean_nll: f64,
     /// The conditional KL is available only for Momentary training.
     pub mean_conditional_kl: Option<f64>,
@@ -63,6 +68,10 @@ pub struct HierarchicalValidationReport {
     pub decisions: usize,
     pub wager_decisions: usize,
     pub z2_prior_samples: usize,
+    pub history_hands: usize,
+    pub z0_action_accuracy: f64,
+    pub z1_action_accuracy: f64,
+    pub z2_prior_action_accuracy: f64,
     pub z0_predictive_nll: f64,
     pub z1_predictive_nll: f64,
     pub z2_prior_marginal_nll: f64,
@@ -71,6 +80,74 @@ pub struct HierarchicalValidationReport {
     pub z1_components: HierarchicalNllComponents,
     pub z2_prior_marginal_components: HierarchicalNllComponents,
     pub mean_conditional_kl: f64,
+}
+
+/// All objective weights are explicit and strictly positive. G uses a normalized
+/// weighted average; A retains its own prior/posterior + conditional KL objective.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HierarchicalOptimizationConfig {
+    blueprint_batch_decisions: usize,
+    z0_weight: f64,
+    z1_weight: f64,
+    z2_weight: f64,
+}
+
+impl HierarchicalOptimizationConfig {
+    pub fn new(
+        blueprint_batch_decisions: usize,
+        z0_weight: f64,
+        z1_weight: f64,
+        z2_weight: f64,
+    ) -> Result<Self, HierarchicalTrainingError> {
+        if blueprint_batch_decisions == 0
+            || [z0_weight, z1_weight, z2_weight]
+                .iter()
+                .any(|w| !w.is_finite() || *w <= 0.0)
+            || !(z0_weight + z1_weight + z2_weight).is_finite()
+            || z2_weight * 0.5 == 0.0
+        {
+            return Err(HierarchicalTrainingError::InvalidConfiguration);
+        }
+        Ok(Self {
+            blueprint_batch_decisions,
+            z0_weight,
+            z1_weight,
+            z2_weight,
+        })
+    }
+
+    fn checkpoint_value(self) -> Value {
+        json!({"blueprint_batch_decisions":self.blueprint_batch_decisions,
+               "z0_weight":self.z0_weight,"z1_weight":self.z1_weight,"z2_weight":self.z2_weight})
+    }
+
+    fn from_checkpoint(v: &Value) -> Result<Self, String> {
+        exact_keys(
+            v,
+            &[
+                "blueprint_batch_decisions",
+                "z0_weight",
+                "z1_weight",
+                "z2_weight",
+            ],
+        )?;
+        Self::new(
+            dimension(&v["blueprint_batch_decisions"])?,
+            number(&v["z0_weight"])?,
+            number(&v["z1_weight"])?,
+            number(&v["z2_weight"])?,
+        )
+        .map_err(|e| e.to_string())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReferenceValidationReport {
+    pub decisions: usize,
+    pub wager_decisions: usize,
+    pub predictive_nll: f64,
+    pub components: HierarchicalNllComponents,
+    pub action_accuracy: f64,
 }
 
 /// Contains one global blueprint, one shared A and G, and their optimizers.
@@ -85,6 +162,7 @@ pub struct HierarchicalTrainer {
     baseline_config: BaselineAdaptationConfig,
     blueprint_learning_rate: f64,
     beta_kl: f64,
+    optimization: HierarchicalOptimizationConfig,
     noise: NoiseStream,
     blueprint_epochs: u64,
     personalization_epochs: u64,
@@ -110,6 +188,7 @@ impl HierarchicalTrainer {
         baseline_config: BaselineAdaptationConfig,
         blueprint_learning_rate: f64,
         beta_kl: f64,
+        optimization: HierarchicalOptimizationConfig,
         noise_seed: u64,
     ) -> Result<Self, HierarchicalTrainingError> {
         if generator.latent_config() != analyzer.latent_config()
@@ -134,6 +213,7 @@ impl HierarchicalTrainer {
             baseline_config,
             blueprint_learning_rate,
             beta_kl,
+            optimization,
             noise,
             blueprint_epochs: 0,
             personalization_epochs: 0,
@@ -235,7 +315,7 @@ impl HierarchicalTrainer {
         dataset: &BehaviourParquetDataset,
         partitions: &DatasetPartitions,
     ) -> Result<(), HierarchicalTrainingError> {
-        if self.momentary_epochs == 0 {
+        if self.blueprint_epochs == 0 {
             return Err(HierarchicalTrainingError::NotTrained);
         }
         self.verify_dataset_legality(dataset)?;
@@ -252,7 +332,7 @@ impl HierarchicalTrainer {
     /// FNV-128 detects accidental model mismatches; it is not a cryptographic signature.
     pub fn model_id(&self) -> Result<String, HierarchicalTrainingError> {
         let data = serde_json::to_vec(&json!({
-            "format":"lechiffre.hierarchical.model.v4",
+            "format":"lechiffre.hierarchical.model.v5",
             "z0":self.blueprint.centre().as_slice(),
             "prior_std":self.blueprint.prior_std(),
             "generator":self.generator.checkpoint_value(),
@@ -265,7 +345,7 @@ impl HierarchicalTrainer {
         for byte in data {
             hash = (hash ^ u128::from(byte)).wrapping_mul(PRIME);
         }
-        Ok(format!("hierarchical-v4-{hash:032x}"))
+        Ok(format!("hierarchical-v5-{hash:032x}"))
     }
 
     /// Hierarchical-only checkpoint. Exact model, optimizer, RNG, phase, and dataset provenance.
@@ -274,7 +354,7 @@ impl HierarchicalTrainer {
             return Err(HierarchicalTrainingError::NotTrained);
         }
         let value = json!({
-            "format":"lechiffre.hierarchical.checkpoint.v4",
+            "format":"lechiffre.hierarchical.checkpoint.v5",
             "model_id":self.model_id()?,
             "blueprint":{"centre":self.blueprint.centre().as_slice(),
                          "prior_std":self.blueprint.prior_std()},
@@ -286,6 +366,7 @@ impl HierarchicalTrainer {
                                "max_step_prior_std":self.baseline_config.max_step_prior_std()},
             "blueprint_learning_rate":self.blueprint_learning_rate,
             "beta_kl":self.beta_kl,
+            "optimization":self.optimization.checkpoint_value(),
             "rng_state":self.noise.state,
             "epochs":{"blueprint":self.blueprint_epochs,"personalization":self.personalization_epochs,
                       "momentary":self.momentary_epochs},
@@ -338,6 +419,7 @@ impl HierarchicalTrainer {
                 "baseline_config",
                 "blueprint_learning_rate",
                 "beta_kl",
+                "optimization",
                 "rng_state",
                 "epochs",
                 "training_episode",
@@ -348,9 +430,9 @@ impl HierarchicalTrainer {
             ],
         )
         .map_err(bad)?;
-        if value["format"].as_str() != Some("lechiffre.hierarchical.checkpoint.v4") {
+        if value["format"].as_str() != Some("lechiffre.hierarchical.checkpoint.v5") {
             return Err(bad(
-                "obsolete or unknown checkpoint format: hierarchical v4 required".into(),
+                "obsolete or unknown checkpoint format: hierarchical v5 required".into(),
             ));
         }
         exact_keys(&value["blueprint"], &["centre", "prior_std"]).map_err(bad)?;
@@ -402,6 +484,7 @@ impl HierarchicalTrainer {
             baseline_config,
             number(&value["blueprint_learning_rate"]).map_err(bad)?,
             number(&value["beta_kl"]).map_err(bad)?,
+            HierarchicalOptimizationConfig::from_checkpoint(&value["optimization"]).map_err(bad)?,
             unsigned(&value["rng_state"]).map_err(bad)?,
         )?;
         let epochs = &value["epochs"];
@@ -472,54 +555,61 @@ impl HierarchicalTrainer {
         }
         let mut working = self.clone();
         working.bind_training_context(dataset, subjects, partitions, episode)?;
-        let selected = selected_subjects(dataset, subjects)?;
-        let mut batch = GeneratorGradientBatch::new(&working.generator);
-        for id in selected {
-            let memberships = dataset
-                .subjects
-                .get(&id)
-                .ok_or(HierarchicalTrainingError::UnknownSubject(id))?;
-            for membership in memberships {
-                let hand = &dataset.hands[membership.hand_slot];
-                if !partitions.contains_train(hand.hand_index) {
-                    continue;
-                }
-                let observed = hand.materialize(membership.subject_position);
-                for row in subject_decisions(&observed) {
-                    let observation = decode_decision(&observed, row)?;
-                    let legal = lookup(provider, id, &observed, row)?;
-                    batch.accumulate_encoded(
-                        &working.generator,
-                        working.blueprint.centre(),
-                        &observation,
-                        &legal,
-                    )?;
-                }
-            }
-        }
-        let mean = batch.mean_loss()?;
-        let decisions = batch.len();
-        let mut centre = Vec::with_capacity(working.blueprint.centre().dimension());
-        for (&value, &gradient) in working
-            .blueprint
-            .centre()
-            .as_slice()
+        let mut memberships = dataset
+            .subjects
             .iter()
-            .zip(&mean.latent_gradient)
-        {
-            let next = f64::from(value) - working.blueprint_learning_rate * f64::from(gradient);
-            if !next.is_finite() || next.abs() > f64::from(f32::MAX) {
-                return Err(HierarchicalTrainingError::NonFiniteUpdate);
+            .flat_map(|(&id, rows)| rows.iter().map(move |row| (id, row)))
+            .filter(|(_, row)| partitions.contains_train(dataset.hands[row.hand_slot].hand_index))
+            .collect::<Vec<_>>();
+        memberships
+            .sort_unstable_by_key(|(id, row)| (dataset.hands[row.hand_slot].hand_index, *id));
+        let mut batch = GeneratorGradientBatch::new(&working.generator);
+        let mut decisions = 0usize;
+        let mut optimizer_steps = 0usize;
+        let mut nll_sum = 0.0;
+        for (id, membership) in memberships {
+            let hand = &dataset.hands[membership.hand_slot];
+            let observed = hand.materialize(membership.subject_position);
+            for row in subject_decisions(&observed) {
+                let observation = decode_decision(&observed, row)?;
+                let legal = lookup(provider, id, &observed, row)?;
+                batch.accumulate_encoded(
+                    &working.generator,
+                    working.blueprint.centre(),
+                    &observation,
+                    &legal,
+                )?;
+                if batch.len() == working.optimization.blueprint_batch_decisions {
+                    decisions += batch.len();
+                    nll_sum += working.apply_blueprint_batch(batch)?;
+                    optimizer_steps += 1;
+                    batch = GeneratorGradientBatch::new(&working.generator);
+                }
             }
-            centre.push(next as f32);
         }
-        let next_centre = working.generator.latent_config().profile(centre)?;
-        let next_blueprint =
-            BehaviourBlueprint::new(next_centre, working.blueprint.prior_std().to_vec())?;
-        working
-            .generator_adam
-            .apply_batch(&mut working.generator, batch)?;
-        working.blueprint = next_blueprint;
+        if !batch.is_empty() {
+            decisions += batch.len();
+            nll_sum += working.apply_blueprint_batch(batch)?;
+            optimizer_steps += 1;
+        }
+        if decisions == 0 {
+            return Err(HierarchicalTrainingError::EmptyTraining);
+        }
+        if !nll_sum.is_finite() {
+            return Err(HierarchicalTrainingError::NonFiniteUpdate);
+        }
+        let expected_decisions: usize = dataset
+            .hands
+            .iter()
+            .filter(|hand| partitions.contains_train(hand.hand_index))
+            .map(|hand| hand.sequence_indexes.len())
+            .sum();
+        if decisions != expected_decisions {
+            return Err(HierarchicalTrainingError::PopulationCoverageMismatch {
+                expected: expected_decisions,
+                observed: decisions,
+            });
+        }
         working.blueprint_epochs = working
             .blueprint_epochs
             .checked_add(1)
@@ -528,14 +618,46 @@ impl HierarchicalTrainer {
         Ok(HierarchicalEpochReport {
             phase: HierarchicalPhase::Blueprint,
             decisions,
-            mean_nll: mean.total,
+            optimizer_steps,
+            mean_nll: nll_sum / decisions as f64,
             mean_conditional_kl: None,
         })
     }
 
+    /// One coherent G/Z0 step. Called only on the private epoch copy.
+    fn apply_blueprint_batch(
+        &mut self,
+        batch: GeneratorGradientBatch,
+    ) -> Result<f64, HierarchicalTrainingError> {
+        let mean = batch.mean_loss()?;
+        let mut centre = Vec::with_capacity(self.blueprint.centre().dimension());
+        for (&value, &gradient) in self
+            .blueprint
+            .centre()
+            .as_slice()
+            .iter()
+            .zip(&mean.latent_gradient)
+        {
+            let next = f64::from(value) - self.blueprint_learning_rate * f64::from(gradient);
+            if !next.is_finite() || next.abs() > f64::from(f32::MAX) {
+                return Err(HierarchicalTrainingError::NonFiniteUpdate);
+            }
+            centre.push(next as f32);
+        }
+        let next_centre = self.generator.latent_config().profile(centre)?;
+        let next_blueprint =
+            BehaviourBlueprint::new(next_centre, self.blueprint.prior_std().to_vec())?;
+        let nll_sum = mean.total * batch.len() as f64;
+        self.generator_adam
+            .apply_batch(&mut self.generator, batch)?;
+        self.blueprint = next_blueprint;
+        Ok(nll_sum)
+    }
+
     /// First-order personalization training: adapt a private Z1 on the latest
     /// `history_hands` from internal Train support, then update G on
-    /// internal Train query hands. Zero is valid (exact Z1=Z0); too few hands is an error.
+    /// internal Train query hands with both Z0 and Z1 likelihoods. Zero is valid
+    /// (exact Z1=Z0); too few hands is an error.
     /// Use different *explicit* history_hands across epochs (0,10,100,1000...).
     pub fn train_personalization_epoch<P: ExactLegalityProvider>(
         &mut self,
@@ -561,22 +683,33 @@ impl HierarchicalTrainer {
             let baseline =
                 working.personalize(sample.id, &sample.support, history_hands, provider)?;
             let mut batch = GeneratorGradientBatch::new(&working.generator);
+            let mut query_count = 0usize;
+            let mut query_nll = 0.0;
             for hand in &sample.query {
                 for row in subject_decisions(hand) {
                     let observation = decode_decision(hand, row)?;
                     let legal = lookup(provider, sample.id, hand, row)?;
-                    batch.accumulate_encoded(
+                    batch.accumulate_weighted_encoded(
+                        &working.generator,
+                        working.blueprint.centre(),
+                        &observation,
+                        &legal,
+                        working.optimization.z0_weight,
+                    )?;
+                    let loss = batch.accumulate_weighted_encoded(
                         &working.generator,
                         baseline.profile(),
                         &observation,
                         &legal,
+                        working.optimization.z1_weight,
                     )?;
+                    query_count += 1;
+                    query_nll += loss.total;
                 }
             }
-            let mean = batch.mean_loss()?;
-            sum_nll += mean.total * batch.len() as f64;
+            sum_nll += query_nll;
             count = count
-                .checked_add(batch.len())
+                .checked_add(query_count)
                 .ok_or(HierarchicalTrainingError::CountOverflow)?;
             working
                 .generator_adam
@@ -593,14 +726,16 @@ impl HierarchicalTrainer {
         Ok(HierarchicalEpochReport {
             phase: HierarchicalPhase::Personalization,
             decisions: count,
+            optimizer_steps: samples.len(),
             mean_nll: sum_nll / count as f64,
             mean_conditional_kl: None,
         })
     }
 
     /// Decision-level variational learning: prior Z2 sees only C/Z1, posterior
-    /// Z2 sees C/ObservedAction/Z1. G learns both branches under the complete
-    /// action+sizing+timing likelihood; A receives both reverse-mode gradients
+    /// Z2 sees C/ObservedAction/Z1. G learns both branches and the Z0/Z1
+    /// reference objectives under the complete action+sizing+timing likelihood;
+    /// A receives both reverse-mode gradients
     /// and conditional KL. Z1 is fitted only on the preceding support hands.
     pub fn train_momentary_epoch<P: ExactLegalityProvider>(
         &mut self,
@@ -646,6 +781,7 @@ impl HierarchicalTrainer {
         Ok(HierarchicalEpochReport {
             phase: HierarchicalPhase::Momentary,
             decisions,
+            optimizer_steps: samples.len(),
             mean_nll: nll_sum / decisions as f64,
             mean_conditional_kl: Some(kl_sum / decisions as f64),
         })
@@ -667,10 +803,34 @@ impl HierarchicalTrainer {
             let post_noise = next_noise.sample(self.generator.latent_config().dimension());
             let prior_z = posterior.prior().sample(&prior_noise)?;
             let post_z = posterior.posterior().sample(&post_noise)?;
-            let prior_loss =
-                g_batch.accumulate_encoded(&self.generator, &prior_z, observation, legal)?;
-            let post_loss =
-                g_batch.accumulate_encoded(&self.generator, &post_z, observation, legal)?;
+            g_batch.accumulate_weighted_encoded(
+                &self.generator,
+                self.blueprint.centre(),
+                observation,
+                legal,
+                self.optimization.z0_weight,
+            )?;
+            g_batch.accumulate_weighted_encoded(
+                &self.generator,
+                baseline.profile(),
+                observation,
+                legal,
+                self.optimization.z1_weight,
+            )?;
+            let prior_loss = g_batch.accumulate_weighted_encoded(
+                &self.generator,
+                &prior_z,
+                observation,
+                legal,
+                self.optimization.z2_weight * 0.5,
+            )?;
+            let post_loss = g_batch.accumulate_weighted_encoded(
+                &self.generator,
+                &post_z,
+                observation,
+                legal,
+                self.optimization.z2_weight * 0.5,
+            )?;
             kl += a_batch.accumulate_encoded(
                 &self.analyzer,
                 baseline,
@@ -733,6 +893,150 @@ impl HierarchicalTrainer {
         Ok(state.baseline().clone())
     }
 
+    /// Score the population reference before A or personalization are trained.
+    /// Use the final evaluation cohort for comparable stage-to-stage scores.
+    pub fn evaluate_blueprint<P: ExactLegalityProvider>(
+        &self,
+        dataset: &BehaviourParquetDataset,
+        partitions: &DatasetPartitions,
+        provider: &mut P,
+    ) -> Result<ReferenceValidationReport, HierarchicalTrainingError> {
+        self.evaluate_reference(dataset, partitions, None, provider)
+    }
+
+    /// Score Z1 before A is trained, without using any Validation evidence.
+    pub fn evaluate_personalization<P: ExactLegalityProvider>(
+        &self,
+        dataset: &BehaviourParquetDataset,
+        partitions: &DatasetPartitions,
+        history_hands: usize,
+        provider: &mut P,
+    ) -> Result<ReferenceValidationReport, HierarchicalTrainingError> {
+        if self.personalization_epochs == 0 {
+            return Err(HierarchicalTrainingError::NotTrained);
+        }
+        self.evaluate_reference(dataset, partitions, Some(history_hands), provider)
+    }
+
+    fn evaluation_baseline<P: ExactLegalityProvider>(
+        &self,
+        dataset: &BehaviourParquetDataset,
+        partitions: &DatasetPartitions,
+        id: u64,
+        history_hands: usize,
+        provider: &mut P,
+    ) -> Result<PlayerBaseline, HierarchicalTrainingError> {
+        let memberships = dataset
+            .subjects
+            .get(&id)
+            .ok_or(HierarchicalTrainingError::UnknownSubject(id))?;
+        let mut train_history = memberships
+            .iter()
+            .filter_map(|membership| {
+                let hand = &dataset.hands[membership.hand_slot];
+                partitions.contains_train(hand.hand_index).then(|| {
+                    (
+                        hand.hand_index,
+                        hand.materialize(membership.subject_position),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        // Count actual exploitable hands, not memberships without decisions.
+        train_history.retain(|(_, hand)| subject_decisions(hand).next().is_some());
+        train_history.sort_unstable_by_key(|(index, _)| *index);
+        self.personalize(id, &train_history, history_hands, provider)
+    }
+
+    fn evaluate_reference<P: ExactLegalityProvider>(
+        &self,
+        dataset: &BehaviourParquetDataset,
+        partitions: &DatasetPartitions,
+        history_hands: Option<usize>,
+        provider: &mut P,
+    ) -> Result<ReferenceValidationReport, HierarchicalTrainingError> {
+        self.check_evaluation_dataset(dataset, partitions)?;
+        selected_subjects(dataset, &self.last_subjects)?;
+        let mut total = 0.0;
+        let mut action = 0.0;
+        let mut sizing = 0.0;
+        let mut timing = 0.0;
+        let mut decisions = 0usize;
+        let mut wagers = 0usize;
+        let mut correct = 0usize;
+        for &id in &self.last_subjects {
+            let profile = match history_hands {
+                None => self.blueprint.centre().clone(),
+                Some(count) => self
+                    .evaluation_baseline(dataset, partitions, id, count, provider)?
+                    .profile()
+                    .clone(),
+            };
+            let mut subject_count = 0usize;
+            for membership in &dataset.subjects[&id] {
+                let hand = &dataset.hands[membership.hand_slot];
+                if !partitions.contains_evaluation(EvaluationPartition::Validation, hand.hand_index)
+                {
+                    continue;
+                }
+                let observed = hand.materialize(membership.subject_position);
+                for row in subject_decisions(&observed) {
+                    let observation = decode_decision(&observed, row)?;
+                    let legal = lookup(provider, id, &observed, row)?;
+                    let (loss, probs) = self
+                        .generator
+                        .score_observation_with_probabilities_encoded(
+                            &profile,
+                            &observation,
+                            &legal,
+                        )?;
+                    if predicted_action(&probs) == usize::from(action_id(observation.observed.kind))
+                    {
+                        correct += 1;
+                    }
+                    total += loss.total;
+                    action += loss.action;
+                    timing += loss.timing;
+                    if matches!(
+                        observation.observed.kind,
+                        crate::behavioural::ActionKind::Bet | crate::behavioural::ActionKind::Raise
+                    ) {
+                        sizing += loss.sizing;
+                        wagers += 1;
+                    }
+                    decisions += 1;
+                    subject_count += 1;
+                }
+            }
+            if subject_count == 0 {
+                return Err(HierarchicalTrainingError::EmptyEvaluationSubject(
+                    id,
+                    EvaluationPartition::Validation,
+                ));
+            }
+        }
+        if decisions == 0 {
+            return Err(HierarchicalTrainingError::EmptyValidation);
+        }
+        if ![total, action, sizing, timing]
+            .iter()
+            .all(|x| x.is_finite())
+        {
+            return Err(HierarchicalTrainingError::NonFiniteUpdate);
+        }
+        Ok(ReferenceValidationReport {
+            decisions,
+            wager_decisions: wagers,
+            predictive_nll: total / decisions as f64,
+            components: HierarchicalNllComponents {
+                action: action / decisions as f64,
+                sizing: (wagers > 0).then(|| sizing / wagers as f64),
+                timing_log1p_ms: timing / decisions as f64,
+            },
+            action_accuracy: correct as f64 / decisions as f64,
+        })
+    }
+
     /// Model parameters and evaluation baselines are read-only. Z1 uses only
     /// full hands inside Train; neither Validation nor Test may adapt the player.
     /// In particular Test cannot consume Validation as support.
@@ -744,8 +1048,37 @@ impl HierarchicalTrainer {
         partition: EvaluationPartition,
         provider: &mut P,
     ) -> Result<HierarchicalValidationReport, HierarchicalTrainingError> {
+        let history_hands = self
+            .last_episode
+            .ok_or(HierarchicalTrainingError::NotTrained)?
+            .support_hands;
+        self.evaluate_with_history(
+            dataset,
+            subjects,
+            partitions,
+            partition,
+            history_hands,
+            provider,
+        )
+    }
+
+    /// Compare explicit evidence budgets on the same held-out decisions. All
+    /// shared parameters and per-subject evaluation baselines remain fixed.
+    pub fn evaluate_with_history<P: ExactLegalityProvider>(
+        &self,
+        dataset: &BehaviourParquetDataset,
+        subjects: &[u64],
+        partitions: &DatasetPartitions,
+        partition: EvaluationPartition,
+        history_hands: usize,
+        provider: &mut P,
+    ) -> Result<HierarchicalValidationReport, HierarchicalTrainingError> {
+        if self.momentary_epochs == 0 {
+            return Err(HierarchicalTrainingError::NotTrained);
+        }
         self.check_evaluation_dataset(dataset, partitions)?;
         selected_subjects(dataset, subjects)?;
+        let mut correct = [0usize; 3];
         let mut sum = [0.0_f64; 4]; // z0, z1, marginal prior, posterior reconstruction
         let mut component_sums = [[0.0_f64; 3]; 3]; // z0, z1, marginal prior
         let mut kl = 0.0;
@@ -759,25 +1092,8 @@ impl HierarchicalTrainer {
                 .subjects
                 .get(&id)
                 .ok_or(HierarchicalTrainingError::UnknownSubject(id))?;
-            let train_history = memberships
-                .iter()
-                .filter_map(|membership| {
-                    let hand = &dataset.hands[membership.hand_slot];
-                    partitions.contains_train(hand.hand_index).then(|| {
-                        (
-                            hand.hand_index,
-                            hand.materialize(membership.subject_position),
-                        )
-                    })
-                })
-                .collect::<Vec<_>>();
-            // Use one explicit, checkpoint-bound evidence budget, rather than
-            // implicitly adapting on arbitrarily many Train hands at evaluation.
-            let evidence_hands = self
-                .last_episode
-                .ok_or(HierarchicalTrainingError::NotTrained)?
-                .support_hands;
-            let baseline = self.personalize(id, &train_history, evidence_hands, provider)?;
+            let baseline =
+                self.evaluation_baseline(dataset, partitions, id, history_hands, provider)?;
             let mut subject_decisions_seen = 0usize;
             for membership in memberships {
                 let hand = &dataset.hands[membership.hand_slot];
@@ -789,16 +1105,26 @@ impl HierarchicalTrainer {
                     let observation = decode_decision(&observed, row)?;
                     let legal = lookup(provider, id, &observed, row)?;
                     let z2 = self.analyzer.infer_encoded(&observation, &baseline)?;
-                    let z0 = self.generator.score_observation_encoded(
-                        self.blueprint.centre(),
-                        &observation,
-                        &legal,
-                    )?;
-                    let z1 = self.generator.score_observation_encoded(
-                        baseline.profile(),
-                        &observation,
-                        &legal,
-                    )?;
+                    let (z0, z0_probs) = self
+                        .generator
+                        .score_observation_with_probabilities_encoded(
+                            self.blueprint.centre(),
+                            &observation,
+                            &legal,
+                        )?;
+                    let (z1, z1_probs) = self
+                        .generator
+                        .score_observation_with_probabilities_encoded(
+                            baseline.profile(),
+                            &observation,
+                            &legal,
+                        )?;
+                    let target = usize::from(action_id(observation.observed.kind));
+                    for (slot, probabilities) in [(0, z0_probs), (1, z1_probs)] {
+                        if predicted_action(&probabilities) == target {
+                            correct[slot] += 1;
+                        }
+                    }
                     let reconstruction_profile = z2.posterior().mean_profile()?;
                     let posterior = self.generator.score_observation_encoded(
                         &reconstruction_profile,
@@ -811,14 +1137,26 @@ impl HierarchicalTrainer {
                     // + NLL(sizing | action) + NLL(timing | action, sizing).
                     // Marginalizing each head independently would be incorrect.
                     let mut draws = Vec::with_capacity(Z2_PRIOR_MARGINAL_SAMPLES);
+                    let mut marginal_probabilities = [0.0; ACTION_COUNT];
                     for _ in 0..Z2_PRIOR_MARGINAL_SAMPLES {
                         let noise = eval_noise.sample(self.generator.latent_config().dimension());
                         let profile = z2.prior().sample(&noise)?;
-                        draws.push(self.generator.score_observation_encoded(
-                            &profile,
-                            &observation,
-                            &legal,
-                        )?);
+                        let (loss, probabilities) = self
+                            .generator
+                            .score_observation_with_probabilities_encoded(
+                                &profile,
+                                &observation,
+                                &legal,
+                            )?;
+                        for (sum, probability) in
+                            marginal_probabilities.iter_mut().zip(probabilities)
+                        {
+                            *sum += probability / Z2_PRIOR_MARGINAL_SAMPLES as f64;
+                        }
+                        draws.push(loss);
+                    }
+                    if predicted_action(&marginal_probabilities) == target {
+                        correct[2] += 1;
                     }
                     let marginal = marginal_nll(draws.iter().map(|x| x.total))?;
                     let marginal_action = marginal_nll(draws.iter().map(|x| x.action))?;
@@ -882,6 +1220,10 @@ impl HierarchicalTrainer {
             decisions: count,
             wager_decisions: wager_count,
             z2_prior_samples: Z2_PRIOR_MARGINAL_SAMPLES,
+            history_hands,
+            z0_action_accuracy: correct[0] as f64 / count as f64,
+            z1_action_accuracy: correct[1] as f64 / count as f64,
+            z2_prior_action_accuracy: correct[2] as f64 / count as f64,
             z0_predictive_nll: sum[0] / count as f64,
             z1_predictive_nll: sum[1] / count as f64,
             z2_prior_marginal_nll: sum[2] / count as f64,
@@ -892,6 +1234,17 @@ impl HierarchicalTrainer {
             mean_conditional_kl: kl / count as f64,
         })
     }
+}
+
+/// Deterministic argmax; ties retain the lowest action code.
+fn predicted_action(probabilities: &[f64; ACTION_COUNT]) -> usize {
+    let mut best = 0;
+    for i in 1..ACTION_COUNT {
+        if probabilities[i] > probabilities[best] {
+            best = i;
+        }
+    }
+    best
 }
 
 /// Stable negative log of the arithmetic mean of probabilities/densities.
@@ -973,6 +1326,10 @@ pub enum HierarchicalTrainingError {
         available: usize,
     },
     EmptyTraining,
+    PopulationCoverageMismatch {
+        expected: usize,
+        observed: usize,
+    },
     EmptyValidation,
     EmptyEvaluationSubject(u64, EvaluationPartition),
     NonFiniteUpdate,
@@ -1066,6 +1423,7 @@ mod tests {
             BaselineAdaptationConfig::new(0.2, 0.1).unwrap(),
             0.001,
             0.01,
+            HierarchicalOptimizationConfig::new(4, 1.0, 1.0, 1.0).unwrap(),
             41,
         )
         .unwrap()
@@ -1198,6 +1556,7 @@ mod tests {
             .unwrap();
         assert_eq!(baseline.phase, HierarchicalPhase::Blueprint);
         assert_eq!(baseline.decisions, 6);
+        assert_eq!(baseline.optimizer_steps, 2); // final incomplete mini-batch included
         assert_eq!(
             seen.borrow().iter().map(String::as_str).collect::<Vec<_>>(),
             vec!["h0", "h1", "h2", "h3", "h4", "h5"]
@@ -1220,6 +1579,11 @@ mod tests {
                 .iter()
                 .any(|x| ["h6", "h7", "h8"].contains(&x.as_str()))
         );
+        let p = trainer
+            .evaluate_personalization(&dataset, &partitions, 2, &mut legal_source)
+            .unwrap();
+        assert_eq!(p.decisions, 1);
+        assert!(p.predictive_nll.is_finite());
         seen.borrow_mut().clear();
         let momentary = trainer
             .train_momentary_epoch(&dataset, &[42], &partitions, episode, 2, &mut legal_source)
@@ -1254,6 +1618,32 @@ mod tests {
             )
             .unwrap();
         assert_eq!(report, repeat);
+        let zero = trainer
+            .evaluate_with_history(
+                &dataset,
+                &[42],
+                &partitions,
+                EvaluationPartition::Validation,
+                0,
+                &mut legal_source,
+            )
+            .unwrap();
+        assert_eq!(zero.decisions, report.decisions);
+        assert_eq!(zero.z0_predictive_nll, zero.z1_predictive_nll);
+        assert_eq!(zero.z0_action_accuracy, zero.z1_action_accuracy);
+        assert_eq!(zero.history_hands, 0);
+        assert!((0.0..=1.0).contains(&zero.z2_prior_action_accuracy));
+        assert!(matches!(
+            trainer.evaluate_with_history(
+                &dataset,
+                &[42],
+                &partitions,
+                EvaluationPartition::Validation,
+                7,
+                &mut legal_source
+            ),
+            Err(HierarchicalTrainingError::InsufficientHistory { .. })
+        ));
 
         assert!(
             !seen
@@ -1282,6 +1672,85 @@ mod tests {
             assert!(value.is_finite());
         }
         assert_eq!(trainer.completed_epochs(), (1, 1, 1));
+    }
+
+    #[test]
+    fn blueprint_includes_unselected_subject_decisions() {
+        use super::super::SubjectMembership;
+        use crate::behavioural::codebook::position_id;
+        let mut data = dataset();
+        let hand = &mut data.hands[0];
+        let mut categorical = hand.categorical_without_subject[0];
+        categorical[1] = i64::from(position_id(Position::BigBlind));
+        hand.categorical_without_subject.push(categorical);
+        hand.sequence_indexes.push(1);
+        let continuous = hand.continuous[0];
+        let present = hand.continuous_present[0];
+        let timing = hand.decision_time_ms[0];
+        hand.continuous.push(continuous);
+        hand.continuous_present.push(present);
+        hand.decision_time_ms.push(timing);
+        data.event_count += 1;
+        data.summary.events_written += 1;
+        data.summary.subject_hand_rows_written += 1;
+        data.subjects.insert(
+            99,
+            vec![SubjectMembership {
+                hand_slot: 0,
+                subject_position: Position::BigBlind,
+            }],
+        );
+        let partitions = DatasetPartitions::canonical_for_test(&data);
+        let mut trainer = trainer();
+        let mut seen = Vec::new();
+        let mut provider =
+            |id: u64, _: &crate::behavioural::HandId, sequence: u32| -> Result<_, &'static str> {
+                seen.push((id, sequence));
+                Ok(decision(600).1)
+            };
+        let report = trainer
+            .train_blueprint_epoch(
+                &data,
+                &[42],
+                &partitions,
+                TrainingEpisodeConfig::new(3, 3).unwrap(),
+                &mut provider,
+            )
+            .unwrap();
+        assert_eq!(report.decisions, 7);
+        assert_eq!(report.optimizer_steps, 2);
+        assert!(seen.contains(&(99, 1)));
+        assert_eq!(trainer.training_subjects(), &[42]);
+    }
+
+    #[test]
+    fn blueprint_checkpoint_is_evaluable_before_momentary() {
+        let data = dataset();
+        let partitions = DatasetPartitions::canonical_for_test(&data);
+        let episode = TrainingEpisodeConfig::new(3, 3).unwrap();
+        let mut trainer = trainer();
+        let mut provider = |_: u64,
+                            _: &crate::behavioural::HandId,
+                            _: u32|
+         -> Result<_, &'static str> { Ok(decision(600).1) };
+        trainer
+            .train_blueprint_epoch(&data, &[42], &partitions, episode, &mut provider)
+            .unwrap();
+        let report = trainer
+            .evaluate_blueprint(&data, &partitions, &mut provider)
+            .unwrap();
+        assert_eq!(report.decisions, 1);
+        assert!(report.predictive_nll.is_finite());
+        assert!(matches!(
+            trainer.evaluate(
+                &data,
+                &[42],
+                &partitions,
+                EvaluationPartition::Validation,
+                &mut provider
+            ),
+            Err(HierarchicalTrainingError::NotTrained)
+        ));
     }
 
     #[test]
@@ -1424,6 +1893,7 @@ mod tests {
             "lechiffre.hierarchical.checkpoint.v1",
             "lechiffre.hierarchical.checkpoint.v2",
             "lechiffre.hierarchical.checkpoint.v3",
+            "lechiffre.hierarchical.checkpoint.v4",
         ] {
             obsolete["format"] = json!(obsolete_version);
             std::fs::write(&invalid_path, serde_json::to_vec(&obsolete).unwrap()).unwrap();
