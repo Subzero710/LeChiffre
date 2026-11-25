@@ -361,9 +361,6 @@ fn run_configuration(path: &str) -> Result<BehaviourRunConfig, String> {
         "query_hands",
         "blueprint_epochs",
         "blueprint_batch_decisions",
-        "generator_z0_weight",
-        "generator_z1_weight",
-        "generator_z2_weight",
         "personalization_history_hands",
         "momentary_history_hands",
         "momentary_epochs",
@@ -375,13 +372,9 @@ fn run_configuration(path: &str) -> Result<BehaviourRunConfig, String> {
         config_usize(&v, "query_hands")?,
     )
     .map_err(|e| e.to_string())?;
-    let optimization = HierarchicalOptimizationConfig::new(
-        config_usize(&v, "blueprint_batch_decisions")?,
-        config_float(&v, "generator_z0_weight")?,
-        config_float(&v, "generator_z1_weight")?,
-        config_float(&v, "generator_z2_weight")?,
-    )
-    .map_err(|e| e.to_string())?;
+    let optimization =
+        HierarchicalOptimizationConfig::new(config_usize(&v, "blueprint_batch_decisions")?)
+            .map_err(|e| e.to_string())?;
     let history = config_sizes(&v, "personalization_history_hands")?;
     let momentary_history = config_usize(&v, "momentary_history_hands")?;
     let dim = config_usize(&v, "latent_dimension")?;
@@ -820,6 +813,23 @@ fn train_hierarchical(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn convert_v5_blueprint_cli(args: &[String]) -> Result<(), String> {
+    use lechiffre::datasets::behaviour_parquet_loader::HierarchicalTrainer;
+    if args.len() != 4 {
+        return Err(
+            "usage: --convert-v5-blueprint <v5-checkpoint.json> <new-v6-checkpoint.json>".into(),
+        );
+    }
+    let trainer =
+        HierarchicalTrainer::convert_v5_blueprint(&args[2], &args[3]).map_err(|e| e.to_string())?;
+    println!(
+        "checkpoint={} model_id={}",
+        args[3],
+        trainer.model_id().map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
 fn resume_hierarchical(args: &[String]) -> Result<(), String> {
     use lechiffre::datasets::behaviour_parquet_loader::{
         BehaviourParquetDataset, HierarchicalTrainer,
@@ -928,15 +938,8 @@ fn evaluate_blueprint_cli(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn benchmark_hierarchical(args: &[String]) -> Result<(), String> {
-    use lechiffre::datasets::behaviour_parquet_loader::{EvaluationPartition, HierarchicalTrainer};
-    if args.len() != 7 {
-        return Err("usage: --benchmark-behavioural <checkpoint.json> <parquet-dir> <manifest.json> <history1,history2,...> <new-report.json>".into());
-    }
-    if std::path::Path::new(&args[6]).exists() {
-        return Err(format!("benchmark report already exists: {}", args[6]));
-    }
-    let histories = args[5]
+fn benchmark_history_budgets(arg: &str) -> Result<Vec<usize>, String> {
+    let histories = arg
         .split(',')
         .map(|n| n.parse::<usize>())
         .collect::<Result<Vec<_>, _>>()
@@ -947,6 +950,77 @@ fn benchmark_hierarchical(args: &[String]) -> Result<(), String> {
     {
         return Err("history budgets must start at zero and increase strictly".into());
     }
+    Ok(histories)
+}
+
+/// Isolate the effect of Z1 adaptation at fixed shared parameters.
+fn benchmark_personalization(args: &[String]) -> Result<(), String> {
+    use lechiffre::datasets::behaviour_parquet_loader::HierarchicalTrainer;
+    if args.len() != 7 {
+        return Err("usage: --benchmark-personalization <checkpoint.json> <parquet-dir> <manifest.json> <history1,history2,...> <new-report.json>".into());
+    }
+    if std::path::Path::new(&args[6]).exists() {
+        return Err(format!("benchmark report already exists: {}", args[6]));
+    }
+    let histories = benchmark_history_budgets(&args[5])?;
+    let trainer = HierarchicalTrainer::load_checkpoint(&args[2]).map_err(|e| e.to_string())?;
+    let dataset = BehaviourParquetDataset::open(&args[3]).map_err(|e| e.to_string())?;
+    let partitions = load_verified_partitions(&dataset, &args[4])?;
+    let reference = trainer
+        .evaluate_blueprint(&dataset, &partitions, &mut replay_provider(&dataset))
+        .map_err(|e| e.to_string())?;
+    let reference_value = blueprint_report_value(&reference);
+    println!("{reference_value}");
+    let mut rows = Vec::new();
+    for history in histories {
+        let report = trainer
+            .evaluate_personalization(
+                &dataset,
+                &partitions,
+                history,
+                &mut replay_provider(&dataset),
+            )
+            .map_err(|e| format!("history={history}: {e}"))?;
+        if report.decisions != reference.decisions
+            || report.wager_decisions != reference.wager_decisions
+        {
+            return Err(format!("history={history}: evaluation coverage changed"));
+        }
+        if history == 0 && report != reference {
+            return Err("zero-history Z1 must exactly reproduce Z0 scores".into());
+        }
+        let row = personalization_report_value(&report, history);
+        println!("{row}");
+        rows.push(row);
+    }
+    let (blueprint, personalization, momentary) = trainer.completed_epochs();
+    let result = serde_json::json!({
+        "format":"lechiffre.behavioural.personalization-benchmark.v1",
+        "partition":"validation",
+        "model_id":trainer.model_id().map_err(|e| e.to_string())?,
+        "dataset_fingerprint":dataset.dataset_fingerprint(),
+        "manifest_fingerprint":partitions.manifest_fingerprint(),
+        "legality_fingerprint":dataset.legality_fingerprint().map_err(|e| e.to_string())?,
+        "subject_ids":trainer.training_subjects(),
+        "epochs":{"blueprint":blueprint,"personalization":personalization,"momentary":momentary},
+        "ordering":"ingestion_not_verified_chronological",
+        "history":"latest_exploitable_train_hands_per_subject",
+        "reference":reference_value,
+        "reports":rows,
+    });
+    commit_new_json(std::path::Path::new(&args[6]), &result)?;
+    Ok(())
+}
+
+fn benchmark_hierarchical(args: &[String]) -> Result<(), String> {
+    use lechiffre::datasets::behaviour_parquet_loader::{EvaluationPartition, HierarchicalTrainer};
+    if args.len() != 7 {
+        return Err("usage: --benchmark-behavioural <checkpoint.json> <parquet-dir> <manifest.json> <history1,history2,...> <new-report.json>".into());
+    }
+    if std::path::Path::new(&args[6]).exists() {
+        return Err(format!("benchmark report already exists: {}", args[6]));
+    }
+    let histories = benchmark_history_budgets(&args[5])?;
     let trainer = HierarchicalTrainer::load_checkpoint(&args[2]).map_err(|e| e.to_string())?;
     let dataset = BehaviourParquetDataset::open(&args[3]).map_err(|e| e.to_string())?;
     let partitions = load_verified_partitions(&dataset, &args[4])?;
@@ -1141,10 +1215,12 @@ async fn main() {
     }
     if args.len() > 1 {
         let result = match args[1].as_str() {
+            "--convert-v5-blueprint" => Some(convert_v5_blueprint_cli(&args)),
             "--train-behavioural" => Some(train_hierarchical(&args)),
             "--resume-behavioural" => Some(resume_hierarchical(&args)),
             "--evaluate-behavioural" => Some(evaluate_hierarchical(&args)),
             "--evaluate-blueprint" => Some(evaluate_blueprint_cli(&args)),
+            "--benchmark-personalization" => Some(benchmark_personalization(&args)),
             "--benchmark-behavioural" => Some(benchmark_hierarchical(&args)),
             "--select-best-behavioural" => Some(select_best_hierarchical(&args)),
             "--create-player-baseline" => Some(player_baseline_cli(&args, false)),
@@ -1347,6 +1423,29 @@ mod hierarchical_cli_tests {
     }
 
     #[test]
+    fn benchmark_requires_explicit_increasing_history_budgets() {
+        assert_eq!(
+            benchmark_history_budgets("0,1,10,50,100").unwrap(),
+            vec![0, 1, 10, 50, 100]
+        );
+        for invalid in ["", "0", "1,10", "0,1,1", "0,10,1", "0,-1", "0,1,"] {
+            assert!(benchmark_history_budgets(invalid).is_err());
+        }
+        let argv = [
+            "lechiffre",
+            "--benchmark-personalization",
+            "model",
+            "parquet",
+            "manifest",
+            "0,1",
+            "report",
+            "source.csv",
+        ]
+        .map(str::to_owned);
+        assert!(benchmark_personalization(&argv).is_err());
+    }
+
+    #[test]
     fn rejects_obsolete_and_incomplete_configs() {
         let p = std::env::temp_dir().join(format!(
             "lechiffre-hierarchical-cli-{}.json",
@@ -1364,9 +1463,9 @@ mod hierarchical_cli_tests {
         blueprint_only["momentary_epochs"] = serde_json::json!(1);
         std::fs::write(&p, serde_json::to_vec(&blueprint_only).unwrap()).unwrap();
         assert!(run_configuration(p.to_str().unwrap()).is_err());
-        let mut invalid_weight = original.clone();
-        invalid_weight["generator_z0_weight"] = serde_json::json!(0.0);
-        std::fs::write(&p, serde_json::to_vec(&invalid_weight).unwrap()).unwrap();
+        let mut obsolete_weight = original.clone();
+        obsolete_weight["generator_z0_weight"] = serde_json::json!(1.0);
+        std::fs::write(&p, serde_json::to_vec(&obsolete_weight).unwrap()).unwrap();
         assert!(run_configuration(p.to_str().unwrap()).is_err());
         let mut missing = original.clone();
         missing.as_object_mut().unwrap().remove("z0_initial");

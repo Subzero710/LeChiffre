@@ -37,8 +37,5 @@
     1,
     2
   ],
-  "blueprint_batch_decisions": 256,
-  "generator_z0_weight": 1.0,
-  "generator_z1_weight": 1.0,
-  "generator_z2_weight": 1.0
+  "blueprint_batch_decisions": 256
 }

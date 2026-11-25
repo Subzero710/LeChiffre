@@ -45,7 +45,7 @@ pub struct HierarchicalEpochReport {
     /// G optimizer steps in this epoch (A steps coincide during Momentary).
     pub optimizer_steps: usize,
     /// Blueprint: Z0 NLL; Personalization: Z1 NLL; Momentary: mean prior/posterior
-    /// sampled NLL. Does not include the auxiliary G reference terms or KL.
+    /// sampled NLL. Does not include KL.
     pub mean_nll: f64,
     /// The conditional KL is available only for Momentary training.
     pub mean_conditional_kl: Option<f64>,
@@ -82,46 +82,33 @@ pub struct HierarchicalValidationReport {
     pub mean_conditional_kl: f64,
 }
 
-/// All objective weights are explicit and strictly positive. G uses a normalized
-/// weighted average; A retains its own prior/posterior + conditional KL objective.
+/// Explicit population mini-batch size. Each phase has its own fixed objective.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HierarchicalOptimizationConfig {
     blueprint_batch_decisions: usize,
-    z0_weight: f64,
-    z1_weight: f64,
-    z2_weight: f64,
 }
 
 impl HierarchicalOptimizationConfig {
-    pub fn new(
-        blueprint_batch_decisions: usize,
-        z0_weight: f64,
-        z1_weight: f64,
-        z2_weight: f64,
-    ) -> Result<Self, HierarchicalTrainingError> {
-        if blueprint_batch_decisions == 0
-            || [z0_weight, z1_weight, z2_weight]
-                .iter()
-                .any(|w| !w.is_finite() || *w <= 0.0)
-            || !(z0_weight + z1_weight + z2_weight).is_finite()
-            || z2_weight * 0.5 == 0.0
-        {
+    pub fn new(blueprint_batch_decisions: usize) -> Result<Self, HierarchicalTrainingError> {
+        if blueprint_batch_decisions == 0 {
             return Err(HierarchicalTrainingError::InvalidConfiguration);
         }
         Ok(Self {
             blueprint_batch_decisions,
-            z0_weight,
-            z1_weight,
-            z2_weight,
         })
     }
 
     fn checkpoint_value(self) -> Value {
-        json!({"blueprint_batch_decisions":self.blueprint_batch_decisions,
-               "z0_weight":self.z0_weight,"z1_weight":self.z1_weight,"z2_weight":self.z2_weight})
+        json!({"blueprint_batch_decisions":self.blueprint_batch_decisions})
     }
 
     fn from_checkpoint(v: &Value) -> Result<Self, String> {
+        exact_keys(v, &["blueprint_batch_decisions"])?;
+        Self::new(dimension(&v["blueprint_batch_decisions"])?).map_err(|e| e.to_string())
+    }
+
+    // Used exclusively by the explicit V5 Blueprint conversion, never by V6 loading.
+    fn from_v5_blueprint(v: &Value) -> Result<Self, String> {
         exact_keys(
             v,
             &[
@@ -131,13 +118,17 @@ impl HierarchicalOptimizationConfig {
                 "z2_weight",
             ],
         )?;
-        Self::new(
-            dimension(&v["blueprint_batch_decisions"])?,
-            number(&v["z0_weight"])?,
-            number(&v["z1_weight"])?,
-            number(&v["z2_weight"])?,
-        )
-        .map_err(|e| e.to_string())
+        let z0 = number(&v["z0_weight"])?;
+        let z1 = number(&v["z1_weight"])?;
+        let z2 = number(&v["z2_weight"])?;
+        if [z0, z1, z2].iter().any(|w| !w.is_finite() || *w <= 0.0)
+            || !(z0 + z1 + z2).is_finite()
+            || z2 * 0.5 == 0.0
+        {
+            return Err("invalid V5 objective weights".into());
+        }
+        // None of these weights was used during Blueprint training.
+        Self::new(dimension(&v["blueprint_batch_decisions"])?).map_err(|e| e.to_string())
     }
 }
 
@@ -331,8 +322,12 @@ impl HierarchicalTrainer {
     /// Stable identifier for the exact shared learned model (Z0, A, G and adaptation policy).
     /// FNV-128 detects accidental model mismatches; it is not a cryptographic signature.
     pub fn model_id(&self) -> Result<String, HierarchicalTrainingError> {
+        self.model_id_for_version(6)
+    }
+
+    fn model_id_for_version(&self, version: u8) -> Result<String, HierarchicalTrainingError> {
         let data = serde_json::to_vec(&json!({
-            "format":"lechiffre.hierarchical.model.v5",
+            "format":format!("lechiffre.hierarchical.model.v{version}"),
             "z0":self.blueprint.centre().as_slice(),
             "prior_std":self.blueprint.prior_std(),
             "generator":self.generator.checkpoint_value(),
@@ -345,7 +340,7 @@ impl HierarchicalTrainer {
         for byte in data {
             hash = (hash ^ u128::from(byte)).wrapping_mul(PRIME);
         }
-        Ok(format!("hierarchical-v5-{hash:032x}"))
+        Ok(format!("hierarchical-v{version}-{hash:032x}"))
     }
 
     /// Hierarchical-only checkpoint. Exact model, optimizer, RNG, phase, and dataset provenance.
@@ -354,7 +349,7 @@ impl HierarchicalTrainer {
             return Err(HierarchicalTrainingError::NotTrained);
         }
         let value = json!({
-            "format":"lechiffre.hierarchical.checkpoint.v5",
+            "format":"lechiffre.hierarchical.checkpoint.v6",
             "model_id":self.model_id()?,
             "blueprint":{"centre":self.blueprint.centre().as_slice(),
                          "prior_std":self.blueprint.prior_std()},
@@ -404,6 +399,24 @@ impl HierarchicalTrainer {
     }
 
     pub fn load_checkpoint(path: impl AsRef<Path>) -> Result<Self, HierarchicalTrainingError> {
+        Self::read_checkpoint(path, false)
+    }
+
+    /// Explicit conversion of a verified V5 Blueprint-only checkpoint. No training.
+    /// V5 Personalization/Momentary checkpoints used different objectives and are rejected.
+    pub fn convert_v5_blueprint(
+        source: impl AsRef<Path>,
+        destination: impl AsRef<Path>,
+    ) -> Result<Self, HierarchicalTrainingError> {
+        let trainer = Self::read_checkpoint(source, true)?;
+        trainer.save_checkpoint(destination)?;
+        Ok(trainer)
+    }
+
+    fn read_checkpoint(
+        path: impl AsRef<Path>,
+        v5_blueprint_conversion: bool,
+    ) -> Result<Self, HierarchicalTrainingError> {
         let value: Value = serde_json::from_reader(File::open(path)?)?;
         let bad = HierarchicalTrainingError::InvalidCheckpoint;
         exact_keys(
@@ -430,10 +443,10 @@ impl HierarchicalTrainer {
             ],
         )
         .map_err(bad)?;
-        if value["format"].as_str() != Some("lechiffre.hierarchical.checkpoint.v5") {
-            return Err(bad(
-                "obsolete or unknown checkpoint format: hierarchical v5 required".into(),
-            ));
+        let version = if v5_blueprint_conversion { 5 } else { 6 };
+        let expected_format = format!("lechiffre.hierarchical.checkpoint.v{version}");
+        if value["format"].as_str() != Some(expected_format.as_str()) {
+            return Err(bad(format!("expected {expected_format}")));
         }
         exact_keys(&value["blueprint"], &["centre", "prior_std"]).map_err(bad)?;
         exact_keys(
@@ -475,6 +488,12 @@ impl HierarchicalTrainer {
             number(&value["baseline_config"]["learning_rate"]).map_err(bad)?,
             number(&value["baseline_config"]["max_step_prior_std"]).map_err(bad)?,
         )?;
+        let optimization = if v5_blueprint_conversion {
+            HierarchicalOptimizationConfig::from_v5_blueprint(&value["optimization"])
+        } else {
+            HierarchicalOptimizationConfig::from_checkpoint(&value["optimization"])
+        }
+        .map_err(bad)?;
         let mut trainer = Self::new(
             blueprint,
             generator,
@@ -484,7 +503,7 @@ impl HierarchicalTrainer {
             baseline_config,
             number(&value["blueprint_learning_rate"]).map_err(bad)?,
             number(&value["beta_kl"]).map_err(bad)?,
-            HierarchicalOptimizationConfig::from_checkpoint(&value["optimization"]).map_err(bad)?,
+            optimization,
             unsigned(&value["rng_state"]).map_err(bad)?,
         )?;
         let epochs = &value["epochs"];
@@ -533,7 +552,14 @@ impl HierarchicalTrainer {
         {
             return Err(bad("inconsistent training progress".into()));
         }
-        if value["model_id"].as_str() != Some(trainer.model_id()?.as_str()) {
+        if v5_blueprint_conversion
+            && (trainer.personalization_epochs != 0 || trainer.momentary_epochs != 0)
+        {
+            return Err(bad(
+                "only V5 Blueprint-only checkpoints can be converted".into()
+            ));
+        }
+        if value["model_id"].as_str() != Some(trainer.model_id_for_version(version)?.as_str()) {
             return Err(bad("shared model fingerprint mismatch".into()));
         }
         Ok(trainer)
@@ -656,7 +682,7 @@ impl HierarchicalTrainer {
 
     /// First-order personalization training: adapt a private Z1 on the latest
     /// `history_hands` from internal Train support, then update G on
-    /// internal Train query hands with both Z0 and Z1 likelihoods. Zero is valid
+    /// internal Train query hands using only the Z1 likelihood. Zero is valid
     /// (exact Z1=Z0); too few hands is an error.
     /// Use different *explicit* history_hands across epochs (0,10,100,1000...).
     pub fn train_personalization_epoch<P: ExactLegalityProvider>(
@@ -689,19 +715,11 @@ impl HierarchicalTrainer {
                 for row in subject_decisions(hand) {
                     let observation = decode_decision(hand, row)?;
                     let legal = lookup(provider, sample.id, hand, row)?;
-                    batch.accumulate_weighted_encoded(
-                        &working.generator,
-                        working.blueprint.centre(),
-                        &observation,
-                        &legal,
-                        working.optimization.z0_weight,
-                    )?;
-                    let loss = batch.accumulate_weighted_encoded(
+                    let loss = batch.accumulate_encoded(
                         &working.generator,
                         baseline.profile(),
                         &observation,
                         &legal,
-                        working.optimization.z1_weight,
                     )?;
                     query_count += 1;
                     query_nll += loss.total;
@@ -733,8 +751,8 @@ impl HierarchicalTrainer {
     }
 
     /// Decision-level variational learning: prior Z2 sees only C/Z1, posterior
-    /// Z2 sees C/ObservedAction/Z1. G learns both branches and the Z0/Z1
-    /// reference objectives under the complete action+sizing+timing likelihood;
+    /// Z2 sees C/ObservedAction/Z1. G learns only the two Z2 branches under
+    /// the complete action+sizing+timing likelihood;
     /// A receives both reverse-mode gradients
     /// and conditional KL. Z1 is fitted only on the preceding support hands.
     pub fn train_momentary_epoch<P: ExactLegalityProvider>(
@@ -803,34 +821,10 @@ impl HierarchicalTrainer {
             let post_noise = next_noise.sample(self.generator.latent_config().dimension());
             let prior_z = posterior.prior().sample(&prior_noise)?;
             let post_z = posterior.posterior().sample(&post_noise)?;
-            g_batch.accumulate_weighted_encoded(
-                &self.generator,
-                self.blueprint.centre(),
-                observation,
-                legal,
-                self.optimization.z0_weight,
-            )?;
-            g_batch.accumulate_weighted_encoded(
-                &self.generator,
-                baseline.profile(),
-                observation,
-                legal,
-                self.optimization.z1_weight,
-            )?;
-            let prior_loss = g_batch.accumulate_weighted_encoded(
-                &self.generator,
-                &prior_z,
-                observation,
-                legal,
-                self.optimization.z2_weight * 0.5,
-            )?;
-            let post_loss = g_batch.accumulate_weighted_encoded(
-                &self.generator,
-                &post_z,
-                observation,
-                legal,
-                self.optimization.z2_weight * 0.5,
-            )?;
+            let prior_loss =
+                g_batch.accumulate_encoded(&self.generator, &prior_z, observation, legal)?;
+            let post_loss =
+                g_batch.accumulate_encoded(&self.generator, &post_z, observation, legal)?;
             kl += a_batch.accumulate_encoded(
                 &self.analyzer,
                 baseline,
@@ -904,7 +898,9 @@ impl HierarchicalTrainer {
         self.evaluate_reference(dataset, partitions, None, provider)
     }
 
-    /// Score Z1 before A is trained, without using any Validation evidence.
+    /// Score a fresh Z1 using a frozen G and only exploitable Train hands.
+    /// A trained Blueprint is sufficient; neither Personalization nor Momentary
+    /// training is required. This is evaluation only, never an optimizer step.
     pub fn evaluate_personalization<P: ExactLegalityProvider>(
         &self,
         dataset: &BehaviourParquetDataset,
@@ -912,9 +908,6 @@ impl HierarchicalTrainer {
         history_hands: usize,
         provider: &mut P,
     ) -> Result<ReferenceValidationReport, HierarchicalTrainingError> {
-        if self.personalization_epochs == 0 {
-            return Err(HierarchicalTrainingError::NotTrained);
-        }
         self.evaluate_reference(dataset, partitions, Some(history_hands), provider)
     }
 
@@ -1423,7 +1416,7 @@ mod tests {
             BaselineAdaptationConfig::new(0.2, 0.1).unwrap(),
             0.001,
             0.01,
-            HierarchicalOptimizationConfig::new(4, 1.0, 1.0, 1.0).unwrap(),
+            HierarchicalOptimizationConfig::new(4).unwrap(),
             41,
         )
         .unwrap()
@@ -1754,6 +1747,60 @@ mod tests {
     }
 
     #[test]
+    fn frozen_personalization_benchmark_requires_only_trained_blueprint() {
+        let data = dataset();
+        let partitions = DatasetPartitions::canonical_for_test(&data);
+        let episode = TrainingEpisodeConfig::new(3, 3).unwrap();
+        let mut trainer = trainer();
+        let mut provider = |_: u64,
+                            _: &crate::behavioural::HandId,
+                            _: u32|
+         -> Result<_, &'static str> { Ok(decision(600).1) };
+        assert!(matches!(
+            trainer.evaluate_personalization(&data, &partitions, 0, &mut provider),
+            Err(HierarchicalTrainingError::NotTrained)
+        ));
+        trainer
+            .train_blueprint_epoch(&data, &[42], &partitions, episode, &mut provider)
+            .unwrap();
+        let model_id = trainer.model_id().unwrap();
+        let generator_optimizer = trainer.generator_adam.checkpoint_value();
+        let analyzer_optimizer = trainer.analyzer_adam.checkpoint_value();
+        let noise_state = trainer.noise.state;
+        let reference = trainer
+            .evaluate_blueprint(&data, &partitions, &mut provider)
+            .unwrap();
+        let zero = trainer
+            .evaluate_personalization(&data, &partitions, 0, &mut provider)
+            .unwrap();
+        assert_eq!(reference, zero);
+        let adapted = trainer
+            .evaluate_personalization(&data, &partitions, 2, &mut provider)
+            .unwrap();
+        assert_eq!(adapted.decisions, reference.decisions);
+        assert_eq!(adapted.wager_decisions, reference.wager_decisions);
+        assert!(adapted.predictive_nll.is_finite());
+        assert_eq!(
+            adapted,
+            trainer
+                .evaluate_personalization(&data, &partitions, 2, &mut provider)
+                .unwrap()
+        );
+        assert!(matches!(
+            trainer.evaluate_personalization(&data, &partitions, 7, &mut provider),
+            Err(HierarchicalTrainingError::InsufficientHistory { .. })
+        ));
+        assert_eq!(trainer.completed_epochs(), (1, 0, 0));
+        assert_eq!(trainer.model_id().unwrap(), model_id);
+        assert_eq!(
+            trainer.generator_adam.checkpoint_value(),
+            generator_optimizer
+        );
+        assert_eq!(trainer.analyzer_adam.checkpoint_value(), analyzer_optimizer);
+        assert_eq!(trainer.noise.state, noise_state);
+    }
+
+    #[test]
     fn marginal_nll_uses_logmeanexp_not_mean_nll() {
         let equal = marginal_nll([3.0, 3.0]).unwrap();
         assert!((equal - 3.0).abs() < 1e-12);
@@ -1800,6 +1847,158 @@ mod tests {
             .infer_encoded(&b.0, baseline.baseline())
             .unwrap();
         assert_ne!(post_a.posterior(), post_b.posterior());
+    }
+
+    #[test]
+    fn personalization_uses_only_z1_query_gradients() {
+        let data = dataset();
+        let partitions = DatasetPartitions::canonical_for_test(&data);
+        let episode = TrainingEpisodeConfig::new(3, 3).unwrap();
+        let mut actual = trainer();
+        let mut provider = |_: u64,
+                            _: &crate::behavioural::HandId,
+                            _: u32|
+         -> Result<_, &'static str> { Ok(decision(600).1) };
+        actual
+            .train_blueprint_epoch(&data, &[42], &partitions, episode, &mut provider)
+            .unwrap();
+        let mut expected = actual.clone();
+        let original_blueprint = actual.blueprint.clone();
+        let original_analyzer = actual.analyzer.checkpoint_value();
+        let samples = sample_subjects(&data, &[42], &partitions, episode).unwrap();
+        for sample in &samples {
+            let baseline = expected
+                .personalize(sample.id, &sample.support, 2, &mut provider)
+                .unwrap();
+            let mut batch = GeneratorGradientBatch::new(&expected.generator);
+            for (observation, legal) in collect_query(sample, &mut provider).unwrap() {
+                batch
+                    .accumulate_encoded(
+                        &expected.generator,
+                        baseline.profile(),
+                        &observation,
+                        &legal,
+                    )
+                    .unwrap();
+            }
+            expected
+                .generator_adam
+                .apply_batch(&mut expected.generator, batch)
+                .unwrap();
+        }
+        actual
+            .train_personalization_epoch(&data, &[42], &partitions, episode, 2, &mut provider)
+            .unwrap();
+        assert_eq!(
+            actual.generator.checkpoint_value(),
+            expected.generator.checkpoint_value()
+        );
+        assert_eq!(
+            actual.generator_adam.checkpoint_value(),
+            expected.generator_adam.checkpoint_value()
+        );
+        assert_eq!(actual.blueprint, original_blueprint);
+        assert_eq!(actual.analyzer.checkpoint_value(), original_analyzer);
+    }
+
+    #[test]
+    fn momentary_generator_uses_only_z2_gradients() {
+        let mut actual = trainer();
+        let adapter =
+            PlayerBaselineAdapter::new(actual.blueprint.clone(), actual.baseline_config).unwrap();
+        let state = adapter.initialize_player();
+        let baseline = state.baseline();
+        let decisions = [decision(600), decision(10000)];
+        let mut expected = actual.clone();
+        let mut noise = expected.noise;
+        let mut batch = GeneratorGradientBatch::new(&expected.generator);
+        for (observation, legal) in &decisions {
+            let posterior = expected
+                .analyzer
+                .infer_encoded(observation, baseline)
+                .unwrap();
+            let prior_noise = noise.sample(expected.generator.latent_config().dimension());
+            let post_noise = noise.sample(expected.generator.latent_config().dimension());
+            let prior = posterior.prior().sample(&prior_noise).unwrap();
+            let post = posterior.posterior().sample(&post_noise).unwrap();
+            for profile in [&prior, &post] {
+                batch
+                    .accumulate_encoded(&expected.generator, profile, observation, legal)
+                    .unwrap();
+            }
+        }
+        expected
+            .generator_adam
+            .apply_batch(&mut expected.generator, batch)
+            .unwrap();
+        actual
+            .train_momentary_decisions(baseline, &decisions)
+            .unwrap();
+        assert_eq!(
+            actual.generator.checkpoint_value(),
+            expected.generator.checkpoint_value()
+        );
+        assert_eq!(
+            actual.generator_adam.checkpoint_value(),
+            expected.generator_adam.checkpoint_value()
+        );
+    }
+
+    #[test]
+    fn explicit_v5_conversion_preserves_blueprint_and_rejects_later_phases() {
+        let data = dataset();
+        let partitions = DatasetPartitions::canonical_for_test(&data);
+        let episode = TrainingEpisodeConfig::new(3, 3).unwrap();
+        let mut trainer = trainer();
+        let mut provider = |_: u64,
+                            _: &crate::behavioural::HandId,
+                            _: u32|
+         -> Result<_, &'static str> { Ok(decision(600).1) };
+        trainer
+            .train_blueprint_epoch(&data, &[42], &partitions, episode, &mut provider)
+            .unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "lechiffre-v5-conversion-{}-{}.json",
+            std::process::id(),
+            trainer.model_id().unwrap()
+        ));
+        let old = path.with_extension("v5.json");
+        let converted = path.with_extension("v6.json");
+        let rejected = path.with_extension("rejected.json");
+        trainer.save_checkpoint(&path).unwrap();
+        let original: Value = serde_json::from_reader(File::open(&path).unwrap()).unwrap();
+        let mut legacy = original.clone();
+        legacy["format"] = json!("lechiffre.hierarchical.checkpoint.v5");
+        legacy["model_id"] = json!(trainer.model_id_for_version(5).unwrap());
+        legacy["optimization"] =
+            json!({"blueprint_batch_decisions":4,"z0_weight":1.0,"z1_weight":1.0,"z2_weight":1.0});
+        std::fs::write(&old, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert!(HierarchicalTrainer::load_checkpoint(&old).is_err());
+        let restored = HierarchicalTrainer::convert_v5_blueprint(&old, &converted).unwrap();
+        let actual: Value = serde_json::from_reader(File::open(&converted).unwrap()).unwrap();
+        assert_eq!(actual, original);
+        assert_eq!(
+            restored
+                .evaluate_blueprint(&data, &partitions, &mut provider)
+                .unwrap(),
+            trainer
+                .evaluate_blueprint(&data, &partitions, &mut provider)
+                .unwrap()
+        );
+        assert!(HierarchicalTrainer::convert_v5_blueprint(&old, &converted).is_err());
+        assert!(HierarchicalTrainer::convert_v5_blueprint(&path, &rejected).is_err());
+        legacy["epochs"]["personalization"] = json!(1);
+        std::fs::write(&old, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert!(HierarchicalTrainer::convert_v5_blueprint(&old, &rejected).is_err());
+        assert!(!rejected.exists());
+        legacy["epochs"]["personalization"] = json!(0);
+        legacy["model_id"] = json!("invalid");
+        std::fs::write(&old, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert!(HierarchicalTrainer::convert_v5_blueprint(&old, &rejected).is_err());
+        assert!(!rejected.exists());
+        for file in [path, old, converted] {
+            std::fs::remove_file(file).unwrap();
+        }
     }
 
     #[test]
@@ -1894,6 +2093,7 @@ mod tests {
             "lechiffre.hierarchical.checkpoint.v2",
             "lechiffre.hierarchical.checkpoint.v3",
             "lechiffre.hierarchical.checkpoint.v4",
+            "lechiffre.hierarchical.checkpoint.v5",
         ] {
             obsolete["format"] = json!(obsolete_version);
             std::fs::write(&invalid_path, serde_json::to_vec(&obsolete).unwrap()).unwrap();
