@@ -1,0 +1,879 @@
+//! Local Best Response (LBR) — a lower bound on a policy's exploitability
+//! (Lisý & Bowling 2017, "Eqilibrium Approximation Quality of Current
+//! No-Limit Poker Bots").
+//!
+//! The LBR agent knows the bot's exact policy. It tracks the bot's range with
+//! Bayes updates using the bot's true per-combo action probabilities (no
+//! floor — the policy is known, not estimated), and at each of its own
+//! decisions greedily maximizes expected value under the assumption that both
+//! players check/call to showdown afterwards: calls are valued by showdown
+//! equity against the tracked range, bets by fold equity against the range's
+//! fold probability plus showdown equity against the continuing (non-folding)
+//! part of the range. Its average winnings lower-bound what a true best
+//! response would win — i.e. how exploitable the bot really is.
+//!
+//! Harness: heads-up blind-vs-blind inside the blueprint's native game (any
+//! other seats fold on their first action), LBR alternating between the two
+//! blind seats. Reported in mbb/hand: 0 = unexploitable by this probe.
+
+use crate::abstraction::AbsAction;
+use crate::bot::Policy;
+use crate::cards::{fresh_deck, Card};
+use crate::engine::{Hand, HandConfig, PlayerAction};
+use crate::eval::eval_hole_board;
+use crate::search::{all_combos, NUM_COMBOS};
+use crate::table::Table;
+use rand::rngs::SmallRng;
+use rand::seq::SliceRandom;
+use rand::{Rng, SeedableRng};
+use rayon::prelude::*;
+
+/// The LBR agent's belief over the bot's hole cards.
+pub struct BotRange {
+    pub weights: Vec<f64>,
+}
+
+impl Default for BotRange {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BotRange {
+    pub fn new() -> BotRange {
+        BotRange {
+            weights: vec![1.0; NUM_COMBOS],
+        }
+    }
+
+    /// Zero out combos containing any of `cards` (board, or LBR's own holes).
+    pub fn exclude(&mut self, combos: &[[Card; 2]], cards: &[Card]) {
+        for (i, combo) in combos.iter().enumerate() {
+            if combo.iter().any(|c| cards.contains(c)) {
+                self.weights[i] = 0.0;
+            }
+        }
+    }
+}
+
+pub struct Lbr<'a> {
+    policy: &'a Policy,
+    combos: Vec<[Card; 2]>,
+    /// Board completions sampled per equity estimate (exact on the river).
+    runouts: u32,
+}
+
+impl Lbr<'_> {
+    pub fn new(policy: &Policy, runouts: u32) -> Lbr<'_> {
+        Lbr {
+            policy,
+            combos: all_combos(),
+            runouts,
+        }
+    }
+
+    /// Probability the bot plays `acts[idx]` at this infoset holding `combo`
+    /// — mirrors `Policy::act_blueprint` exactly, including its check/call
+    /// fallback on unseen or mismatched infosets.
+    fn action_prob(&self, ci: usize, board: &[Card], hist: &[u8], acts: &[AbsAction], idx: usize) -> f64 {
+        let mut rng = SmallRng::seed_from_u64(0x1B12_5EED ^ ci as u64);
+        let bucket = self.policy.abs.bucket(self.combos[ci], board, &mut rng);
+        if let Some(s) = self.policy.blueprint.get(bucket, hist) {
+            if s.len() == acts.len() {
+                let total: f64 = s.iter().map(|&x| x as f64).sum();
+                if total > 0.0 {
+                    return s[idx] as f64 / total;
+                }
+            }
+        }
+        if acts[idx] == AbsAction::CheckCall {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
+    /// Bayes-update the bot's range after watching it take `acts[taken_idx]`
+    /// at the (pre-action) state `h` with history `hist`.
+    pub fn observe(&self, range: &mut BotRange, h: &Hand, hist: &[u8], acts: &[AbsAction], taken_idx: usize) {
+        let board = h.board().to_vec();
+        range.weights = range
+            .weights
+            .par_iter()
+            .enumerate()
+            .map(|(ci, &w)| {
+                if w <= 0.0 {
+                    return 0.0;
+                }
+                w * self.action_prob(ci, &board, hist, acts, taken_idx)
+            })
+            .collect();
+    }
+
+    /// Hero's probability of winning at showdown (ties count half) against a
+    /// weighted range if both check down: remaining board cards are sampled
+    /// (`runouts` completions), exact when the board is already complete.
+    pub fn range_equity(&self, hole: [Card; 2], board: &[Card], weights: &[f64], rng: &mut SmallRng) -> f64 {
+        let mut used = [false; 52];
+        used[hole[0] as usize] = true;
+        used[hole[1] as usize] = true;
+        for &c in board {
+            used[c as usize] = true;
+        }
+        let mut stock: Vec<Card> = (0..52).filter(|&c| !used[c as usize]).collect();
+        let need = 5 - board.len();
+        let mut full = [0u8; 5];
+        full[..board.len()].copy_from_slice(board);
+        let iters = if need == 0 { 1 } else { self.runouts.max(1) };
+
+        let mut num = 0.0;
+        let mut den = 0.0;
+        for _ in 0..iters {
+            let mut on_runout = [false; 52];
+            for k in 0..need {
+                let j = rng.random_range(k..stock.len());
+                stock.swap(k, j);
+                full[board.len() + k] = stock[k];
+                on_runout[stock[k] as usize] = true;
+            }
+            let hero = eval_hole_board(&hole, &full);
+            for (ci, combo) in self.combos.iter().enumerate() {
+                let w = weights[ci];
+                if w <= 0.0
+                    || used[combo[0] as usize]
+                    || used[combo[1] as usize]
+                    || on_runout[combo[0] as usize]
+                    || on_runout[combo[1] as usize]
+                {
+                    continue;
+                }
+                let v = eval_hole_board(combo, &full);
+                num += w * if hero > v {
+                    1.0
+                } else if hero == v {
+                    0.5
+                } else {
+                    0.0
+                };
+                den += w;
+            }
+        }
+        if den > 0.0 {
+            num / den
+        } else {
+            0.5
+        }
+    }
+
+    /// Greedy LBR action at the table's current decision (LBR to act).
+    ///
+    /// All EVs are deltas against folding (= 0): chips already in the pot are
+    /// sunk, so winning them back counts as gain.
+    pub fn action(&self, table: &Table, range: &BotRange, bot_seat: usize, rng: &mut SmallRng) -> AbsAction {
+        let h = &table.real;
+        let me = h.to_act();
+        let hole = h.hole(me);
+        let board = h.board();
+        let wp = self.range_equity(hole, board, &range.weights, rng);
+        let pot0 = h.pot() as f64;
+        let asked = h.to_call().min(h.stack(me)) as f64;
+
+        let mut best = AbsAction::CheckCall;
+        let mut best_ev = wp * pot0 - (1.0 - wp) * asked;
+        if h.to_call() > 0 && best_ev < 0.0 {
+            best = AbsAction::Fold;
+            best_ev = 0.0;
+        }
+
+        if h.all_in(bot_seat) {
+            return best; // no live opponent decision: betting adds nothing
+        }
+        for a in self.policy.abs.abstract_actions(&table.shadow) {
+            if !matches!(a, AbsAction::Bet(_) | AbsAction::AllIn) {
+                continue;
+            }
+            let act = self.policy.abs.concrete(&table.shadow, a);
+            let PlayerAction::RaiseTo(x) = act else {
+                continue;
+            };
+            let mut sim = table.shadow.clone();
+            sim.apply(act);
+            if sim.is_terminal() || sim.to_act() != bot_seat {
+                continue;
+            }
+            let resp_acts = self.policy.abs.abstract_actions(&sim);
+            let Some(fold_idx) = resp_acts.iter().position(|&r| r == AbsAction::Fold) else {
+                continue;
+            };
+            let mut hist2 = table.hist.clone();
+            hist2.push(a.token());
+
+            let board_v = board.to_vec();
+            let res: Vec<(f64, f64)> = range
+                .weights
+                .par_iter()
+                .enumerate()
+                .map(|(ci, &w)| {
+                    if w <= 0.0 {
+                        return (0.0, 0.0);
+                    }
+                    let pf = self.action_prob(ci, &board_v, &hist2, &resp_acts, fold_idx);
+                    (w * pf, w * (1.0 - pf))
+                })
+                .collect();
+            let folded: f64 = res.iter().map(|r| r.0).sum();
+            let cont: Vec<f64> = res.iter().map(|r| r.1).collect();
+            let total = folded + cont.iter().sum::<f64>();
+            if total <= 0.0 {
+                continue;
+            }
+            let fp = folded / total;
+
+            // Effective raise: capped by what the opponent can match.
+            let opp_commit = h.street_commit(bot_seat);
+            let x_eff = x.min(opp_commit + h.stack(bot_seat));
+            let risk = x_eff.saturating_sub(h.street_commit(me)) as f64;
+            let gain = x_eff.saturating_sub(opp_commit) as f64;
+            let wp2 = if fp < 1.0 {
+                self.range_equity(hole, board, &cont, rng)
+            } else {
+                0.5
+            };
+            let ev = fp * pot0 + (1.0 - fp) * (wp2 * (pot0 + gain) - (1.0 - wp2) * risk);
+            if ev > best_ev {
+                best_ev = ev;
+                best = a;
+            }
+        }
+        best
+    }
+}
+
+#[derive(Debug)]
+pub struct LbrResult {
+    pub hands: u64,
+    /// LBR's mean winnings in milli-big-blinds per hand: a lower bound on
+    /// the policy's exploitability.
+    pub mbb_per_hand: f64,
+    pub ci95: f64,
+}
+
+/// Run the LBR probe: LBR and the bot in the two blind seats (alternating by
+/// hand), every other seat folds. Stacks reset per hand, button random.
+pub fn run_lbr(policy: &Policy, cfg: &HandConfig, hands: u64, runouts: u32, seed: u64) -> LbrResult {
+    let n = cfg.num_players;
+    let bb = cfg.bb as f64;
+    let lbr = Lbr::new(policy, runouts);
+    let results: Vec<f64> = (0..hands)
+        .into_par_iter()
+        .map(|i| {
+            let mut rng =
+                SmallRng::seed_from_u64(seed ^ i.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x1B12);
+            let button = rng.random_range(0..n);
+            let (sb, bbs) = if n == 2 {
+                (button, (button + 1) % n)
+            } else {
+                ((button + 1) % n, (button + 2) % n)
+            };
+            let (lbr_seat, bot_seat) = if i % 2 == 0 { (sb, bbs) } else { (bbs, sb) };
+            let mut deck = fresh_deck();
+            deck.shuffle(&mut rng);
+            let mut table = Table::new(cfg, button, deck);
+            let mut range = BotRange::new();
+            range.exclude(&lbr.combos, &table.real.hole(lbr_seat));
+
+            let mut guard = 0;
+            while !table.real.is_terminal() {
+                guard += 1;
+                assert!(guard < 200, "LBR hand did not terminate");
+                let p = table.real.to_act();
+                let street_before = table.real.street();
+                if p == bot_seat {
+                    let acts = policy.abs.abstract_actions(&table.shadow);
+                    let a = policy.act_blueprint(&table.shadow, &table.hist, &mut rng);
+                    if let Some(idx) = acts.iter().position(|&x| x == a) {
+                        lbr.observe(&mut range, &table.shadow, &table.hist, &acts, idx);
+                    }
+                    table.apply_abs(a, &policy.abs);
+                } else if p == lbr_seat {
+                    let a = lbr.action(&table, &range, bot_seat, &mut rng);
+                    table.apply_abs(a, &policy.abs);
+                } else {
+                    table.apply_abs(AbsAction::Fold, &policy.abs);
+                }
+                if table.real.street() != street_before {
+                    range.exclude(&lbr.combos, table.real.board());
+                }
+            }
+            table.real.utilities()[lbr_seat] as f64 / bb * 1000.0
+        })
+        .collect();
+
+    let mean = results.iter().sum::<f64>() / results.len() as f64;
+    let var = results.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>()
+        / (results.len().saturating_sub(1)) as f64;
+    LbrResult {
+        hands,
+        mbb_per_hand: mean,
+        ci95: 1.96 * (var / results.len() as f64).sqrt(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multiway probe
+// ---------------------------------------------------------------------------
+
+impl Lbr<'_> {
+    /// Hero's probability of beating EVERY live opponent at showdown if all
+    /// check down, each opponent's hand drawn from its own tracked range
+    /// (joint draw per runout, card-removal aware; ties count half).
+    /// `ranges[j]` is None for seats that are not live opponents.
+    pub fn joint_equity(
+        &self,
+        hole: [Card; 2],
+        board: &[Card],
+        ranges: &[Option<&[f64]>],
+        rng: &mut SmallRng,
+    ) -> f64 {
+        let mut used = [false; 52];
+        used[hole[0] as usize] = true;
+        used[hole[1] as usize] = true;
+        for &c in board {
+            used[c as usize] = true;
+        }
+        let stock: Vec<Card> = (0..52).filter(|&c| !used[c as usize]).collect();
+        let need = 5 - board.len();
+        let mut full = [0u8; 5];
+        full[..board.len()].copy_from_slice(board);
+        let opps: Vec<&[f64]> = ranges.iter().flatten().copied().collect();
+        if opps.is_empty() {
+            return 1.0;
+        }
+        // Cumulative weights per opponent for O(log n) weighted draws.
+        let cums: Vec<Vec<f64>> = opps
+            .iter()
+            .map(|w| {
+                let mut acc = 0.0;
+                w.iter()
+                    .map(|&x| {
+                        acc += x.max(0.0);
+                        acc
+                    })
+                    .collect()
+            })
+            .collect();
+        if cums.iter().any(|c| *c.last().unwrap() <= 0.0) {
+            return 0.5;
+        }
+        let iters = self.runouts.max(1) as usize * 4;
+        let mut stock = stock;
+        let mut score = 0.0;
+        let mut count = 0.0;
+        'outer: for _ in 0..iters {
+            let mut taken = used;
+            for k in 0..need {
+                let j = rng.random_range(k..stock.len());
+                stock.swap(k, j);
+                full[board.len() + k] = stock[k];
+                taken[stock[k] as usize] = true;
+            }
+            let hero = eval_hole_board(&hole, &full);
+            let mut best_opp = 0u32;
+            let mut ties = 0u32;
+            for cum in &cums {
+                // Rejection-sample a combo not colliding with dealt cards.
+                let mut combo = None;
+                for _ in 0..16 {
+                    let r = rng.random::<f64>() * cum.last().unwrap();
+                    let ci = cum.partition_point(|&c| c < r).min(NUM_COMBOS - 1);
+                    let c = self.combos[ci];
+                    if !taken[c[0] as usize] && !taken[c[1] as usize] {
+                        combo = Some(c);
+                        break;
+                    }
+                }
+                let Some(c) = combo else { continue 'outer };
+                taken[c[0] as usize] = true;
+                taken[c[1] as usize] = true;
+                let v = eval_hole_board(&c, &full);
+                if v > best_opp {
+                    best_opp = v;
+                    ties = 1;
+                } else if v == best_opp {
+                    ties += 1;
+                }
+            }
+            score += if hero > best_opp {
+                1.0
+            } else if hero == best_opp {
+                1.0 / (ties as f64 + 1.0)
+            } else {
+                0.0
+            };
+            count += 1.0;
+        }
+        if count > 0.0 {
+            score / count
+        } else {
+            0.5
+        }
+    }
+
+    /// Greedy LBR action at a multiway decision. `ranges[j]` holds the
+    /// tracked range of bot seat j (None for LBR's own seat). Any sane
+    /// decision rule yields a valid lower bound — what LBR actually wins is
+    /// what is reported — so the valuation is deliberately simple:
+    /// check/call is valued by joint showdown equity vs every live opponent,
+    /// a bet by the product of the opponents' fold probabilities (each
+    /// computed at the exact state it would face if everyone before it
+    /// folded) plus joint equity vs the continuing parts of their ranges.
+    pub fn action_multiway(
+        &self,
+        table: &Table,
+        ranges: &[Option<BotRange>],
+        rng: &mut SmallRng,
+    ) -> AbsAction {
+        let h = &table.real;
+        let me = h.to_act();
+        let n = h.num_players();
+        let hole = h.hole(me);
+        let board = h.board();
+        let live: Vec<usize> = (0..n).filter(|&j| j != me && !h.folded(j)).collect();
+        let live_ranges: Vec<Option<&[f64]>> = (0..n)
+            .map(|j| {
+                if j != me && !h.folded(j) {
+                    ranges[j].as_ref().map(|r| r.weights.as_slice())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let wp = self.joint_equity(hole, board, &live_ranges, rng);
+        let pot0 = h.pot() as f64;
+        let asked = h.to_call().min(h.stack(me)) as f64;
+
+        let mut best = AbsAction::CheckCall;
+        let mut best_ev = wp * pot0 - (1.0 - wp) * asked;
+        if h.to_call() > 0 && best_ev < 0.0 {
+            best = AbsAction::Fold;
+            best_ev = 0.0;
+        }
+        if live.iter().all(|&j| h.all_in(j)) {
+            return best;
+        }
+        for a in self.policy.abs.abstract_actions(&table.shadow) {
+            if !matches!(a, AbsAction::Bet(_) | AbsAction::AllIn) {
+                continue;
+            }
+            let act = self.policy.abs.concrete(&table.shadow, a);
+            let PlayerAction::RaiseTo(x) = act else {
+                continue;
+            };
+            let mut sim = table.shadow.clone();
+            sim.apply(act);
+            if sim.is_terminal() {
+                continue;
+            }
+            let mut hist2 = table.hist.clone();
+            hist2.push(a.token());
+            let board_v = board.to_vec();
+
+            // Walk the responders in order along the everyone-folds line.
+            let mut p_all_fold = 1.0;
+            let mut cont: Vec<Option<Vec<f64>>> = vec![None; n];
+            let mut gain = 0.0;
+            let mut any = false;
+            let mut guard = 0;
+            while !sim.is_terminal() && sim.to_act() != me {
+                guard += 1;
+                if guard > n {
+                    break;
+                }
+                let j = sim.to_act();
+                let resp_acts = self.policy.abs.abstract_actions(&sim);
+                let Some(fold_idx) = resp_acts.iter().position(|&r| r == AbsAction::Fold) else {
+                    break;
+                };
+                let Some(rj) = ranges[j].as_ref() else { break };
+                let res: Vec<(f64, f64)> = rj
+                    .weights
+                    .par_iter()
+                    .enumerate()
+                    .map(|(ci, &w)| {
+                        if w <= 0.0 {
+                            return (0.0, 0.0);
+                        }
+                        let pf = self.action_prob(ci, &board_v, &hist2, &resp_acts, fold_idx);
+                        (w * pf, w * (1.0 - pf))
+                    })
+                    .collect();
+                let folded: f64 = res.iter().map(|r| r.0).sum();
+                let cw: Vec<f64> = res.iter().map(|r| r.1).collect();
+                let total = folded + cw.iter().sum::<f64>();
+                if total <= 0.0 {
+                    break;
+                }
+                let pf = folded / total;
+                p_all_fold *= pf;
+                let x_eff = x.min(h.street_commit(j) + h.stack(j));
+                gain += (1.0 - pf) * x_eff.saturating_sub(h.street_commit(j)) as f64;
+                cont[j] = Some(cw);
+                any = true;
+                sim.apply(self.policy.abs.concrete(&sim, AbsAction::Fold));
+                hist2.push(AbsAction::Fold.token());
+            }
+            if !any {
+                continue;
+            }
+            let risk = x.min(h.street_commit(me) + h.stack(me)).saturating_sub(h.street_commit(me)) as f64;
+            let cont_refs: Vec<Option<&[f64]>> = cont.iter().map(|c| c.as_deref()).collect();
+            let wp2 = if p_all_fold < 1.0 {
+                self.joint_equity(hole, board, &cont_refs, rng)
+            } else {
+                0.5
+            };
+            let ev = p_all_fold * pot0
+                + (1.0 - p_all_fold) * (wp2 * (pot0 + gain) - (1.0 - wp2) * risk);
+            if ev > best_ev {
+                best_ev = ev;
+                best = a;
+            }
+        }
+        best
+    }
+}
+
+/// Run the multiway LBR probe: LBR in one seat (rotating every hand),
+/// the bot in every other seat, all playing to showdown as normal. LBR
+/// tracks each bot seat's range with exact Bayes updates on the shared
+/// public history. Reported in mbb/hand for the LBR seat: a lower bound on
+/// the policy's exploitability that, unlike `run_lbr`, sees multiway pots.
+/// Bit-for-bit reproducible per seed when run single-threaded
+/// (RAYON_NUM_THREADS=1); parallel runs vary by ~1-3% of the bound
+/// (measured 2026-08-25, cause not yet isolated; `eval` does not vary).
+pub fn run_lbr_multiway(
+    policy: &Policy,
+    cfg: &HandConfig,
+    hands: u64,
+    runouts: u32,
+    seed: u64,
+    search: Option<crate::bot::SearchParams>,
+) -> LbrResult {
+    let n = cfg.num_players;
+    let bb = cfg.bb as f64;
+    let lbr = Lbr::new(policy, runouts);
+    let train_cfg = crate::cfr::TrainConfig {
+        hand: cfg.clone(),
+        prune_after: u64::MAX,
+        ..crate::cfr::TrainConfig::default()
+    };
+    let results: Vec<f64> = (0..hands)
+        .into_par_iter()
+        .map(|i| {
+            let mut rng =
+                SmallRng::seed_from_u64(seed ^ i.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x6B12);
+            let button = rng.random_range(0..n);
+            let lbr_seat = (i % n as u64) as usize;
+            let mut deck = fresh_deck();
+            deck.shuffle(&mut rng);
+            let mut table = Table::new(cfg, button, deck);
+            let mut ranges: Vec<Option<BotRange>> = (0..n)
+                .map(|j| {
+                    (j != lbr_seat).then(|| {
+                        let mut r = BotRange::new();
+                        r.exclude(&lbr.combos, &table.real.hole(lbr_seat));
+                        r
+                    })
+                })
+                .collect();
+
+            // With `search`, the bot seats resolve postflop decisions
+            // online (shared public-history range tracker, one search
+            // session per seat) so the LBR faces the bot as it actually
+            // plays. The LBR's own range model of the bot stays the
+            // blueprint (it cannot see the resolved strategy).
+            let mut tracker = search.map(|_| crate::search::RangeTracker::new(n));
+            let mut sessions: Vec<crate::bot::SearchSession> =
+                (0..n).map(|_| crate::bot::SearchSession::new()).collect();
+            let mut guard = 0;
+            while !table.real.is_terminal() {
+                guard += 1;
+                assert!(guard < 400, "multiway LBR hand did not terminate");
+                let p = table.real.to_act();
+                let street_before = table.real.street();
+                let a = if p == lbr_seat {
+                    lbr.action_multiway(&table, &ranges, &mut rng)
+                } else {
+                    let acts = policy.abs.abstract_actions(&table.shadow);
+                    let a = match (search, tracker.as_ref()) {
+                        (Some(params), Some(tr)) => policy.act_with_search(
+                            &table.real,
+                            &table.shadow,
+                            &table.hist,
+                            params,
+                            &train_cfg,
+                            Some(tr),
+                            Some(&mut sessions[p]),
+                            Some(&table.round),
+                            &mut rng,
+                        ),
+                        _ => policy.act_blueprint(&table.shadow, &table.hist, &mut rng),
+                    };
+                    if let (Some(idx), Some(r)) =
+                        (acts.iter().position(|&x| x == a), ranges[p].as_mut())
+                    {
+                        lbr.observe(r, &table.shadow, &table.hist, &acts, idx);
+                    }
+                    a
+                };
+                if let Some(tr) = tracker.as_mut() {
+                    tr.observe(p, a, &table.shadow, &table.hist, &policy.blueprint, &policy.abs);
+                }
+                table.apply_abs(a, &policy.abs);
+                if table.real.street() != street_before {
+                    for r in ranges.iter_mut().flatten() {
+                        r.exclude(&lbr.combos, table.real.board());
+                    }
+                    if let Some(tr) = tracker.as_mut() {
+                        tr.exclude(table.real.board());
+                    }
+                }
+            }
+            table.real.utilities()[lbr_seat] as f64 / bb * 1000.0
+        })
+        .collect();
+
+    let mean = results.iter().sum::<f64>() / results.len() as f64;
+    let var = results.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>()
+        / (results.len().saturating_sub(1)) as f64;
+    LbrResult {
+        hands,
+        mbb_per_hand: mean,
+        ci95: 1.96 * (var / results.len() as f64).sqrt(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests (written first, TDD)
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::abstraction::{preflop_bucket, AbsConfig, Abstraction};
+    use crate::cards::parse_cards;
+    use crate::cfr::{make_key, Blueprint};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn abs_small() -> Abstraction {
+        Abstraction::new(AbsConfig {
+            postflop_buckets: 6,
+            equity_rollouts: 40,
+            dist_runouts: 8,
+            runout_rollouts: 20,
+            cache_cap: 500_000,
+            menu: crate::abstraction::MenuShape::Wide,
+        })
+    }
+
+    fn empty_policy() -> Policy {
+        Policy::new(
+            Blueprint {
+                strategies: Default::default(),
+                iterations: 0,
+                num_players: 2,
+                abs_cfg: AbsConfig::default(),
+                centroids: None,
+            },
+            Arc::new(abs_small()),
+        )
+    }
+
+    /// Rig a deck: `front` cards first, the rest in order.
+    fn rigged_deck(front: &str) -> [Card; 52] {
+        let front = parse_cards(front).unwrap();
+        let mut deck = fresh_deck();
+        let mut used = [false; 52];
+        for (i, &c) in front.iter().enumerate() {
+            deck[i] = c;
+            used[c as usize] = true;
+        }
+        let mut idx = front.len();
+        for c in 0..52u8 {
+            if !used[c as usize] {
+                deck[idx] = c;
+                idx += 1;
+            }
+        }
+        deck
+    }
+
+    /// HU table walked to the river with p1 shoving: p0 (LBR) to act.
+    /// Deck layout: p0 = first two cards, p1 = next two, board = next five.
+    fn river_facing_shove(front: &str, policy: &Policy) -> Table {
+        let cfg = HandConfig {
+            num_players: 2,
+            stack: 2_000,
+            sb: 50,
+            bb: 100,
+        };
+        let mut t = Table::new(&cfg, 0, rigged_deck(front));
+        // p0 limps, p1 checks -> flop; p1/p0 check down to the river.
+        for _ in 0..6 {
+            t.apply_abs(AbsAction::CheckCall, &policy.abs);
+        }
+        assert_eq!(t.real.street(), crate::engine::Street::River);
+        assert_eq!(t.real.to_act(), 1);
+        t.apply_abs(AbsAction::AllIn, &policy.abs);
+        assert_eq!(t.real.to_act(), 0);
+        assert!(!t.real.is_terminal());
+        t
+    }
+
+    #[test]
+    fn range_equity_is_exact_on_the_river() {
+        let policy = empty_policy();
+        let lbr = Lbr::new(&policy, 10);
+        let mut rng = SmallRng::seed_from_u64(7);
+        let board = parse_cards("Qs Js Ts 3h 4d").unwrap();
+        let uniform = vec![1.0; NUM_COMBOS];
+
+        // Royal flush: beats every combo, no ties possible.
+        let nuts = parse_cards("As Ks").unwrap();
+        let wp = lbr.range_equity([nuts[0], nuts[1]], &board, &uniform, &mut rng);
+        assert!((wp - 1.0).abs() < 1e-12, "royal flush wp must be 1, got {wp}");
+
+        // Six-high air: loses to almost everything.
+        let air = parse_cards("6c 2h").unwrap();
+        let wp = lbr.range_equity([air[0], air[1]], &board, &uniform, &mut rng);
+        assert!(wp < 0.1, "six-high wp must be tiny, got {wp}");
+    }
+
+    /// After watching a bot that only raises AA take the raise action, the
+    /// tracked range must put zero weight on junk and keep AA.
+    #[test]
+    fn observe_concentrates_range_exactly() {
+        let abs = abs_small();
+        let h = Hand::new(
+            &HandConfig::default(),
+            0,
+            rigged_deck("2c 7d"), // cards irrelevant: we observe seat 3
+        );
+        let acts = abs.abstract_actions(&h);
+        let aa = preflop_bucket([51, 50]);
+        let raise_idx = acts
+            .iter()
+            .position(|a| matches!(a, AbsAction::Bet(_)))
+            .unwrap();
+        let mut strategies = crate::cfr::StrategyMap::default();
+        for bucket in 0..169u16 {
+            let mut s = vec![0.0f32; acts.len()];
+            if bucket == aa {
+                s[raise_idx] = 1.0;
+            } else {
+                s[0] = 1.0;
+            }
+            strategies.insert(make_key(bucket, &[]).to_vec(), s);
+        }
+        let policy = Policy::new(
+            Blueprint {
+                strategies,
+                iterations: 1,
+                num_players: 6,
+                abs_cfg: AbsConfig::default(),
+                centroids: None,
+            },
+            Arc::new(abs),
+        );
+        let lbr = Lbr::new(&policy, 10);
+        let mut range = BotRange::new();
+        lbr.observe(&mut range, &h, &[], &acts, raise_idx);
+
+        let aa_combo = parse_cards("As Ah").unwrap();
+        let junk = parse_cards("7c 2d").unwrap();
+        assert!(range.weights[crate::search::combo_index(aa_combo[0], aa_combo[1])] > 0.99);
+        assert_eq!(
+            range.weights[crate::search::combo_index(junk[0], junk[1])],
+            0.0,
+            "exact Bayes update must zero out non-raising hands"
+        );
+    }
+
+    #[test]
+    fn lbr_calls_shove_with_nuts_and_folds_air() {
+        let policy = empty_policy();
+        let lbr = Lbr::new(&policy, 20);
+        let mut rng = SmallRng::seed_from_u64(3);
+
+        // Hero holds the royal flush: must call.
+        let t = river_facing_shove("As Ks 2c 7d Qs Js Ts 3h 4d", &policy);
+        let mut range = BotRange::new();
+        range.exclude(&lbr.combos, &t.real.hole(0));
+        range.exclude(&lbr.combos, t.real.board());
+        assert_eq!(lbr.action(&t, &range, 1, &mut rng), AbsAction::CheckCall);
+
+        // Hero holds six-high air: must fold.
+        let t = river_facing_shove("6c 2h Ah Kd Qs Js Ts 3h 4d", &policy);
+        let mut range = BotRange::new();
+        range.exclude(&lbr.combos, &t.real.hole(0));
+        range.exclude(&lbr.combos, t.real.board());
+        assert_eq!(lbr.action(&t, &range, 1, &mut rng), AbsAction::Fold);
+    }
+
+    /// A calling station (empty blueprint -> check/call fallback) must be
+    /// heavily exploited by LBR: pure value betting with exact equities.
+    #[test]
+    fn lbr_crushes_a_calling_station() {
+        let policy = empty_policy();
+        let cfg = HandConfig {
+            num_players: 2,
+            ..HandConfig::default()
+        };
+        let r = run_lbr(&policy, &cfg, 600, 16, 99);
+        assert_eq!(r.hands, 600);
+        assert!(
+            r.mbb_per_hand - r.ci95 > 1_000.0,
+            "LBR must crush a calling station, got {:+.0} +/- {:.0} mbb/hand",
+            r.mbb_per_hand,
+            r.ci95
+        );
+    }
+
+    /// Multiway probe: a table of five calling stations must be crushed,
+    /// the run must be bit-for-bit reproducible per seed, and joint equity
+    /// must be exact at the extremes.
+    #[test]
+    fn multiway_lbr_crushes_stations_and_is_deterministic() {
+        let policy = empty_policy();
+        let cfg = HandConfig::default(); // 6-max
+        let a = run_lbr_multiway(&policy, &cfg, 300, 12, 5, None);
+        let b = run_lbr_multiway(&policy, &cfg, 300, 12, 5, None);
+        assert_eq!(a.mbb_per_hand.to_bits(), b.mbb_per_hand.to_bits(), "not deterministic");
+        assert!(
+            a.mbb_per_hand - a.ci95 > 1_000.0,
+            "multiway LBR must crush five stations, got {:+.0} +/- {:.0}",
+            a.mbb_per_hand,
+            a.ci95
+        );
+    }
+
+    #[test]
+    fn joint_equity_extremes() {
+        let policy = empty_policy();
+        let lbr = Lbr::new(&policy, 10);
+        let mut rng = SmallRng::seed_from_u64(11);
+        let board = parse_cards("Qs Js Ts 3h 4d").unwrap();
+        let uniform = vec![1.0; NUM_COMBOS];
+        let ranges: Vec<Option<&[f64]>> =
+            vec![None, Some(&uniform), Some(&uniform), Some(&uniform), None, None];
+        let nuts = parse_cards("As Ks").unwrap();
+        let wp = lbr.joint_equity([nuts[0], nuts[1]], &board, &ranges, &mut rng);
+        assert!((wp - 1.0).abs() < 1e-12, "royal flush beats any three, got {wp}");
+        let air = parse_cards("6c 2h").unwrap();
+        let wp = lbr.joint_equity([air[0], air[1]], &board, &ranges, &mut rng);
+        assert!(wp < 0.02, "six-high vs three random hands, got {wp}");
+        // Versus nobody live: certain win.
+        let none: Vec<Option<&[f64]>> = vec![None; 6];
+        assert_eq!(lbr.joint_equity([air[0], air[1]], &board, &none, &mut rng), 1.0);
+    }
+}

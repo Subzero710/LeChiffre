@@ -1,0 +1,24 @@
+//! NoRegrets algorithms with an rs_poker-backed Hand compatibility API.
+pub mod ablate;
+pub mod abstraction;
+pub mod aivat;
+pub mod benchmark;
+pub mod bot;
+pub mod br;
+pub mod cards;
+pub mod cfr;
+pub mod clone;
+pub mod distill;
+pub mod engine;
+pub mod eval;
+pub mod flop;
+pub mod lbr;
+pub mod net;
+pub mod play;
+pub mod portfolio;
+pub mod river;
+pub mod search;
+pub mod slumbot;
+pub mod table;
+pub mod turn;
+pub mod valuenet;

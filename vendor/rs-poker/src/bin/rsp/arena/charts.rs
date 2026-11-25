@@ -69,7 +69,8 @@ pub fn run(args: ChartsArgs) -> Result<(), ChartsError> {
 /// field if present, else the file stem.
 fn config_label(config: &AgentConfig, path: &std::path::Path) -> String {
     let name = match config {
-        AgentConfig::AllIn { name, .. }
+        AgentConfig::Generated { name, .. }
+        | AgentConfig::AllIn { name, .. }
         | AgentConfig::Calling { name, .. }
         | AgentConfig::Folding { name, .. }
         | AgentConfig::Random { name, .. }
@@ -94,6 +95,11 @@ fn config_label(config: &AgentConfig, path: &std::path::Path) -> String {
 /// rather than an authoritative preflop range.
 fn resolve_preflop_config(config: &AgentConfig) -> (PreflopChartConfig, bool, Option<String>) {
     match config {
+        AgentConfig::Generated { .. } => (
+            PreflopChartConfig::with_single_position(PositionCharts::default()),
+            true,
+            Some("Application-provided agent: no declarative preflop chart available".to_string()),
+        ),
         AgentConfig::CfrPreflopChart { preflop_config, .. } => match preflop_config.resolve() {
             Ok(cfg) => (cfg, false, None),
             Err(e) => (

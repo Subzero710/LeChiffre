@@ -6,4 +6,15 @@ pub trait AgentGenerator {
     /// This method is called before each game to build a new agent.
     /// The `player_idx` parameter indicates which player position this agent is for.
     fn generate(&self, player_idx: usize, game_state: &GameState) -> Box<dyn Agent>;
+
+    /// Seed-aware construction for comparison runners. Existing generators
+    /// retain their behavior; stochastic external agents may override this.
+    fn generate_seeded(
+        &self,
+        player_idx: usize,
+        game_state: &GameState,
+        _seed: Option<u64>,
+    ) -> Box<dyn Agent> {
+        self.generate(player_idx, game_state)
+    }
 }

@@ -157,7 +157,8 @@ impl RotationBuilder {
 
 fn get_agent_name(config: &AgentConfig, fallback_name: &str) -> String {
     match config {
-        AgentConfig::AllIn { name, .. }
+        AgentConfig::Generated { name, .. }
+        | AgentConfig::AllIn { name, .. }
         | AgentConfig::Calling { name, .. }
         | AgentConfig::Folding { name, .. }
         | AgentConfig::Random { name, .. }

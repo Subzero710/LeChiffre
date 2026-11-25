@@ -41,6 +41,7 @@ pub trait Agent: Send {
 pub use all_in::{AllInAgent, AllInAgentGenerator};
 pub use calling::{CallingAgent, CallingAgentGenerator};
 pub use clone::{CloneAgent, CloneAgentGenerator};
+pub use config::ConfigAgentGenerator;
 pub use config::{AgentConfig, AgentConfigError, CfrExploration, ConfigAgentBuilder};
 pub use equity::{DEFAULT_EQUITY_ITERATIONS, EquityAgent};
 pub use folding::{FoldingAgent, FoldingAgentGenerator};

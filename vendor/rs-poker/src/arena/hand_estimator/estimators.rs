@@ -58,7 +58,8 @@ impl HandDistributionEstimator for KnownHandsEstimator {
 
 /// Estimator that assigns each opponent a uniform distribution over all combos
 /// (dead-card filtering happens at sample time). The no-ML "play against a
-/// range" baseline and the plumbing's test fixture.
+/// range" baseline and the plumbing's test fixture. Folded seats are also
+/// resampled: their real private cards must not become known dead cards.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UniformRandomEstimator;
 
@@ -74,7 +75,7 @@ impl HandDistributionEstimator for UniformRandomEstimator {
             all_hole_combos().into_iter().map(|c| (c, 1.0)).collect();
         let per_seat = (0..game_state.num_players)
             .map(|seat| {
-                if seat == perspective_idx || !seat_in_hand(game_state, seat) {
+                if seat == perspective_idx || game_state.hands[seat].count() < 2 {
                     None
                 } else {
                     Some(HandDistribution::Weighted(WeightedCombos {
@@ -128,6 +129,35 @@ mod tests {
         match ranges.get(0) {
             Some(HandDistribution::Weighted(w)) => assert_eq!(w.weights.len(), 1326),
             other => panic!("expected weighted, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn uniform_world_does_not_use_real_folded_cards_as_blockers() {
+        use super::super::sample_world;
+        use rand::{SeedableRng, rngs::StdRng};
+        let mut a = GameStateBuilder::new()
+            .num_players_with_stack(3, 100)
+            .blinds(2, 1)
+            .build()
+            .unwrap();
+        a.round_data.to_act_idx = 0;
+        for p in 0..3 {
+            a.hands[p] = Hand::new_with_cards(vec![
+                Card::from((2 * p) as u8),
+                Card::from((2 * p + 1) as u8),
+            ]);
+        }
+        a.player_active.disable(2);
+        let mut b = a.clone();
+        b.hands[2] = Hand::new_with_cards(vec![Card::from(7), Card::from(8)]);
+        let ar = UniformRandomEstimator.estimate(&a, None).await;
+        let br = UniformRandomEstimator.estimate(&b, None).await;
+        assert!(ar.get(2).is_some(), "folded private cards remain unknown");
+        for seed in 0..8 {
+            let aw = sample_world(&ar, &a, &mut StdRng::seed_from_u64(seed));
+            let bw = sample_world(&br, &b, &mut StdRng::seed_from_u64(seed));
+            assert_eq!(aw.hands, bw.hands);
         }
     }
 }

@@ -144,6 +144,79 @@ use super::fast_forward::{
 use super::hand_log::{HandLog, HandLogHistorian};
 use super::reward_context::ComputeRewardContext;
 
+#[cfg(test)]
+mod root_fast_forward_privacy_tests {
+    use super::*;
+    use crate::arena::cfr::{BasicCFRActionGenerator, MaxWidth};
+    use crate::arena::game_state::{Round, RoundData};
+    use crate::arena::hand_estimator::{GameLog, HandDistribution, HoleCombo, OpponentRanges};
+    use crate::arena::{GameStateBuilder, HandDistributionEstimator};
+    use crate::core::{Hand, PlayerBitSet};
+
+    struct FixedOpponent;
+    #[async_trait::async_trait]
+    impl HandDistributionEstimator for FixedOpponent {
+        async fn estimate(&self, _: &GameState, _: Option<&GameLog<'_>>) -> OpponentRanges {
+            let hand = Hand::new_from_str("KsKd").unwrap();
+            let cards: Vec<_> = hand.iter().collect();
+            OpponentRanges::new(vec![
+                None,
+                Some(HandDistribution::PointMass(HoleCombo::new(
+                    cards[0], cards[1],
+                ))),
+            ])
+        }
+    }
+
+    async fn strategy(actual_opponent: &str) -> Vec<f32> {
+        let board: Vec<_> = Hand::new_from_str("2c3h7s9dJc").unwrap().iter().collect();
+        let mut hero = Hand::new_from_str("AsAd").unwrap();
+        hero.extend(board.iter().copied());
+        let mut other = Hand::new_from_str(actual_opponent).unwrap();
+        other.extend(board.iter().copied());
+        let mut gs = GameStateBuilder::new()
+            .round(Round::River)
+            .round_data(RoundData::new_with_bets(
+                2,
+                PlayerBitSet::new(2),
+                0,
+                vec![0, 0],
+            ))
+            .stacks(vec![100, 100])
+            .player_bet(vec![100, 100])
+            .blinds(2, 1)
+            .hands(vec![hero, other])
+            .board(board)
+            .build()
+            .unwrap();
+        gs.starting_stacks = vec![200, 200].into();
+        gs.total_pot = 200;
+        let state = CFRState::new(gs.clone());
+        let mut agent = CFRAgentBuilder::<BasicCFRActionGenerator>::new()
+            .name("privacy-test")
+            .player_idx(0)
+            .cfr_state(state.clone())
+            .traversal_set(TraversalSet::new(2))
+            .budget(Arc::new(MaxWidth::new(vec![])))
+            .estimator(Arc::new(FixedOpponent))
+            .action_gen_config(())
+            .build();
+        agent.ensure_target_node();
+        agent.ensure_regret_matcher();
+        agent.explore_all_actions(&gs).await;
+        let mut strategy = vec![0.0; NUM_ACTION_INDICES];
+        assert!(state.node_current_strategy_into(agent.target_node_idx().unwrap(), &mut strategy));
+        strategy
+    }
+
+    #[tokio::test]
+    async fn root_fast_forward_uses_estimator_not_real_hidden_hands() {
+        // Hero AA beats actual KK and loses to actual 77 on this river.
+        // Both computations must instead use the SAME modeled KK opponent.
+        assert_eq!(strategy("KsKd").await, strategy("7c7d").await);
+    }
+}
+
 /// Write the per-slot mean over the samples a wave produced into `out`. Slots
 /// with zero samples (pruned / never explored) get `penalty`, matching invariant
 /// #1's full vector. Writes into a caller-owned buffer so the wave loop reuses
@@ -837,13 +910,14 @@ where
             };
 
             // ── Per-wave world (decision 2 + 9) ──
-            // Recursive waves play against a freshly sampled world (acting seat
-            // + board fixed). Fast-forward waves are leaves: never re-sample.
+            // Root fast-forward also needs a sampled world: its base state
+            // comes directly from the real table and contains hidden hands.
+            // Deeper fast-forward leaves inherit their parent's sampled world.
             // With KnownHandsEstimator the sample reproduces the real hands and
             // never touches the RNG, so behavior is byte-for-byte unchanged.
             // The ThreadRng lives only inside this sync block, never crossing an
             // await (keeps the explore future Send).
-            let wave_state: Option<GameState> = if fast_forward {
+            let wave_state: Option<GameState> = if fast_forward && self.depth > 0 {
                 None
             } else {
                 let mut rng = rand::rng();

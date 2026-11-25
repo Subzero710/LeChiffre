@@ -245,6 +245,7 @@ impl HoldemSimulationBuilder {
             agents,
             game_state,
             deck,
+            deal_order: None,
             id,
             historians,
             panic_on_historian_error: self.panic_on_historian_error,

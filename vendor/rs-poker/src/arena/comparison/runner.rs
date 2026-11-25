@@ -53,12 +53,24 @@ struct PermutationContext<'a, F> {
 pub struct ArenaComparison {
     config: ComparisonConfig,
     agents: Vec<(String, AgentConfig)>,
+    max_raises_override: Option<Option<u8>>,
 }
 
 impl ArenaComparison {
     /// Create a new ArenaComparison (internal - use ComparisonBuilder instead)
     pub(crate) fn new(config: ComparisonConfig, agents: Vec<(String, AgentConfig)>) -> Self {
-        Self { config, agents }
+        Self {
+            config,
+            agents,
+            max_raises_override: None,
+        }
+    }
+
+    /// Override the game-state generator's raise cap. `None` means unlimited.
+    /// Without this call the native generator's default remains unchanged.
+    pub fn with_max_raises_per_round(mut self, max: Option<u8>) -> Self {
+        self.max_raises_override = Some(max);
+        self
     }
 
     /// Get the comparison configuration
@@ -191,6 +203,9 @@ impl ArenaComparison {
             // Comparison-level rake must be part of the state before it is cloned
             // into permutations and CFR contexts.
             game_state.rake = self.config.rake;
+            if let Some(max) = self.max_raises_override {
+                game_state.max_raises_per_round = max;
+            }
 
             // Run all permutations with this game state
             let mut perm_ctx = PermutationContext {
