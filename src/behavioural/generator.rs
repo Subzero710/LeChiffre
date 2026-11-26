@@ -75,8 +75,11 @@ unsafe extern "C" {
 const STREET_COUNT: usize = 4;
 const POSITION_COUNT: usize = 7;
 pub const ACTION_COUNT: usize = 5;
-const SIZING_COMPONENTS: usize = 8;
-const SIZING_OUTPUTS: usize = 1 + 3 * SIZING_COMPONENTS;
+// One all-in logit plus (intercept, slope, readout) per shared ReLU unit.
+// Reuse the generator's hidden width, not a fixed count of candidate sizes.
+fn sizing_outputs(hidden: usize) -> usize {
+    1 + 3 * hidden
+}
 const MIN_TIMING_SCALE: f64 = 0.05;
 
 pub const GENERATOR_CONTEXT_WIDTH: usize =
@@ -394,7 +397,7 @@ impl DenseLayer {
 pub struct GeneratorParameters {
     pub state: DenseLayer,  // tanh(context || Z)
     pub action: DenseLayer, // five action logits
-    pub sizing: DenseLayer, // all-in logit and conditional logistic mixture
+    pub sizing: DenseLayer, // all-in logit and shared BB-bin scorer coefficients
     pub timing: DenseLayer, // conditional log1p(ms) normal mean and scale
 }
 
@@ -535,7 +538,7 @@ impl NeuralBehaviourGenerator {
             || parameters.action.input != hidden
             || parameters.action.output != ACTION_COUNT
             || parameters.sizing.input != hidden + GENERATOR_SIZING_WIDTH
-            || parameters.sizing.output != SIZING_OUTPUTS
+            || parameters.sizing.output != sizing_outputs(hidden)
             || parameters.timing.input != hidden + GENERATOR_TIMING_WIDTH
             || parameters.timing.output != 2
         {
@@ -569,20 +572,12 @@ impl NeuralBehaviourGenerator {
         );
         let action = layer(&mut rng, hidden, ACTION_COUNT);
         let input = hidden + GENERATOR_SIZING_WIDTH;
-        // Preserve V8's RNG draws for state, action, all-in and timing exactly.
+        // Preserve V9's initial state, action, all-in and timing parameters.
         let initial_allin = layer(&mut rng, input, 3);
         let timing = layer(&mut rng, hidden + GENERATOR_TIMING_WIDTH, 2);
-        let mut weights: Vec<f32> = (0..input * SIZING_OUTPUTS)
-            .map(|_| ((rng.next() * 2.0 - 1.0) * 0.01) as f32)
-            .collect();
-        weights[..input].copy_from_slice(&initial_allin.weights[2 * input..]);
-        let mut bias = vec![0.0; SIZING_OUTPUTS];
-        let initial_centres = [0.1_f64, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 5.0];
-        for (k, centre) in initial_centres.into_iter().enumerate() {
-            bias[1 + SIZING_COMPONENTS + k] = centre.ln_1p() as f32;
-            bias[1 + 2 * SIZING_COMPONENTS + k] = 0.15_f64.ln() as f32;
-        }
-        let sizing = DenseLayer::new(input, SIZING_OUTPUTS, weights, bias)?;
+        let mut sizing = layer(&mut rng, input, sizing_outputs(hidden));
+        sizing.weights[..input].copy_from_slice(&initial_allin.weights[2 * input..]);
+        sizing.weights_f64[..input].copy_from_slice(&initial_allin.weights_f64[2 * input..]);
         Self::new(
             latent,
             GeneratorParameters {
@@ -798,13 +793,7 @@ impl BehaviourPolicy {
                     .bounds(kind)
                     .ok_or(GeneratorError::IllegalObservedAction)?;
                 let raw = self.sizing_layer.forward(&sizing_input(&self.state, kind));
-                sample_wager(
-                    bounds,
-                    sizing_unit_chips(self.context.street, self.context.pot_bb, bounds),
-                    &raw,
-                    draws.sizing,
-                    draws.all_in,
-                )?
+                sample_wager(bounds, &raw, draws.sizing, draws.all_in)?
             }
         };
         let timing = self
@@ -923,173 +912,290 @@ fn close(x: f32, y: f32) -> bool {
     (x - y).abs() <= 1e-4 * x.abs().max(y.abs()).max(1.0)
 }
 
-// All coordinates use log1p(chips / unit_chips). Every ordinary bin has
-// physical half-tick boundaries, clipped only at zero chips. The all-in is
-// a separate atom; each mixture component is normalized on the legal bins.
-fn sizing_unit_chips(street: Street, pot_bb: f32, bounds: WagerBounds) -> f64 {
-    let unit_bb = if street == Street::Preflop {
-        1.0
-    } else {
-        f64::from(pot_bb)
-    };
-    unit_bb * bounds.big_blind_chips as f64
+// Nearest tenth of a BB (halfway ties upward), computed in exact integers.
+// Ordinary bins contain at least one legal non-all-in chip amount. All-in is
+// separate even when it shares a BB cell with an ordinary amount.
+#[derive(Clone, Copy)]
+struct BbSizingGrid {
+    bounds: WagerBounds,
+    ticks: usize,
+    count: usize,
+    first: i128,
+    dense: bool,
+}
+
+impl BbSizingGrid {
+    fn new(bounds: WagerBounds) -> Result<Self, GeneratorError> {
+        let ticks = bounds.ticks()?;
+        let first = Self::bin(bounds, 0);
+        let dense = 10 * i128::from(bounds.chip_unit) <= i128::from(bounds.big_blind_chips);
+        let count = if ticks == 0 {
+            0
+        } else if dense {
+            usize::try_from(Self::bin(bounds, ticks - 1) - first + 1)
+                .map_err(|_| GeneratorError::InvalidWagerBounds)?
+        } else {
+            ticks
+        };
+        Ok(Self {
+            bounds,
+            ticks,
+            count,
+            first,
+            dense,
+        })
+    }
+
+    fn bin(bounds: WagerBounds, tick: usize) -> i128 {
+        let bb = i128::from(bounds.big_blind_chips);
+        (20 * i128::from(bounds.chips(tick)) + bb) / (2 * bb)
+    }
+
+    fn bin_at(self, position: usize) -> i128 {
+        if self.dense {
+            self.first + position as i128
+        } else {
+            Self::bin(self.bounds, position)
+        }
+    }
+
+    fn position(self, tick: usize) -> Result<usize, GeneratorError> {
+        if tick >= self.ticks {
+            return Err(GeneratorError::InvalidObservedWager);
+        }
+        let position = if self.dense {
+            usize::try_from(Self::bin(self.bounds, tick) - self.first)
+                .map_err(|_| GeneratorError::InvalidObservedWager)?
+        } else {
+            tick
+        };
+        if position >= self.count {
+            return Err(GeneratorError::InvalidObservedWager);
+        }
+        Ok(position)
+    }
+
+    // Project the bin centre onto the legal ordinary chip grid. On an exact
+    // tie choose the lower tick. This is the definition of execution, not a
+    // fallback. A selected bin is guaranteed to have at least one legal tick.
+    fn representative(self, position: usize) -> Result<usize, GeneratorError> {
+        if position >= self.count {
+            return Err(GeneratorError::InvalidObservedWager);
+        }
+        if !self.dense {
+            return Ok(position);
+        }
+        let numerator = self.bin_at(position) * i128::from(self.bounds.big_blind_chips)
+            - 10 * i128::from(self.bounds.min_added_chips);
+        let denominator = 10 * i128::from(self.bounds.chip_unit);
+        let numerator = numerator.max(0);
+        let nearest = numerator / denominator
+            + if 2 * (numerator % denominator) > denominator {
+                1
+            } else {
+                0
+            };
+        let tick = usize::try_from(nearest.min(self.ticks as i128 - 1))
+            .map_err(|_| GeneratorError::InvalidWagerBounds)?;
+        if self.position(tick)? != position {
+            return Err(GeneratorError::InvalidWagerBounds);
+        }
+        Ok(tick)
+    }
 }
 
 fn sizing_softplus(x: f64) -> f64 {
     x.max(0.0) + (-x.abs()).exp().ln_1p()
 }
 
-// log(sigmoid(b) - sigmoid(a)), without subtracting two rounded CDFs.
-// Return derivatives with respect to location and log-scale.
-fn logistic_interval(
-    low: f64,
-    high: f64,
-    mu: f64,
-    scale: f64,
-) -> Result<(f64, f64, f64), GeneratorError> {
-    let a = (low - mu) / scale;
-    let b = (high - mu) / scale;
-    let d = (high - low) / scale;
-    if !a.is_finite() || !b.is_finite() || !d.is_finite() || d <= 0.0 {
-        return Err(GeneratorError::InvalidProbabilityMass);
+// The scorer is shared by every legal bin: E(x) = sum_i v_i ReLU(b_i+w_i*x).
+// b,w,v are generated from the same (state, action) input. No fixed knot,
+// centre, width, or stack-dependent parameter matrix. x = log1p(BB).
+fn sizing_width(raw: &[f64]) -> Result<usize, GeneratorError> {
+    if raw.len() < 4 || !(raw.len() - 1).is_multiple_of(3) || raw.iter().any(|x| !x.is_finite()) {
+        return Err(GeneratorError::NonFiniteOutput);
     }
-    let log_mass = -sizing_softplus(-b) - sizing_softplus(a) + (-(-d).exp_m1()).ln();
-    let d_mu = (sigmoid(a) - sigmoid(-b)) / scale;
-    let d_log_scale = a * sigmoid(a) - b * sigmoid(-b) - d / d.exp_m1();
-    if ![log_mass, d_mu, d_log_scale].iter().all(|x| x.is_finite()) {
-        return Err(GeneratorError::NonFiniteGradient);
-    }
-    Ok((log_mass, d_mu, d_log_scale))
-}
-
-fn sizing_logsumexp(values: &[f64; SIZING_COMPONENTS]) -> Result<f64, GeneratorError> {
-    let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let result = max + values.iter().map(|x| (x - max).exp()).sum::<f64>().ln();
-    if !result.is_finite() {
-        return Err(GeneratorError::InvalidProbabilityMass);
-    }
-    Ok(result)
-}
-
-#[derive(Clone, Copy)]
-struct SizingComponent {
-    mu: f64,
-    scale: f64,
-    log_weight: f64,
-    normalizer: (f64, f64, f64),
-}
-
-struct SizingInterval {
-    logs: [f64; SIZING_COMPONENTS],
-    derivatives: [(f64, f64); SIZING_COMPONENTS],
+    Ok((raw.len() - 1) / 3)
 }
 
 struct SizingShape {
-    bounds: WagerBounds,
-    count: usize,
-    unit_chips: f64,
-    components: [SizingComponent; SIZING_COMPONENTS],
+    coordinates: Vec<f64>,
+    log_probs: Vec<f64>,
+    active: Vec<std::ops::Range<usize>>,
 }
 
 impl SizingShape {
-    fn edge(bounds: WagerBounds, unit_chips: f64, edge: usize) -> f64 {
-        let chips = bounds.min_added_chips as f64 + (edge as f64 - 0.5) * bounds.chip_unit as f64;
-        (chips.max(0.0) / unit_chips).ln_1p()
-    }
-
-    fn new(bounds: WagerBounds, unit_chips: f64, raw: &[f64]) -> Result<Self, GeneratorError> {
-        let count = bounds.ticks()?;
-        if count < 2
-            || !unit_chips.is_finite()
-            || unit_chips <= 0.0
-            || raw.len() != SIZING_OUTPUTS
-            || raw.iter().any(|x| !x.is_finite())
-        {
+    fn new(grid: BbSizingGrid, raw: &[f64]) -> Result<Self, GeneratorError> {
+        let width = sizing_width(raw)?;
+        if grid.count == 0 {
             return Err(GeneratorError::InvalidProbabilityMass);
         }
-        let logits = std::array::from_fn(|k| raw[1 + k]);
-        let norm = sizing_logsumexp(&logits)?;
-        let low = Self::edge(bounds, unit_chips, 0);
-        let high = Self::edge(bounds, unit_chips, count);
-        let mut components = [SizingComponent {
-            mu: 0.0,
-            scale: 1.0,
-            log_weight: 0.0,
-            normalizer: (0.0, 0.0, 0.0),
-        }; SIZING_COMPONENTS];
-        for (k, component) in components.iter_mut().enumerate() {
-            let mu = raw[1 + SIZING_COMPONENTS + k];
-            let scale = raw[1 + 2 * SIZING_COMPONENTS + k].exp();
-            if !scale.is_finite() || scale <= 0.0 {
+        let coordinates: Vec<f64> = (0..grid.count)
+            .map(|i| (grid.bin_at(i) as f64 / 10.0).ln_1p())
+            .collect();
+        if coordinates.iter().any(|x| !x.is_finite())
+            || coordinates.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(GeneratorError::InvalidWagerBounds);
+        }
+        let n = grid.count;
+        // Each ReLU is active on a prefix or suffix of the ordered grid.
+        // Add its affine contribution to that range by two boundary events.
+        // A prefix scan then evaluates all logits in O(N + H log N).
+        let mut events = vec![(0.0, 0.0); n + 1];
+        let mut active = Vec::with_capacity(width);
+        for i in 0..width {
+            let b = raw[1 + i];
+            let w = raw[1 + width + i];
+            let v = raw[1 + 2 * width + i];
+            if ![
+                b + w * coordinates[0],
+                b + w * coordinates[n - 1],
+                v * b,
+                v * w,
+            ]
+            .iter()
+            .all(|x| x.is_finite())
+            {
+                return Err(GeneratorError::NonFiniteOutput);
+            }
+            let range = if w >= 0.0 {
+                coordinates.partition_point(|&x| b + w * x <= 0.0)..n
+            } else {
+                0..coordinates.partition_point(|&x| b + w * x > 0.0)
+            };
+            if !range.is_empty() {
+                events[range.start].0 += v * b;
+                events[range.start].1 += v * w;
+                events[range.end].0 -= v * b;
+                events[range.end].1 -= v * w;
+            }
+            active.push(range);
+        }
+        let mut intercept = 0.0;
+        let mut slope = 0.0;
+        let mut log_probs = Vec::with_capacity(n);
+        for (&x, &(db, dw)) in coordinates.iter().zip(&events) {
+            intercept += db;
+            slope += dw;
+            let score = intercept + slope * x;
+            if !score.is_finite() {
+                return Err(GeneratorError::NonFiniteOutput);
+            }
+            log_probs.push(score);
+        }
+        let maximum = log_probs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let sum = log_probs.iter().map(|x| (x - maximum).exp()).sum::<f64>();
+        if !sum.is_finite() || sum <= 0.0 {
+            return Err(GeneratorError::InvalidProbabilityMass);
+        }
+        let log_sum = sum.ln();
+        for x in &mut log_probs {
+            *x = (*x - maximum) - log_sum;
+            if !x.is_finite() {
                 return Err(GeneratorError::InvalidProbabilityMass);
             }
-            *component = SizingComponent {
-                mu,
-                scale,
-                log_weight: logits[k] - norm,
-                normalizer: logistic_interval(low, high, mu, scale)?,
-            };
         }
         Ok(Self {
-            bounds,
-            count,
-            unit_chips,
-            components,
+            coordinates,
+            log_probs,
+            active,
         })
     }
 
-    fn interval(&self, start: usize, end: usize) -> Result<SizingInterval, GeneratorError> {
-        if start >= end || end > self.count {
-            return Err(GeneratorError::InvalidObservedWager);
-        }
-        let low = Self::edge(self.bounds, self.unit_chips, start);
-        let high = Self::edge(self.bounds, self.unit_chips, end);
-        let mut logs = [0.0; SIZING_COMPONENTS];
-        let mut derivatives = [(0.0, 0.0); SIZING_COMPONENTS];
-        for (k, c) in self.components.iter().enumerate() {
-            let (mass, d_mu, d_scale) = logistic_interval(low, high, c.mu, c.scale)?;
-            logs[k] = c.log_weight + mass - c.normalizer.0;
-            derivatives[k] = (d_mu - c.normalizer.1, d_scale - c.normalizer.2);
-        }
-        Ok(SizingInterval { logs, derivatives })
+    fn log_probability(&self, position: usize) -> Result<f64, GeneratorError> {
+        self.log_probs
+            .get(position)
+            .copied()
+            .ok_or(GeneratorError::InvalidObservedWager)
     }
 
-    fn log_mass(&self, start: usize, end: usize) -> Result<f64, GeneratorError> {
-        sizing_logsumexp(&self.interval(start, end)?.logs)
+    fn sample(&self, draw: f64) -> Result<usize, GeneratorError> {
+        if !draw.is_finite() || !(0.0..1.0).contains(&draw) {
+            return Err(GeneratorError::InvalidRandomDraw);
+        }
+        // Normalize the floating-point sum used by the sampler itself.
+        let total = self.log_probs.iter().map(|p| p.exp()).sum::<f64>();
+        if !total.is_finite() || total <= 0.0 {
+            return Err(GeneratorError::InvalidProbabilityMass);
+        }
+        let mut cumulative = 0.0;
+        for (i, &p) in self.log_probs.iter().enumerate() {
+            cumulative += p.exp();
+            if draw < cumulative / total {
+                return Ok(i);
+            }
+        }
+        Err(GeneratorError::InvalidProbabilityMass)
+    }
+
+    // dNLL/dE_j = q_j - 1(j=observed). Every neuron's derivative only needs
+    // the sum of that residual and x times that residual on its active range.
+    // Prefix/suffix scans avoid a dense bins-by-hidden Jacobian.
+    fn gradient(
+        &self,
+        observed: usize,
+        raw: &[f64],
+        grad: &mut [f64],
+    ) -> Result<(), GeneratorError> {
+        let n = self.log_probs.len();
+        let width = self.active.len();
+        if observed >= n || raw.len() != sizing_outputs(width) || grad.len() != raw.len() {
+            return Err(GeneratorError::InvalidObservedWager);
+        }
+        let mut prefix = vec![(0.0, 0.0); n + 1];
+        let mut suffix = vec![(0.0, 0.0); n + 1];
+        for j in 0..n {
+            let d = self.log_probs[j].exp() - if j == observed { 1.0 } else { 0.0 };
+            prefix[j + 1] = (prefix[j].0 + d, prefix[j].1 + d * self.coordinates[j]);
+        }
+        for j in (0..n).rev() {
+            let d = self.log_probs[j].exp() - if j == observed { 1.0 } else { 0.0 };
+            suffix[j] = (
+                suffix[j + 1].0 + d,
+                suffix[j + 1].1 + d * self.coordinates[j],
+            );
+        }
+        for (i, range) in self.active.iter().enumerate() {
+            if range.is_empty() {
+                continue;
+            }
+            let (sum, xsum) = if range.start == 0 {
+                prefix[range.end]
+            } else {
+                suffix[range.start]
+            };
+            let b = raw[1 + i];
+            let w = raw[1 + width + i];
+            let v = raw[1 + 2 * width + i];
+            grad[1 + i] = v * sum;
+            grad[1 + width + i] = v * xsum;
+            grad[1 + 2 * width + i] = b * sum + w * xsum;
+        }
+        if grad.iter().any(|x| !x.is_finite()) {
+            return Err(GeneratorError::NonFiniteGradient);
+        }
+        Ok(())
     }
 }
 
 fn sample_wager(
     bounds: WagerBounds,
-    unit_chips: f64,
     raw: &[f64],
     size_draw: f64,
     allin_draw: f64,
 ) -> Result<f32, GeneratorError> {
-    let count = bounds.ticks()?;
-    if raw.len() != SIZING_OUTPUTS || raw.iter().any(|x| !x.is_finite()) {
-        return Err(GeneratorError::NonFiniteOutput);
+    sizing_width(raw)?;
+    let grid = BbSizingGrid::new(bounds)?;
+    if grid.ticks == 0 || allin_draw < sigmoid(raw[0]) {
+        return Ok(bounds.amount(grid.ticks));
     }
-    if count == 0 || allin_draw < sigmoid(raw[0]) {
-        return Ok(bounds.amount(count));
+    if grid.count == 1 {
+        return Ok(bounds.amount(grid.representative(0)?));
     }
-    if count == 1 {
-        return Ok(bounds.amount(0));
-    }
-    let shape = SizingShape::new(bounds, unit_chips, raw)?;
-    // Binary search the exact discrete mixture CDF. No enumeration, rounding
-    // of an unconstrained sample, or alternate distribution on numeric failure.
-    let target = size_draw.ln();
-    let (mut lo, mut hi) = (0, count - 1);
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        if shape.log_mass(0, mid + 1)? > target {
-            hi = mid;
-        } else {
-            lo = mid + 1;
-        }
-    }
-    Ok(bounds.amount(lo))
+    let shape = SizingShape::new(grid, raw)?;
+    let selected = grid.representative(shape.sample(size_draw)?)?;
+    Ok(bounds.amount(selected))
 }
 
 #[derive(Debug, Clone)]
@@ -1536,8 +1642,6 @@ fn loss_gradients(
         action,
         actor.stack_remaining_bb,
         context.to_call_bb,
-        context.street,
-        context.pot_bb,
     )
 }
 
@@ -1581,8 +1685,6 @@ fn backprop_encoded(
         &observation.observed,
         stack,
         to_call,
-        observation.street,
-        observation.context_values[0],
         gradients,
         products,
     )
@@ -1597,8 +1699,6 @@ fn loss_gradients_features(
     action: &ObservedAction,
     actor_stack: f32,
     to_call: f32,
-    street: Street,
-    pot_bb: f32,
 ) -> Result<(TrainingLoss, Gradients), GeneratorError> {
     let mut gradients = Gradients::new(&model.parameters);
     let loss = backprop_features(
@@ -1609,8 +1709,6 @@ fn loss_gradients_features(
         action,
         actor_stack,
         to_call,
-        street,
-        pot_bb,
         Some(&mut gradients),
         None,
     )?;
@@ -1626,8 +1724,6 @@ fn backprop_features(
     action: &ObservedAction,
     actor_stack: f32,
     to_call: f32,
-    street: Street,
-    pot_bb: f32,
     mut grads: Option<&mut Gradients>,
     mut products: Option<&mut MatrixProducts>,
 ) -> Result<TrainingLoss, GeneratorError> {
@@ -1669,12 +1765,7 @@ fn backprop_features(
         let index = bounds.index(amount)?;
         let input = sizing_input(&forward.state, action.kind);
         let raw = model.parameters.sizing.forward(&input);
-        let (loss, grad) = sizing_nll(
-            bounds,
-            sizing_unit_chips(street, pot_bb, bounds),
-            index,
-            &raw,
-        )?;
+        let (loss, grad) = sizing_nll(bounds, index, &raw)?;
         sizing_loss = loss;
         if let Some(p) = products.as_deref_mut() {
             p.sizing.record(&input, &grad)?;
@@ -1747,44 +1838,51 @@ fn add(target: &mut [f64], source: &[f64]) {
     }
 }
 
-/// Exact mixed mass: all-in Bernoulli, then an eight-component conditional
-/// logistic mixture integrated over the observed legal chip bin.
-fn sizing_nll(
+/// Exact mixed mass: all-in Bernoulli, then softmax over occupied 0.1 BB bins.
+fn sizing_objective(
     bounds: WagerBounds,
-    unit_chips: f64,
     index: usize,
     raw: &[f64],
-) -> Result<(f64, [f64; SIZING_OUTPUTS]), GeneratorError> {
-    let count = bounds.ticks()?;
-    if index > count || raw.len() != SIZING_OUTPUTS || raw.iter().any(|x| !x.is_finite()) {
+    mut gradient: Option<&mut [f64]>,
+) -> Result<f64, GeneratorError> {
+    sizing_width(raw)?;
+    let grid = BbSizingGrid::new(bounds)?;
+    if index > grid.ticks {
         return Err(GeneratorError::InvalidObservedWager);
     }
-    let mut gradient = [0.0; SIZING_OUTPUTS];
-    if count == 0 {
-        return Ok((0.0, gradient));
+    if grid.ticks == 0 {
+        return Ok(0.0);
     }
-    let allin = index == count;
+    let allin = index == grid.ticks;
     let mut loss = sizing_softplus(if allin { -raw[0] } else { raw[0] });
-    gradient[0] = if allin {
-        -sigmoid(-raw[0])
-    } else {
-        sigmoid(raw[0])
-    };
-    if !allin && count > 1 {
-        let shape = SizingShape::new(bounds, unit_chips, raw)?;
-        let SizingInterval { logs, derivatives } = shape.interval(index, index + 1)?;
-        let log_mass = sizing_logsumexp(&logs)?;
-        loss -= log_mass;
-        for (k, c) in shape.components.iter().enumerate() {
-            let responsibility = (logs[k] - log_mass).exp();
-            gradient[1 + k] = c.log_weight.exp() - responsibility;
-            gradient[1 + SIZING_COMPONENTS + k] = -responsibility * derivatives[k].0;
-            gradient[1 + 2 * SIZING_COMPONENTS + k] = -responsibility * derivatives[k].1;
+    if let Some(g) = gradient.as_deref_mut() {
+        g[0] = if allin {
+            -sigmoid(-raw[0])
+        } else {
+            sigmoid(raw[0])
+        };
+    }
+    if !allin && grid.count > 1 {
+        let position = grid.position(index)?;
+        let shape = SizingShape::new(grid, raw)?;
+        loss -= shape.log_probability(position)?;
+        if let Some(g) = gradient {
+            shape.gradient(position, raw, g)?;
         }
     }
-    if !loss.is_finite() || gradient.iter().any(|x| !x.is_finite()) {
+    if !loss.is_finite() {
         return Err(GeneratorError::NonFiniteGradient);
     }
+    Ok(loss)
+}
+
+fn sizing_nll(
+    bounds: WagerBounds,
+    index: usize,
+    raw: &[f64],
+) -> Result<(f64, Vec<f64>), GeneratorError> {
+    let mut gradient = vec![0.0; raw.len()];
+    let loss = sizing_objective(bounds, index, raw, Some(&mut gradient))?;
     Ok((loss, gradient))
 }
 
@@ -2083,13 +2181,7 @@ impl NeuralBehaviourGenerator {
                 .parameters
                 .sizing
                 .forward(&sizing_input(&pass.state, action.kind));
-            sizing_nll(
-                bounds,
-                sizing_unit_chips(observation.street, observation.context_values[0], bounds),
-                index,
-                &raw,
-            )?
-            .0
+            sizing_objective(bounds, index, &raw, None)?
         } else {
             0.0
         };
@@ -2309,7 +2401,7 @@ impl NeuralBehaviourGenerator {
         let count = bounds.ticks()?;
         let pot = observation.context_values[0];
         let pot_chips = f64::from(pot) * bounds.big_blind_chips as f64;
-        let unit = sizing_unit_chips(observation.street, pot, bounds);
+        let grid = BbSizingGrid::new(bounds)?;
         let encoded = encoded_context_features(
             observation.street,
             observation.actor_position,
@@ -2321,7 +2413,7 @@ impl NeuralBehaviourGenerator {
             .parameters
             .sizing
             .forward(&sizing_input(&pass.state, kind));
-        let loss = sizing_nll(bounds, unit, actual, &raw)?.0;
+        let loss = sizing_objective(bounds, actual, &raw, None)?;
         let atom = if count == 0 { 1.0 } else { sigmoid(raw[0]) };
         let log_atom = if count == 0 {
             0.0
@@ -2329,8 +2421,8 @@ impl NeuralBehaviourGenerator {
             -sizing_softplus(-raw[0])
         };
         let log_nonatom = -sizing_softplus(raw[0]);
-        let shape = if count > 1 {
-            Some(SizingShape::new(bounds, unit, &raw)?)
+        let shape = if grid.count > 1 {
+            Some(SizingShape::new(grid, &raw)?)
         } else {
             None
         };
@@ -2338,7 +2430,12 @@ impl NeuralBehaviourGenerator {
         let mut best_log = log_atom;
         let mut nonallin_best: Option<(usize, f64)> = None;
         let mut cumulative = 0.0;
-        let mut crps = 0.0;
+        let mut crps = if grid.count > 0 {
+            // The actual amount can be below the first executable bin centre.
+            (bounds.chips(grid.representative(0)?) - bounds.chips(actual)).max(0) as f64 / pot_chips
+        } else {
+            0.0
+        };
         let mut shape_nll = None;
         let mut median = count;
         let mut median_found = false;
@@ -2354,10 +2451,10 @@ impl NeuralBehaviourGenerator {
                 close25_mass += mass;
             }
         };
-        for i in 0..count {
-            // One ordinary choice is deterministically assigned the non-all-in mass.
+        for position in 0..grid.count {
+            let i = grid.representative(position)?;
             let log_shape = match &shape {
-                Some(s) => s.log_mass(i, i + 1)?,
+                Some(s) => s.log_probability(position)?,
                 None => 0.0,
             };
             let log_mass = log_nonatom + log_shape;
@@ -2368,7 +2465,7 @@ impl NeuralBehaviourGenerator {
             if nonallin_best.is_none_or(|(_, old)| log_shape > old) {
                 nonallin_best = Some((i, log_shape));
             }
-            if i == actual {
+            if actual < count && grid.position(actual)? == position {
                 shape_nll = Some(-log_shape);
             }
             let mass = log_mass.exp();
@@ -2378,9 +2475,16 @@ impl NeuralBehaviourGenerator {
                 median = i;
                 median_found = true;
             }
-            let gap = (bounds.chips(i + 1) - bounds.chips(i)) as f64 / pot_chips;
-            let target = if i >= actual { 1.0 } else { 0.0 };
-            crps += gap * (cumulative - target).powi(2);
+            let next = if position + 1 == grid.count {
+                count
+            } else {
+                grid.representative(position + 1)?
+            };
+            let lo = bounds.chips(i);
+            let hi = bounds.chips(next);
+            let split = bounds.chips(actual).clamp(lo, hi);
+            crps += (split - lo) as f64 / pot_chips * cumulative.powi(2)
+                + (hi - split) as f64 / pot_chips * (cumulative - 1.0).powi(2);
         }
         add_tolerance(count, atom);
         if (cumulative + atom - 1.0).abs() > 1e-8 || !crps.is_finite() {
@@ -2396,7 +2500,11 @@ impl NeuralBehaviourGenerator {
             "observed_bb":bounds.chips(actual) as f64 / bounds.big_blind_chips as f64,
             "map_bb":bounds.chips(best) as f64 / bounds.big_blind_chips as f64,
             "observed_allin":actual==count, "map_allin":best==count,
-            "p_allin":atom, "nll":loss, "uniform_nll":((count+1) as f64).ln(),
+            "sizing_measure":"bb_nearest_0.1_shared_relu_plus_allin_atom",
+            "bb_ordinary_bins":grid.count,
+            "actual_bb_bin":(actual < count).then(|| BbSizingGrid::bin(bounds, actual).to_string()),
+            "map_bb_bin":(best < count).then(|| BbSizingGrid::bin(bounds, best).to_string()),
+            "p_allin":atom, "nll":loss, "uniform_nll":((grid.count+1) as f64).ln(),
             "p_actual":(-loss).exp(), "p_map":best_log.exp(),
             "shape_nll":shape_nll, "nonallin_map_chips":nonallin_best.map(|(i,_)| bounds.chips(i)),
             "crps_over_pot":crps, "mass_within_10pct_pot":close10_mass,
@@ -2865,46 +2973,90 @@ mod tests {
         assert_eq!(fold.sizing, None);
     }
 
-    fn sizing_test_raw() -> [f64; SIZING_OUTPUTS] {
-        let mut raw = [0.0; SIZING_OUTPUTS];
-        raw[0] = -2.0;
-        for k in 0..SIZING_COMPONENTS {
-            raw[1 + k] = k as f64 * 0.13;
-            raw[1 + SIZING_COMPONENTS + k] = 0.15 + k as f64 * 0.15;
-            raw[1 + 2 * SIZING_COMPONENTS + k] = -2.0 + k as f64 * 0.04;
-        }
-        raw
+    fn sizing_test_raw() -> Vec<f64> {
+        // Nonzero arbitrary coefficients for gradient tests, not initialisation.
+        vec![-2.0, -0.3, 0.7, -0.9, 0.8, -0.55, 0.6, 0.4, -0.6, 0.9]
     }
 
     #[test]
     fn finite_differences_verify_sizing_gradients() {
-        let bounds = legal().bet.unwrap();
-        let unit = 10.0;
         let raw = sizing_test_raw();
-        for i in [0, 17, bounds.ticks().unwrap() - 1, bounds.ticks().unwrap()] {
-            let (_, grad) = sizing_nll(bounds, unit, i, &raw).unwrap();
-            for j in 0..SIZING_OUTPUTS {
-                let mut plus = raw;
-                let mut minus = raw;
-                plus[j] += 1e-5;
-                minus[j] -= 1e-5;
-                let numeric = (sizing_nll(bounds, unit, i, &plus).unwrap().0
-                    - sizing_nll(bounds, unit, i, &minus).unwrap().0)
-                    / 2e-5;
-                assert!(
-                    (numeric - grad[j]).abs() < 1e-5,
-                    "{i}:{j}: {numeric} vs {}",
-                    grad[j]
-                );
+        for bounds in [
+            WagerBounds {
+                min_added_chips: 11,
+                max_added_chips: 187,
+                chip_unit: 1,
+                big_blind_chips: 100,
+            },
+            WagerBounds {
+                min_added_chips: 10,
+                max_added_chips: 157,
+                chip_unit: 5,
+                big_blind_chips: 10,
+            },
+        ] {
+            let count = bounds.ticks().unwrap();
+            for i in [0, 17, count - 1, count] {
+                let (_, grad) = sizing_nll(bounds, i, &raw).unwrap();
+                for j in 0..raw.len() {
+                    let mut plus = raw.clone();
+                    let mut minus = raw.clone();
+                    plus[j] += 1e-5;
+                    minus[j] -= 1e-5;
+                    let numeric = (sizing_nll(bounds, i, &plus).unwrap().0
+                        - sizing_nll(bounds, i, &minus).unwrap().0)
+                        / 2e-5;
+                    assert!(
+                        (numeric - grad[j]).abs() < 1e-5,
+                        "{i}:{j}: {numeric} vs {}",
+                        grad[j]
+                    );
+                }
             }
         }
     }
 
     #[test]
-    fn mixture_is_normalized_and_sampler_matches_exact_bins() {
+    fn shared_scorer_matches_direct_network() {
+        let raw = sizing_test_raw();
+        let bounds = WagerBounds {
+            min_added_chips: 10,
+            max_added_chips: 60_000,
+            chip_unit: 1,
+            big_blind_chips: 100,
+        };
+        let grid = BbSizingGrid::new(bounds).unwrap();
+        let shape = SizingShape::new(grid, &raw).unwrap();
+        let width = sizing_width(&raw).unwrap();
+        let scores: Vec<f64> = shape
+            .coordinates
+            .iter()
+            .map(|&x| {
+                (0..width)
+                    .map(|i| {
+                        raw[1 + 2 * width + i] * (raw[1 + i] + raw[1 + width + i] * x).max(0.0)
+                    })
+                    .sum()
+            })
+            .collect();
+        let max = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let log_sum = scores.iter().map(|x| (x - max).exp()).sum::<f64>().ln();
+        for (i, score) in scores.iter().enumerate() {
+            assert!((shape.log_probability(i).unwrap() - (score - max - log_sum)).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn shared_scorer_is_normalized_and_sampler_matches_bb_bins() {
         let raw = sizing_test_raw();
         for bounds in [
             legal().bet.unwrap(),
+            WagerBounds {
+                min_added_chips: 11,
+                max_added_chips: 187,
+                chip_unit: 1,
+                big_blind_chips: 100,
+            },
             WagerBounds {
                 min_added_chips: 10,
                 max_added_chips: 157,
@@ -2919,33 +3071,54 @@ mod tests {
             },
             WagerBounds {
                 min_added_chips: 10,
+                max_added_chips: 15,
+                chip_unit: 1,
+                big_blind_chips: 100,
+            },
+            WagerBounds {
+                min_added_chips: 10,
                 max_added_chips: 10,
                 chip_unit: 5,
                 big_blind_chips: 10,
             },
         ] {
+            let grid = BbSizingGrid::new(bounds).unwrap();
             let count = bounds.ticks().unwrap();
-            let mut mass = 0.0;
+            let mut mass = (-sizing_nll(bounds, count, &raw).unwrap().0).exp();
             let mut conditional_cdf = 0.0;
-            for i in 0..=count {
-                let p = (-sizing_nll(bounds, 10.0, i, &raw).unwrap().0).exp();
+            for position in 0..grid.count {
+                let i = grid.representative(position).unwrap();
+                let p = (-sizing_nll(bounds, i, &raw).unwrap().0).exp();
                 mass += p;
-                if i < count {
-                    let q = p / sigmoid(-raw[0]);
-                    let u = conditional_cdf + q * 0.5;
-                    assert_eq!(
-                        bounds
-                            .index(sample_wager(bounds, 10.0, &raw, u, 0.999).unwrap())
-                            .unwrap(),
-                        i
-                    );
-                    conditional_cdf += q;
-                }
+                let q = p / sigmoid(-raw[0]);
+                let u = conditional_cdf + q * 0.5;
+                assert_eq!(
+                    bounds
+                        .index(sample_wager(bounds, &raw, u, 0.999).unwrap())
+                        .unwrap(),
+                    i
+                );
+                conditional_cdf += q;
+            }
+            for i in 0..count {
+                let position = grid.position(i).unwrap();
+                let representative = grid.representative(position).unwrap();
+                assert_eq!(
+                    BbSizingGrid::bin(bounds, representative),
+                    BbSizingGrid::bin(bounds, i)
+                );
+                let centre = grid.bin_at(position) * i128::from(bounds.big_blind_chips);
+                let distance = |tick| (10 * i128::from(bounds.chips(tick)) - centre).abs();
+                assert!(distance(representative) <= distance(i));
+                assert_eq!(
+                    sizing_nll(bounds, i, &raw).unwrap(),
+                    sizing_nll(bounds, representative, &raw).unwrap()
+                );
             }
             assert!((mass - 1.0).abs() < 1e-10, "{mass}");
             assert_eq!(
                 bounds
-                    .index(sample_wager(bounds, 10.0, &raw, 0.5, 0.0).unwrap())
+                    .index(sample_wager(bounds, &raw, 0.5, 0.0).unwrap())
                     .unwrap(),
                 count
             );
@@ -2953,27 +3126,71 @@ mod tests {
     }
 
     #[test]
-    fn sizing_can_form_two_narrow_peaks_without_stack_scale_floor() {
+    fn sizing_is_invariant_to_currency_and_finer_chip_resolution() {
+        let raw = sizing_test_raw();
+        let a = WagerBounds {
+            min_added_chips: 10,
+            max_added_chips: 200,
+            chip_unit: 1,
+            big_blind_chips: 10,
+        };
+        let b = WagerBounds {
+            min_added_chips: 100,
+            max_added_chips: 2000,
+            chip_unit: 10,
+            big_blind_chips: 100,
+        };
+        let c = WagerBounds {
+            max_added_chips: 1995,
+            chip_unit: 1,
+            ..b
+        };
+        let ga = BbSizingGrid::new(a).unwrap();
+        let gb = BbSizingGrid::new(b).unwrap();
+        // c has the same occupied ordinary bins, even though its final chip is off-grid.
+        let gc = BbSizingGrid::new(c).unwrap();
+        assert_eq!(ga.count, gb.count);
+        assert_eq!(ga.count, gc.count);
+        for position in 0..ga.count {
+            let ia = ga.representative(position).unwrap();
+            let ib = gb.representative(position).unwrap();
+            let ic = gc.representative(position).unwrap();
+            let x = sizing_nll(a, ia, &raw).unwrap();
+            assert_eq!(x, sizing_nll(b, ib, &raw).unwrap());
+            assert_eq!(x, sizing_nll(c, ic, &raw).unwrap());
+        }
+        assert_eq!(
+            sizing_nll(a, ga.ticks, &raw).unwrap(),
+            sizing_nll(b, gb.ticks, &raw).unwrap()
+        );
+    }
+
+    #[test]
+    fn shared_scorer_can_form_two_separate_peaks() {
         let bounds = WagerBounds {
             min_added_chips: 1,
             max_added_chips: 1200,
             chip_unit: 1,
-            big_blind_chips: 10,
+            big_blind_chips: 100,
         };
-        let mut raw = sizing_test_raw();
-        for k in 0..SIZING_COMPONENTS {
-            raw[1 + k] = if k < 2 { 0.0 } else { -30.0 };
-            raw[1 + SIZING_COMPONENTS + k] = (1.0_f64
-                + if k == 0 {
-                    500.0 / 1000.0
-                } else {
-                    999.0 / 1000.0
-                })
-            .ln();
-            raw[1 + 2 * SIZING_COMPONENTS + k] = 0.001_f64.ln();
+        // Two triangular bumps in log1p(BB), represented by three hinges each.
+        // These are test parameters only, never used for initialization.
+        let width = 6;
+        let mut raw = vec![0.0; sizing_outputs(width)];
+        raw[0] = -2.0;
+        for (j, centre) in [5.0_f64.ln_1p(), 10.0_f64.ln_1p()].into_iter().enumerate() {
+            for (k, (offset, v)) in [(-0.02, 1000.0), (0.0, -2000.0), (0.02, 1000.0)]
+                .into_iter()
+                .enumerate()
+            {
+                let i = 3 * j + k;
+                raw[1 + i] = -(centre + offset);
+                raw[1 + width + i] = 1.0;
+                raw[1 + 2 * width + i] = v;
+            }
         }
-        let nll = |chips: usize| sizing_nll(bounds, 1000.0, chips - 1, &raw).unwrap().0;
-        assert!(nll(999) < nll(998) + 0.1);
+        let nll = |chips: usize| sizing_nll(bounds, chips - 1, &raw).unwrap().0;
+        assert_eq!(nll(999), nll(998));
         assert!(nll(998) < nll(12));
         assert!(nll(500) + 10.0 < nll(750));
         assert!(nll(999) + 10.0 < nll(750));

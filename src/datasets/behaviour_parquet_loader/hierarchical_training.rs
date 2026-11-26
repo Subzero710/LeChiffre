@@ -300,7 +300,7 @@ impl HierarchicalTrainer {
     /// FNV-128 detects accidental model mismatches; it is not a cryptographic signature.
     pub fn model_id(&self) -> Result<String, HierarchicalTrainingError> {
         let data = serde_json::to_vec(&json!({
-            "format":"lechiffre.hierarchical.model.v9",
+            "format":"lechiffre.hierarchical.model.v10-shared-bb",
             "z0":self.blueprint.centre().as_slice(),
             "prior_std":self.blueprint.prior_std(),
             "generator":self.generator.checkpoint_value(),
@@ -313,7 +313,7 @@ impl HierarchicalTrainer {
         for byte in data {
             hash = (hash ^ u128::from(byte)).wrapping_mul(PRIME);
         }
-        Ok(format!("hierarchical-v9-{hash:032x}"))
+        Ok(format!("hierarchical-v10-shared-bb-{hash:032x}"))
     }
 
     /// Hierarchical-only checkpoint. Exact model, optimizer, RNG, phase, and dataset provenance.
@@ -322,7 +322,7 @@ impl HierarchicalTrainer {
             return Err(HierarchicalTrainingError::NotTrained);
         }
         let value = json!({
-            "format":"lechiffre.hierarchical.checkpoint.v9",
+            "format":"lechiffre.hierarchical.checkpoint.v10-shared-bb",
             "model_id":self.model_id()?,
             "blueprint":{"centre":self.blueprint.centre().as_slice(),
                          "prior_std":self.blueprint.prior_std()},
@@ -398,7 +398,7 @@ impl HierarchicalTrainer {
             ],
         )
         .map_err(bad)?;
-        let expected_format = "lechiffre.hierarchical.checkpoint.v9";
+        let expected_format = "lechiffre.hierarchical.checkpoint.v10-shared-bb";
         if value["format"].as_str() != Some(expected_format) {
             return Err(bad(format!("expected {expected_format}")));
         }
@@ -2209,6 +2209,8 @@ mod tests {
             "lechiffre.hierarchical.checkpoint.v6",
             "lechiffre.hierarchical.checkpoint.v7",
             "lechiffre.hierarchical.checkpoint.v8",
+            "lechiffre.hierarchical.checkpoint.v9",
+            "lechiffre.hierarchical.checkpoint.v10",
         ] {
             obsolete["format"] = json!(obsolete_version);
             std::fs::write(&invalid_path, serde_json::to_vec(&obsolete).unwrap()).unwrap();
@@ -2278,7 +2280,7 @@ mod sizing_diagnostic {
     use crate::behavioural::ActionKind;
 
     #[test]
-    #[ignore = "requires the real dataset, manifest, and two explicit V9 checkpoints"]
+    #[ignore = "requires the real dataset, manifest, and two explicit V10 checkpoints"]
     fn sizing_diagnostic_z32_g64() {
         let env = |key: &str| std::env::var(key).expect(key);
         let data = BehaviourParquetDataset::open(env("LECHIFFRE_DIAG_DATASET")).unwrap();
