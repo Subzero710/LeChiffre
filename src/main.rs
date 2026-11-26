@@ -802,40 +802,6 @@ fn train_hierarchical(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn convert_v5_blueprint_cli(args: &[String]) -> Result<(), String> {
-    use lechiffre::datasets::behaviour_parquet_loader::HierarchicalTrainer;
-    if args.len() != 4 {
-        return Err(
-            "usage: --convert-v5-blueprint <v5-checkpoint.json> <new-v8-checkpoint.json>".into(),
-        );
-    }
-    let trainer =
-        HierarchicalTrainer::convert_v5_blueprint(&args[2], &args[3]).map_err(|e| e.to_string())?;
-    println!(
-        "checkpoint={} model_id={}",
-        args[3],
-        trainer.model_id().map_err(|e| e.to_string())?
-    );
-    Ok(())
-}
-
-fn convert_v6_blueprint_cli(args: &[String]) -> Result<(), String> {
-    use lechiffre::datasets::behaviour_parquet_loader::HierarchicalTrainer;
-    if args.len() != 4 {
-        return Err(
-            "usage: --convert-v6-blueprint <v6-checkpoint.json> <new-v8-checkpoint.json>".into(),
-        );
-    }
-    let trainer =
-        HierarchicalTrainer::convert_v6_blueprint(&args[2], &args[3]).map_err(|e| e.to_string())?;
-    println!(
-        "checkpoint={} model_id={}",
-        args[3],
-        trainer.model_id().map_err(|e| e.to_string())?
-    );
-    Ok(())
-}
-
 fn resume_hierarchical(args: &[String]) -> Result<(), String> {
     use lechiffre::datasets::behaviour_parquet_loader::{
         BehaviourParquetDataset, HierarchicalTrainer,
@@ -1221,8 +1187,6 @@ async fn main() {
     }
     if args.len() > 1 {
         let result = match args[1].as_str() {
-            "--convert-v5-blueprint" => Some(convert_v5_blueprint_cli(&args)),
-            "--convert-v6-blueprint" => Some(convert_v6_blueprint_cli(&args)),
             "--train-behavioural" => Some(train_hierarchical(&args)),
             "--resume-behavioural" => Some(resume_hierarchical(&args)),
             "--evaluate-behavioural" => Some(evaluate_hierarchical(&args)),

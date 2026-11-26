@@ -107,30 +107,6 @@ impl HierarchicalOptimizationConfig {
         exact_keys(v, &["blueprint_batch_decisions"])?;
         Self::new(dimension(&v["blueprint_batch_decisions"])?).map_err(|e| e.to_string())
     }
-
-    // Used exclusively by the explicit V5 Blueprint conversion, never by V6 loading.
-    fn from_v5_blueprint(v: &Value) -> Result<Self, String> {
-        exact_keys(
-            v,
-            &[
-                "blueprint_batch_decisions",
-                "z0_weight",
-                "z1_weight",
-                "z2_weight",
-            ],
-        )?;
-        let z0 = number(&v["z0_weight"])?;
-        let z1 = number(&v["z1_weight"])?;
-        let z2 = number(&v["z2_weight"])?;
-        if [z0, z1, z2].iter().any(|w| !w.is_finite() || *w <= 0.0)
-            || !(z0 + z1 + z2).is_finite()
-            || z2 * 0.5 == 0.0
-        {
-            return Err("invalid V5 objective weights".into());
-        }
-        // None of these weights was used during Blueprint training.
-        Self::new(dimension(&v["blueprint_batch_decisions"])?).map_err(|e| e.to_string())
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -323,12 +299,8 @@ impl HierarchicalTrainer {
     /// Stable identifier for the exact shared learned model (Z0, A, G and adaptation policy).
     /// FNV-128 detects accidental model mismatches; it is not a cryptographic signature.
     pub fn model_id(&self) -> Result<String, HierarchicalTrainingError> {
-        self.model_id_for_version(8)
-    }
-
-    fn model_id_for_version(&self, version: u8) -> Result<String, HierarchicalTrainingError> {
         let data = serde_json::to_vec(&json!({
-            "format":format!("lechiffre.hierarchical.model.v{version}"),
+            "format":"lechiffre.hierarchical.model.v9",
             "z0":self.blueprint.centre().as_slice(),
             "prior_std":self.blueprint.prior_std(),
             "generator":self.generator.checkpoint_value(),
@@ -341,7 +313,7 @@ impl HierarchicalTrainer {
         for byte in data {
             hash = (hash ^ u128::from(byte)).wrapping_mul(PRIME);
         }
-        Ok(format!("hierarchical-v{version}-{hash:032x}"))
+        Ok(format!("hierarchical-v9-{hash:032x}"))
     }
 
     /// Hierarchical-only checkpoint. Exact model, optimizer, RNG, phase, and dataset provenance.
@@ -350,7 +322,7 @@ impl HierarchicalTrainer {
             return Err(HierarchicalTrainingError::NotTrained);
         }
         let value = json!({
-            "format":"lechiffre.hierarchical.checkpoint.v8",
+            "format":"lechiffre.hierarchical.checkpoint.v9",
             "model_id":self.model_id()?,
             "blueprint":{"centre":self.blueprint.centre().as_slice(),
                          "prior_std":self.blueprint.prior_std()},
@@ -400,34 +372,6 @@ impl HierarchicalTrainer {
     }
 
     pub fn load_checkpoint(path: impl AsRef<Path>) -> Result<Self, HierarchicalTrainingError> {
-        Self::read_checkpoint(path, 8)
-    }
-
-    /// Explicit conversion of a verified V5 Blueprint-only checkpoint. No training.
-    /// V5 Personalization/Momentary checkpoints used different objectives and are rejected.
-    pub fn convert_v5_blueprint(
-        source: impl AsRef<Path>,
-        destination: impl AsRef<Path>,
-    ) -> Result<Self, HierarchicalTrainingError> {
-        let trainer = Self::read_checkpoint(source, 5)?;
-        trainer.save_checkpoint(destination)?;
-        Ok(trainer)
-    }
-
-    /// Explicit migration of a verified V6 Blueprint-only checkpoint.
-    pub fn convert_v6_blueprint(
-        source: impl AsRef<Path>,
-        destination: impl AsRef<Path>,
-    ) -> Result<Self, HierarchicalTrainingError> {
-        let trainer = Self::read_checkpoint(source, 6)?;
-        trainer.save_checkpoint(destination)?;
-        Ok(trainer)
-    }
-
-    fn read_checkpoint(
-        path: impl AsRef<Path>,
-        version: u8,
-    ) -> Result<Self, HierarchicalTrainingError> {
         let value: Value = serde_json::from_reader(File::open(path)?)?;
         let bad = HierarchicalTrainingError::InvalidCheckpoint;
         exact_keys(
@@ -454,8 +398,8 @@ impl HierarchicalTrainer {
             ],
         )
         .map_err(bad)?;
-        let expected_format = format!("lechiffre.hierarchical.checkpoint.v{version}");
-        if value["format"].as_str() != Some(expected_format.as_str()) {
+        let expected_format = "lechiffre.hierarchical.checkpoint.v9";
+        if value["format"].as_str() != Some(expected_format) {
             return Err(bad(format!("expected {expected_format}")));
         }
         exact_keys(&value["blueprint"], &["centre", "prior_std"]).map_err(bad)?;
@@ -498,12 +442,8 @@ impl HierarchicalTrainer {
             number(&value["baseline_config"]["learning_rate"]).map_err(bad)?,
             number(&value["baseline_config"]["max_step_prior_std"]).map_err(bad)?,
         )?;
-        let optimization = if version == 5 {
-            HierarchicalOptimizationConfig::from_v5_blueprint(&value["optimization"])
-        } else {
-            HierarchicalOptimizationConfig::from_checkpoint(&value["optimization"])
-        }
-        .map_err(bad)?;
+        let optimization =
+            HierarchicalOptimizationConfig::from_checkpoint(&value["optimization"]).map_err(bad)?;
         let mut trainer = Self::new(
             blueprint,
             generator,
@@ -562,12 +502,7 @@ impl HierarchicalTrainer {
         {
             return Err(bad("inconsistent training progress".into()));
         }
-        if version != 8 && (trainer.personalization_epochs != 0 || trainer.momentary_epochs != 0) {
-            return Err(bad(format!(
-                "only V{version} Blueprint-only checkpoints can be converted"
-            )));
-        }
-        if value["model_id"].as_str() != Some(trainer.model_id_for_version(version)?.as_str()) {
+        if value["model_id"].as_str() != Some(trainer.model_id()?.as_str()) {
             return Err(bad("shared model fingerprint mismatch".into()));
         }
         Ok(trainer)
@@ -2179,118 +2114,6 @@ mod tests {
     }
 
     #[test]
-    fn explicit_v5_conversion_preserves_blueprint_and_rejects_later_phases() {
-        let data = dataset();
-        let partitions = DatasetPartitions::canonical_for_test(&data);
-        let episode = TrainingEpisodeConfig::new(3, 3).unwrap();
-        let mut trainer = trainer();
-        let mut provider = |_: u64,
-                            _: &crate::behavioural::HandId,
-                            _: u32|
-         -> Result<_, &'static str> { Ok(decision(600).1) };
-        trainer
-            .train_blueprint_epoch(&data, &[42], &partitions, episode, &mut provider)
-            .unwrap();
-        let path = std::env::temp_dir().join(format!(
-            "lechiffre-v5-conversion-{}-{}.json",
-            std::process::id(),
-            trainer.model_id().unwrap()
-        ));
-        let old = path.with_extension("v5.json");
-        let converted = path.with_extension("v8.json");
-        let rejected = path.with_extension("rejected.json");
-        trainer.save_checkpoint(&path).unwrap();
-        let original: Value = serde_json::from_reader(File::open(&path).unwrap()).unwrap();
-        let mut legacy = original.clone();
-        legacy["format"] = json!("lechiffre.hierarchical.checkpoint.v5");
-        legacy["model_id"] = json!(trainer.model_id_for_version(5).unwrap());
-        legacy["optimization"] =
-            json!({"blueprint_batch_decisions":4,"z0_weight":1.0,"z1_weight":1.0,"z2_weight":1.0});
-        std::fs::write(&old, serde_json::to_vec(&legacy).unwrap()).unwrap();
-        assert!(HierarchicalTrainer::load_checkpoint(&old).is_err());
-        let restored = HierarchicalTrainer::convert_v5_blueprint(&old, &converted).unwrap();
-        let actual: Value = serde_json::from_reader(File::open(&converted).unwrap()).unwrap();
-        assert_eq!(actual, original);
-        assert_eq!(
-            restored
-                .evaluate_blueprint(&data, &partitions, &mut provider)
-                .unwrap(),
-            trainer
-                .evaluate_blueprint(&data, &partitions, &mut provider)
-                .unwrap()
-        );
-        assert!(HierarchicalTrainer::convert_v5_blueprint(&old, &converted).is_err());
-        assert!(HierarchicalTrainer::convert_v5_blueprint(&path, &rejected).is_err());
-        legacy["epochs"]["personalization"] = json!(1);
-        std::fs::write(&old, serde_json::to_vec(&legacy).unwrap()).unwrap();
-        assert!(HierarchicalTrainer::convert_v5_blueprint(&old, &rejected).is_err());
-        assert!(!rejected.exists());
-        legacy["epochs"]["personalization"] = json!(0);
-        legacy["model_id"] = json!("invalid");
-        std::fs::write(&old, serde_json::to_vec(&legacy).unwrap()).unwrap();
-        assert!(HierarchicalTrainer::convert_v5_blueprint(&old, &rejected).is_err());
-        assert!(!rejected.exists());
-        for file in [path, old, converted] {
-            std::fs::remove_file(file).unwrap();
-        }
-    }
-
-    #[test]
-    fn explicit_v6_conversion_preserves_blueprint_and_rejects_later_phases() {
-        let data = dataset();
-        let partitions = DatasetPartitions::canonical_for_test(&data);
-        let episode = TrainingEpisodeConfig::new(3, 3).unwrap();
-        let mut trainer = trainer();
-        let mut provider = |_: u64,
-                            _: &crate::behavioural::HandId,
-                            _: u32|
-         -> Result<_, &'static str> { Ok(decision(600).1) };
-        trainer
-            .train_blueprint_epoch(&data, &[42], &partitions, episode, &mut provider)
-            .unwrap();
-        let path = std::env::temp_dir().join(format!(
-            "lechiffre-v6-conversion-{}-{}.json",
-            std::process::id(),
-            trainer.model_id().unwrap()
-        ));
-        let old = path.with_extension("v6.json");
-        let converted = path.with_extension("v8.json");
-        let rejected = path.with_extension("rejected.json");
-        trainer.save_checkpoint(&path).unwrap();
-        let original: Value = serde_json::from_reader(File::open(&path).unwrap()).unwrap();
-        let mut legacy = original.clone();
-        legacy["format"] = json!("lechiffre.hierarchical.checkpoint.v6");
-        legacy["model_id"] = json!(trainer.model_id_for_version(6).unwrap());
-        std::fs::write(&old, serde_json::to_vec(&legacy).unwrap()).unwrap();
-        assert!(HierarchicalTrainer::load_checkpoint(&old).is_err());
-        let restored = HierarchicalTrainer::convert_v6_blueprint(&old, &converted).unwrap();
-        let actual: Value = serde_json::from_reader(File::open(&converted).unwrap()).unwrap();
-        assert_eq!(actual, original);
-        assert_eq!(
-            restored
-                .evaluate_blueprint(&data, &partitions, &mut provider)
-                .unwrap(),
-            trainer
-                .evaluate_blueprint(&data, &partitions, &mut provider)
-                .unwrap()
-        );
-        assert!(HierarchicalTrainer::convert_v6_blueprint(&old, &converted).is_err());
-        assert!(HierarchicalTrainer::convert_v6_blueprint(&path, &rejected).is_err());
-        legacy["epochs"]["personalization"] = json!(1);
-        std::fs::write(&old, serde_json::to_vec(&legacy).unwrap()).unwrap();
-        assert!(HierarchicalTrainer::convert_v6_blueprint(&old, &rejected).is_err());
-        assert!(!rejected.exists());
-        legacy["epochs"]["personalization"] = json!(0);
-        legacy["model_id"] = json!("invalid");
-        std::fs::write(&old, serde_json::to_vec(&legacy).unwrap()).unwrap();
-        assert!(HierarchicalTrainer::convert_v6_blueprint(&old, &rejected).is_err());
-        assert!(!rejected.exists());
-        for file in [path, old, converted] {
-            std::fs::remove_file(file).unwrap();
-        }
-    }
-
-    #[test]
     fn momentary_training_updates_shared_a_and_g_without_mutating_z0_or_z1() {
         let mut trainer = trainer();
         let baseline = PlayerBaselineAdapter::new(
@@ -2385,6 +2208,7 @@ mod tests {
             "lechiffre.hierarchical.checkpoint.v5",
             "lechiffre.hierarchical.checkpoint.v6",
             "lechiffre.hierarchical.checkpoint.v7",
+            "lechiffre.hierarchical.checkpoint.v8",
         ] {
             obsolete["format"] = json!(obsolete_version);
             std::fs::write(&invalid_path, serde_json::to_vec(&obsolete).unwrap()).unwrap();
@@ -2444,5 +2268,92 @@ mod tests {
             ),
             Err(HierarchicalTrainingError::TrainingPartitionChanged)
         ));
+    }
+}
+
+// Explicit diagnostic: no training, no model save, no Test decisions.
+#[cfg(test)]
+mod sizing_diagnostic {
+    use super::*;
+    use crate::behavioural::ActionKind;
+
+    #[test]
+    #[ignore = "requires the real dataset, manifest, and two explicit V9 checkpoints"]
+    fn sizing_diagnostic_z32_g64() {
+        let env = |key: &str| std::env::var(key).expect(key);
+        let data = BehaviourParquetDataset::open(env("LECHIFFRE_DIAG_DATASET")).unwrap();
+        let partitions =
+            DatasetPartitions::read_manifest(&data, env("LECHIFFRE_DIAG_MANIFEST")).unwrap();
+        let mut provider = |_: u64, hand: &crate::behavioural::HandId, sequence: u32| {
+            data.exact_legal_actions(hand, sequence)
+                .map_err(|e| e.to_string())
+        };
+        let blueprint =
+            HierarchicalTrainer::load_checkpoint(env("LECHIFFRE_DIAG_BLUEPRINT")).unwrap();
+        let personalized =
+            HierarchicalTrainer::load_checkpoint(env("LECHIFFRE_DIAG_PERSONALIZATION")).unwrap();
+        let mut output = std::io::BufWriter::new(
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(env("LECHIFFRE_DIAG_OUTPUT"))
+                .unwrap(),
+        );
+        for (phase, trainer, epochs) in [
+            ("B", &blueprint, (25, 0, 0)),
+            ("P", &personalized, (25, 5, 0)),
+        ] {
+            trainer
+                .check_evaluation_dataset(&data, &partitions)
+                .unwrap();
+            assert_eq!(trainer.completed_epochs(), epochs);
+            assert_eq!(trainer.training_subjects(), &[3, 6, 8, 11, 13, 14]);
+            assert_eq!(trainer.generator.latent_config().dimension(), 32);
+            assert_eq!(trainer.generator.parameters().state.output_width(), 64);
+            let model_id = trainer.model_id().unwrap();
+            let mut n = 0;
+            let mut wagers = 0;
+            for &id in trainer.training_subjects() {
+                let baseline = trainer
+                    .evaluation_baseline(&data, &partitions, id, 100, &mut provider)
+                    .unwrap();
+                for membership in &data.subjects[&id] {
+                    let hand = &data.hands[membership.hand_slot];
+                    if !partitions
+                        .contains_evaluation(EvaluationPartition::Validation, hand.hand_index)
+                    {
+                        continue;
+                    }
+                    let observed = hand.materialize(membership.subject_position);
+                    for row in subject_decisions(&observed) {
+                        n += 1;
+                        let obs = decode_decision(&observed, row).unwrap();
+                        if !matches!(obs.observed.kind, ActionKind::Bet | ActionKind::Raise) {
+                            continue;
+                        }
+                        wagers += 1;
+                        let legal = lookup(&mut provider, id, &observed, row).unwrap();
+                        for (history, profile) in
+                            [(0, trainer.blueprint.centre()), (100, baseline.profile())]
+                        {
+                            let mut value = trainer
+                                .generator
+                                .sizing_diagnostic_row(profile, &obs, &legal)
+                                .unwrap();
+                            value["phase"] = json!(phase);
+                            value["model_id"] = json!(&model_id);
+                            value["history"] = json!(history);
+                            value["subject"] = json!(id);
+                            value["hand_index"] = json!(hand.hand_index);
+                            value["sequence_index"] = json!(observed.sequence_indexes()[row]);
+                            writeln!(output, "{value}").unwrap();
+                        }
+                    }
+                }
+            }
+            assert_eq!((n, wagers), (42_693, 6_656));
+            println!("sizing diagnostic {phase}: {model_id} {wagers} wagers");
+        }
+        output.flush().unwrap();
     }
 }

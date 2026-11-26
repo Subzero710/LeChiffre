@@ -127,7 +127,7 @@ L'export Parquet scelle maintenant la légalité exacte dans `exact_legality.v1.
 Pour un Parquet déjà préparé, la commande `--attach-behaviour-legality` la fixe une
 seule fois depuis les mêmes historiques sources ; ensuite l'entraînement, la
 reprise et les évaluations **ne lisent plus les sources CSV/JSON**. Les checkpoints
-globaux sont versionnés v8 et refusent une légalité différente. Le manifeste 70/15/15
+globaux sont versionnés v9 et refusent une légalité différente. Le manifeste 70/15/15
 existant reste valide, car les deux Parquet ne changent pas.
 
 Le Blueprint entraîne Z₀/G en mini-batches sur tout Train ; Personalization entraîne G uniquement à partir de Z₁, avec des mini-batches de toutes les décisions Train des sujets sélectionnés, entrelacées par ordre d'ingestion (même taille que Blueprint), et un état Z₁ cumulatif adapté une fois après chaque main complète, sur des trajectoires disjointes de `support_hands` mains exploitables par joueur. Momentary entraîne G uniquement à partir de Z₂. Les scores des niveaux précédents sont mesurés, sans objectif auxiliaire. La commande `--evaluate-blueprint` permet de contrôler la référence avant Z₂, et `--benchmark-behavioural` mesure NLL et accuracy sur Validation à plusieurs budgets d'historique Z₁, sans utiliser Test.
