@@ -75,8 +75,8 @@ unsafe extern "C" {
 const STREET_COUNT: usize = 4;
 const POSITION_COUNT: usize = 7;
 pub const ACTION_COUNT: usize = 5;
-// One all-in logit plus (intercept, slope, readout) per shared ReLU unit.
-// Reuse the generator's hidden width, not a fixed count of candidate sizes.
+// One all-in logit plus 3H coefficients of a fixed cubic B-spline basis.
+// Keep the dense head dimensions and initialization of the previous scorer.
 fn sizing_outputs(hidden: usize) -> usize {
     1 + 3 * hidden
 }
@@ -533,7 +533,8 @@ impl NeuralBehaviourGenerator {
         let input_width = GENERATOR_CONTEXT_WIDTH
             .checked_add(latent.dimension())
             .ok_or(GeneratorError::InvalidModelShape)?;
-        if latent.dimension() > 4096
+        if hidden < 2
+            || latent.dimension() > 4096
             || parameters.state.input != input_width
             || parameters.action.input != hidden
             || parameters.action.output != ACTION_COUNT
@@ -553,7 +554,7 @@ impl NeuralBehaviourGenerator {
         hidden: usize,
         seed: u64,
     ) -> Result<Self, GeneratorError> {
-        if hidden == 0 || hidden > 4096 || latent.dimension() > 4096 || seed == 0 {
+        if !(2..=4096).contains(&hidden) || latent.dimension() > 4096 || seed == 0 {
             return Err(GeneratorError::InvalidInitialization);
         }
         let mut rng = SeededWeights(seed);
@@ -1008,20 +1009,73 @@ fn sizing_softplus(x: f64) -> f64 {
     x.max(0.0) + (-x.abs()).exp().ln_1p()
 }
 
-// The scorer is shared by every legal bin: E(x) = sum_i v_i ReLU(b_i+w_i*x).
-// b,w,v are generated from the same (state, action) input. No fixed knot,
-// centre, width, or stack-dependent parameter matrix. x = log1p(BB).
+// Fixed open-uniform cubic B-splines on the legal ordinary log1p(BB)
+// interval. The knots depend only on legality, never on learned coefficients.
+// K = 3H; use the same output width as the previous ReLU head.
 fn sizing_width(raw: &[f64]) -> Result<usize, GeneratorError> {
-    if raw.len() < 4 || !(raw.len() - 1).is_multiple_of(3) || raw.iter().any(|x| !x.is_finite()) {
+    if raw.len() < 7 || !(raw.len() - 1).is_multiple_of(3) || raw.iter().any(|x| !x.is_finite()) {
         return Err(GeneratorError::NonFiniteOutput);
     }
-    Ok((raw.len() - 1) / 3)
+    Ok(raw.len() - 1)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CubicBasisRow {
+    first: usize,
+    weights: [f64; 4],
+}
+
+// Work in knot-spacing units: the open knot vector is
+// [0,0,0,0,1,...,K-4,K-3,K-3,K-3,K-3]. Cox-de Boor local recursion.
+fn cubic_basis_row(k: usize, x: f64) -> CubicBasisRow {
+    let end = k - 3;
+    let span = if x == end as f64 {
+        k - 1
+    } else {
+        3 + x.floor() as usize
+    };
+    let knot = |i: usize| i.saturating_sub(3).min(end) as f64;
+    let mut weights = [1.0, 0.0, 0.0, 0.0];
+    let mut left = [0.0; 4];
+    let mut right = [0.0; 4];
+    for j in 1..=3 {
+        left[j] = x - knot(span + 1 - j);
+        right[j] = knot(span + j) - x;
+        let mut saved = 0.0;
+        for r in 0..j {
+            let term = weights[r] / (right[r + 1] + left[j - r]);
+            weights[r] = saved + right[r + 1] * term;
+            saved = left[j - r] * term;
+        }
+        weights[j] = saved;
+    }
+    CubicBasisRow {
+        first: span - 3,
+        weights,
+    }
+}
+
+fn spline_coordinate(grid: BbSizingGrid, position: usize, k: usize) -> f64 {
+    // A singleton has no shape degrees of freedom. Its basis is defined at 0.
+    // Subtract integer bins before conversion to avoid cancellation in log1p.
+    let first = grid.bin_at(0);
+    let last = grid.bin_at(grid.count - 1);
+    if position == 0 {
+        0.0
+    } else if position + 1 == grid.count {
+        (k - 3) as f64
+    } else {
+        let base = (10 + first) as f64;
+        let offset = ((grid.bin_at(position) - first) as f64 / base).ln_1p();
+        let span = ((last - first) as f64 / base).ln_1p();
+        (k - 3) as f64 * (offset / span)
+    }
 }
 
 struct SizingShape {
-    coordinates: Vec<f64>,
+    basis: Vec<CubicBasisRow>,
     log_probs: Vec<f64>,
-    active: Vec<std::ops::Range<usize>>,
+    width: usize,
 }
 
 impl SizingShape {
@@ -1030,58 +1084,24 @@ impl SizingShape {
         if grid.count == 0 {
             return Err(GeneratorError::InvalidProbabilityMass);
         }
-        let coordinates: Vec<f64> = (0..grid.count)
-            .map(|i| (grid.bin_at(i) as f64 / 10.0).ln_1p())
-            .collect();
-        if coordinates.iter().any(|x| !x.is_finite())
-            || coordinates.windows(2).any(|pair| pair[0] >= pair[1])
-        {
-            return Err(GeneratorError::InvalidWagerBounds);
-        }
-        let n = grid.count;
-        // Each ReLU is active on a prefix or suffix of the ordered grid.
-        // Add its affine contribution to that range by two boundary events.
-        // A prefix scan then evaluates all logits in O(N + H log N).
-        let mut events = vec![(0.0, 0.0); n + 1];
-        let mut active = Vec::with_capacity(width);
-        for i in 0..width {
-            let b = raw[1 + i];
-            let w = raw[1 + width + i];
-            let v = raw[1 + 2 * width + i];
-            if ![
-                b + w * coordinates[0],
-                b + w * coordinates[n - 1],
-                v * b,
-                v * w,
-            ]
-            .iter()
-            .all(|x| x.is_finite())
-            {
-                return Err(GeneratorError::NonFiniteOutput);
+        let mut basis = Vec::with_capacity(grid.count);
+        let mut log_probs = Vec::with_capacity(grid.count);
+        for position in 0..grid.count {
+            let x = spline_coordinate(grid, position, width);
+            if !x.is_finite() || x < 0.0 || x > (width - 3) as f64 {
+                return Err(GeneratorError::InvalidWagerBounds);
             }
-            let range = if w >= 0.0 {
-                coordinates.partition_point(|&x| b + w * x <= 0.0)..n
-            } else {
-                0..coordinates.partition_point(|&x| b + w * x > 0.0)
-            };
-            if !range.is_empty() {
-                events[range.start].0 += v * b;
-                events[range.start].1 += v * w;
-                events[range.end].0 -= v * b;
-                events[range.end].1 -= v * w;
-            }
-            active.push(range);
-        }
-        let mut intercept = 0.0;
-        let mut slope = 0.0;
-        let mut log_probs = Vec::with_capacity(n);
-        for (&x, &(db, dw)) in coordinates.iter().zip(&events) {
-            intercept += db;
-            slope += dw;
-            let score = intercept + slope * x;
+            let row = cubic_basis_row(width, x);
+            let score = row
+                .weights
+                .iter()
+                .enumerate()
+                .map(|(j, w)| w * raw[1 + row.first + j])
+                .sum::<f64>();
             if !score.is_finite() {
                 return Err(GeneratorError::NonFiniteOutput);
             }
+            basis.push(row);
             log_probs.push(score);
         }
         let maximum = log_probs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
@@ -1097,9 +1117,9 @@ impl SizingShape {
             }
         }
         Ok(Self {
-            coordinates,
+            basis,
             log_probs,
-            active,
+            width,
         })
     }
 
@@ -1129,9 +1149,7 @@ impl SizingShape {
         Err(GeneratorError::InvalidProbabilityMass)
     }
 
-    // dNLL/dE_j = q_j - 1(j=observed). Every neuron's derivative only needs
-    // the sum of that residual and x times that residual on its active range.
-    // Prefix/suffix scans avoid a dense bins-by-hidden Jacobian.
+    // dNLL/dE_j = q_j - 1(j=observed).
     fn gradient(
         &self,
         observed: usize,
@@ -1139,8 +1157,7 @@ impl SizingShape {
         grad: &mut [f64],
     ) -> Result<(), GeneratorError> {
         let n = self.log_probs.len();
-        let width = self.active.len();
-        if observed >= n || raw.len() != sizing_outputs(width) || grad.len() != raw.len() {
+        if observed >= n || raw.len() != self.width + 1 || grad.len() != raw.len() {
             return Err(GeneratorError::InvalidObservedWager);
         }
         let residuals: Vec<f64> = self
@@ -1152,43 +1169,25 @@ impl SizingShape {
         self.score_gradient(&residuals, raw, grad)
     }
 
+    // B^T residual, four nonzero basis weights per bin. Preserve the atom
+    // gradient at index zero. O(N+K) time, no dense Jacobian.
     fn score_gradient(
         &self,
         residuals: &[f64],
         raw: &[f64],
         grad: &mut [f64],
     ) -> Result<(), GeneratorError> {
-        let n = self.log_probs.len();
-        let width = self.active.len();
-        if residuals.len() != n || raw.len() != sizing_outputs(width) || grad.len() != raw.len() {
+        if residuals.len() != self.log_probs.len()
+            || raw.len() != self.width + 1
+            || grad.len() != raw.len()
+        {
             return Err(GeneratorError::InvalidObservedWager);
         }
-        let mut prefix = vec![(0.0, 0.0); n + 1];
-        let mut suffix = vec![(0.0, 0.0); n + 1];
-        for (j, &d) in residuals.iter().enumerate() {
-            prefix[j + 1] = (prefix[j].0 + d, prefix[j].1 + d * self.coordinates[j]);
-        }
-        for (j, &d) in residuals.iter().enumerate().rev() {
-            suffix[j] = (
-                suffix[j + 1].0 + d,
-                suffix[j + 1].1 + d * self.coordinates[j],
-            );
-        }
-        for (i, range) in self.active.iter().enumerate() {
-            if range.is_empty() {
-                continue;
+        grad[1..].fill(0.0);
+        for (row, &d) in self.basis.iter().zip(residuals) {
+            for (j, &w) in row.weights.iter().enumerate() {
+                grad[1 + row.first + j] += w * d;
             }
-            let (sum, xsum) = if range.start == 0 {
-                prefix[range.end]
-            } else {
-                suffix[range.start]
-            };
-            let b = raw[1 + i];
-            let w = raw[1 + width + i];
-            let v = raw[1 + 2 * width + i];
-            grad[1 + i] = v * sum;
-            grad[1 + width + i] = v * xsum;
-            grad[1 + 2 * width + i] = b * sum + w * xsum;
         }
         if grad.iter().any(|x| !x.is_finite()) {
             return Err(GeneratorError::NonFiniteGradient);
@@ -2626,7 +2625,7 @@ impl NeuralBehaviourGenerator {
             "observed_bb":bounds.chips(actual) as f64 / bounds.big_blind_chips as f64,
             "map_bb":bounds.chips(best) as f64 / bounds.big_blind_chips as f64,
             "observed_allin":actual==count, "map_allin":best==count,
-            "sizing_measure":"bb_nearest_0.1_shared_relu_plus_allin_atom",
+            "sizing_measure":"bb_nearest_0.1_cubic_spline_plus_allin_atom",
             "bb_ordinary_bins":grid.count,
             "actual_bb_bin":(actual < count).then(|| BbSizingGrid::bin(bounds, actual).to_string()),
             "map_bb_bin":(best < count).then(|| BbSizingGrid::bin(bounds, best).to_string()),
@@ -3151,8 +3150,33 @@ mod tests {
         }
     }
 
+    // Independent dense Cox-de Boor recursion, used only in tests.
+    fn direct_basis(i: usize, degree: usize, k: usize, x: f64) -> f64 {
+        let knot = |j: usize| j.saturating_sub(3).min(k - 3) as f64;
+        if degree == 0 {
+            return if knot(i) <= x && x < knot(i + 1) {
+                1.0
+            } else {
+                0.0
+            };
+        }
+        let left = knot(i + degree) - knot(i);
+        let right = knot(i + degree + 1) - knot(i + 1);
+        let a = if left > 0.0 {
+            (x - knot(i)) / left * direct_basis(i, degree - 1, k, x)
+        } else {
+            0.0
+        };
+        let b = if right > 0.0 {
+            (knot(i + degree + 1) - x) / right * direct_basis(i + 1, degree - 1, k, x)
+        } else {
+            0.0
+        };
+        a + b
+    }
+
     #[test]
-    fn shared_scorer_matches_direct_network() {
+    fn cubic_scorer_matches_dense_reference() {
         let raw = sizing_test_raw();
         let bounds = WagerBounds {
             min_added_chips: 10,
@@ -3162,16 +3186,29 @@ mod tests {
         };
         let grid = BbSizingGrid::new(bounds).unwrap();
         let shape = SizingShape::new(grid, &raw).unwrap();
-        let width = sizing_width(&raw).unwrap();
-        let scores: Vec<f64> = shape
-            .coordinates
-            .iter()
-            .map(|&x| {
-                (0..width)
-                    .map(|i| {
-                        raw[1 + 2 * width + i] * (raw[1 + i] + raw[1 + width + i] * x).max(0.0)
-                    })
-                    .sum()
+        let k = sizing_width(&raw).unwrap();
+        let scores: Vec<f64> = (0..grid.count)
+            .map(|j| {
+                let x = spline_coordinate(grid, j, k);
+                let row = shape.basis[j];
+                assert!((row.weights.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+                assert!(row.weights.iter().all(|w| *w >= 0.0));
+                let mut score = 0.0;
+                for i in 0..k {
+                    let expected = if x == (k - 3) as f64 {
+                        if i == k - 1 { 1.0 } else { 0.0 }
+                    } else {
+                        direct_basis(i, 3, k, x)
+                    };
+                    let actual = if (row.first..row.first + 4).contains(&i) {
+                        row.weights[i - row.first]
+                    } else {
+                        0.0
+                    };
+                    assert!((actual - expected).abs() < 1e-12);
+                    score += expected * raw[1 + i];
+                }
+                score
             })
             .collect();
         let max = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
@@ -3301,34 +3338,35 @@ mod tests {
     }
 
     #[test]
-    fn shared_scorer_can_form_two_separate_peaks() {
+    fn cubic_scorer_can_form_two_separate_peaks() {
         let bounds = WagerBounds {
             min_added_chips: 1,
             max_added_chips: 1200,
             chip_unit: 1,
             big_blind_chips: 100,
         };
-        // Two triangular bumps in log1p(BB), represented by three hinges each.
-        // These are test parameters only, never used for initialization.
-        let width = 6;
-        let mut raw = vec![0.0; sizing_outputs(width)];
+        let grid = BbSizingGrid::new(bounds).unwrap();
+        let mut raw = vec![0.0; sizing_outputs(8)];
         raw[0] = -2.0;
-        for (j, centre) in [5.0_f64.ln_1p(), 10.0_f64.ln_1p()].into_iter().enumerate() {
-            for (k, (offset, v)) in [(-0.02, 1000.0), (0.0, -2000.0), (0.02, 1000.0)]
-                .into_iter()
-                .enumerate()
-            {
-                let i = 3 * j + k;
-                raw[1 + i] = -(centre + offset);
-                raw[1 + width + i] = 1.0;
-                raw[1 + 2 * width + i] = v;
-            }
-        }
-        let nll = |chips: usize| sizing_nll(bounds, chips - 1, &raw).unwrap().0;
-        assert_eq!(nll(999), nll(998));
-        assert!(nll(998) < nll(12));
-        assert!(nll(500) + 10.0 < nll(750));
-        assert!(nll(999) + 10.0 < nll(750));
+        raw[1 + 5] = 40.0;
+        raw[1 + 17] = 40.0;
+        let shape = SizingShape::new(grid, &raw).unwrap();
+        let k = sizing_width(&raw).unwrap();
+        let nearest = |x: f64| {
+            (0..grid.count)
+                .min_by(|&a, &b| {
+                    (spline_coordinate(grid, a, k) - x)
+                        .abs()
+                        .total_cmp(&(spline_coordinate(grid, b, k) - x).abs())
+                })
+                .unwrap()
+        };
+        let peak1 = nearest(4.0);
+        let peak2 = nearest(16.0);
+        let valley = nearest(10.0);
+        assert!(peak1 < valley && valley < peak2);
+        assert!(shape.log_probs[peak1] > shape.log_probs[valley] + 10.0);
+        assert!(shape.log_probs[peak2] > shape.log_probs[valley] + 10.0);
     }
 
     #[test]
