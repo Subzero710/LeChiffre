@@ -269,7 +269,7 @@ struct BehaviourRunConfig {
     z0_initial: Vec<f32>,
     z0_prior_std: Vec<f32>,
     blueprint_epochs: usize,
-    personalization_history_hands: Vec<usize>,
+    personalization_epochs: usize,
     momentary_history_hands: usize,
     momentary_epochs: usize,
     subjects: Vec<u64>,
@@ -314,12 +314,6 @@ fn config_unsigned_list(v: &serde_json::Value, key: &str) -> Result<Vec<u64>, St
         })
         .collect()
 }
-fn config_sizes(v: &serde_json::Value, key: &str) -> Result<Vec<usize>, String> {
-    config_unsigned_list(v, key)?
-        .into_iter()
-        .map(|x| usize::try_from(x).map_err(|_| format!("{key}: index overflow")))
-        .collect()
-}
 fn config_f32_vec(v: &serde_json::Value, key: &str) -> Result<Vec<f32>, String> {
     v[key]
         .as_array()
@@ -361,7 +355,7 @@ fn run_configuration(path: &str) -> Result<BehaviourRunConfig, String> {
         "query_hands",
         "blueprint_epochs",
         "blueprint_batch_decisions",
-        "personalization_history_hands",
+        "personalization_epochs",
         "momentary_history_hands",
         "momentary_epochs",
         "subject_ids",
@@ -375,19 +369,18 @@ fn run_configuration(path: &str) -> Result<BehaviourRunConfig, String> {
     let optimization =
         HierarchicalOptimizationConfig::new(config_usize(&v, "blueprint_batch_decisions")?)
             .map_err(|e| e.to_string())?;
-    let history = config_sizes(&v, "personalization_history_hands")?;
+    let personalization_epochs = config_usize(&v, "personalization_epochs")?;
     let momentary_history = config_usize(&v, "momentary_history_hands")?;
     let dim = config_usize(&v, "latent_dimension")?;
     let initial = config_f32_vec(&v, "z0_initial")?;
     let std = config_f32_vec(&v, "z0_prior_std")?;
     let subjects = config_unsigned_list(&v, "subject_ids")?;
     if config_usize(&v, "blueprint_epochs")? == 0
-        || (history.is_empty() && config_usize(&v, "momentary_epochs")? > 0)
+        || (personalization_epochs == 0 && config_usize(&v, "momentary_epochs")? > 0)
         || dim == 0
         || initial.len() != dim
         || std.len() != dim
         || subjects.is_empty()
-        || history.iter().any(|&n| n > episode.support_hands)
         || momentary_history > episode.support_hands
         || std.iter().any(|s| *s <= 0.0)
         || [
@@ -422,7 +415,7 @@ fn run_configuration(path: &str) -> Result<BehaviourRunConfig, String> {
         z0_initial: initial,
         z0_prior_std: std,
         blueprint_epochs: config_usize(&v, "blueprint_epochs")?,
-        personalization_history_hands: history,
+        personalization_epochs,
         momentary_history_hands: momentary_history,
         momentary_epochs: config_usize(&v, "momentary_epochs")?,
         subjects,
@@ -431,7 +424,7 @@ fn run_configuration(path: &str) -> Result<BehaviourRunConfig, String> {
 
 struct ResumeConfig {
     blueprint_extra_epochs: usize,
-    personalization_history_hands: Vec<usize>,
+    personalization_extra_epochs: usize,
     momentary_history_hands: usize,
     momentary_extra_epochs: usize,
 }
@@ -441,19 +434,19 @@ fn resume_configuration(path: &str) -> Result<ResumeConfig, String> {
         &v,
         &[
             "blueprint_extra_epochs",
-            "personalization_history_hands",
+            "personalization_extra_epochs",
             "momentary_history_hands",
             "momentary_extra_epochs",
         ],
     )?;
     let result = ResumeConfig {
         blueprint_extra_epochs: config_usize(&v, "blueprint_extra_epochs")?,
-        personalization_history_hands: config_sizes(&v, "personalization_history_hands")?,
+        personalization_extra_epochs: config_usize(&v, "personalization_extra_epochs")?,
         momentary_history_hands: config_usize(&v, "momentary_history_hands")?,
         momentary_extra_epochs: config_usize(&v, "momentary_extra_epochs")?,
     };
     if result.blueprint_extra_epochs == 0
-        && result.personalization_history_hands.is_empty()
+        && result.personalization_extra_epochs == 0
         && result.momentary_extra_epochs == 0
     {
         return Err("resume configuration requests no additional training".into());
@@ -631,18 +624,15 @@ fn execute_phases(
     episode: lechiffre::datasets::behaviour_parquet_loader::TrainingEpisodeConfig,
     subjects: &[u64],
     blueprint_epochs: usize,
-    personalization_histories: &[usize],
+    personalization_epochs: usize,
     momentary_history: usize,
     momentary_epochs: usize,
 ) -> Result<(), String> {
     let (b, p, m) = trainer.completed_epochs();
     if (blueprint_epochs > 0 && (p > 0 || m > 0))
-        || (!personalization_histories.is_empty() && m > 0)
+        || (personalization_epochs > 0 && m > 0)
         || (b == 0 && blueprint_epochs == 0)
-        || (momentary_epochs > 0 && p == 0 && personalization_histories.is_empty())
-        || personalization_histories
-            .iter()
-            .any(|&n| n > episode.support_hands)
+        || (momentary_epochs > 0 && p == 0 && personalization_epochs == 0)
         || momentary_history > episode.support_hands
     {
         return Err("invalid training phase transition or history budget".into());
@@ -663,14 +653,13 @@ fn execute_phases(
             .map_err(|e| e.to_string())?;
         println!("{}", blueprint_report_value(&validation));
     }
-    for &history in personalization_histories {
+    for _ in 0..personalization_epochs {
         let report = trainer
             .train_personalization_epoch(
                 dataset,
                 subjects,
                 partitions,
                 episode,
-                history,
                 &mut replay_provider(dataset),
             )
             .map_err(|e| e.to_string())?;
@@ -783,7 +772,7 @@ fn train_hierarchical(args: &[String]) -> Result<(), String> {
         run.episode,
         &run.subjects,
         run.blueprint_epochs,
-        &run.personalization_history_hands,
+        run.personalization_epochs,
         run.momentary_history_hands,
         run.momentary_epochs,
     )?;
@@ -817,11 +806,28 @@ fn convert_v5_blueprint_cli(args: &[String]) -> Result<(), String> {
     use lechiffre::datasets::behaviour_parquet_loader::HierarchicalTrainer;
     if args.len() != 4 {
         return Err(
-            "usage: --convert-v5-blueprint <v5-checkpoint.json> <new-v6-checkpoint.json>".into(),
+            "usage: --convert-v5-blueprint <v5-checkpoint.json> <new-v8-checkpoint.json>".into(),
         );
     }
     let trainer =
         HierarchicalTrainer::convert_v5_blueprint(&args[2], &args[3]).map_err(|e| e.to_string())?;
+    println!(
+        "checkpoint={} model_id={}",
+        args[3],
+        trainer.model_id().map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
+fn convert_v6_blueprint_cli(args: &[String]) -> Result<(), String> {
+    use lechiffre::datasets::behaviour_parquet_loader::HierarchicalTrainer;
+    if args.len() != 4 {
+        return Err(
+            "usage: --convert-v6-blueprint <v6-checkpoint.json> <new-v8-checkpoint.json>".into(),
+        );
+    }
+    let trainer =
+        HierarchicalTrainer::convert_v6_blueprint(&args[2], &args[3]).map_err(|e| e.to_string())?;
     println!(
         "checkpoint={} model_id={}",
         args[3],
@@ -855,7 +861,7 @@ fn resume_hierarchical(args: &[String]) -> Result<(), String> {
         episode,
         &subjects,
         config.blueprint_extra_epochs,
-        &config.personalization_history_hands,
+        config.personalization_extra_epochs,
         config.momentary_history_hands,
         config.momentary_extra_epochs,
     )?;
@@ -1216,6 +1222,7 @@ async fn main() {
     if args.len() > 1 {
         let result = match args[1].as_str() {
             "--convert-v5-blueprint" => Some(convert_v5_blueprint_cli(&args)),
+            "--convert-v6-blueprint" => Some(convert_v6_blueprint_cli(&args)),
             "--train-behavioural" => Some(train_hierarchical(&args)),
             "--resume-behavioural" => Some(resume_hierarchical(&args)),
             "--evaluate-behavioural" => Some(evaluate_hierarchical(&args)),
@@ -1456,12 +1463,20 @@ mod hierarchical_cli_tests {
         std::fs::write(&p, serde_json::to_vec(&original).unwrap()).unwrap();
         assert!(run_configuration(p.to_str().unwrap()).is_ok());
         let mut blueprint_only = original.clone();
-        blueprint_only["personalization_history_hands"] = serde_json::json!([]);
+        blueprint_only["personalization_epochs"] = serde_json::json!(0);
         blueprint_only["momentary_epochs"] = serde_json::json!(0);
         std::fs::write(&p, serde_json::to_vec(&blueprint_only).unwrap()).unwrap();
         assert!(run_configuration(p.to_str().unwrap()).is_ok());
         blueprint_only["momentary_epochs"] = serde_json::json!(1);
         std::fs::write(&p, serde_json::to_vec(&blueprint_only).unwrap()).unwrap();
+        assert!(run_configuration(p.to_str().unwrap()).is_err());
+        let mut obsolete_history = original.clone();
+        obsolete_history
+            .as_object_mut()
+            .unwrap()
+            .remove("personalization_epochs");
+        obsolete_history["personalization_history_hands"] = serde_json::json!([0, 1, 10]);
+        std::fs::write(&p, serde_json::to_vec(&obsolete_history).unwrap()).unwrap();
         assert!(run_configuration(p.to_str().unwrap()).is_err());
         let mut obsolete_weight = original.clone();
         obsolete_weight["generator_z0_weight"] = serde_json::json!(1.0);

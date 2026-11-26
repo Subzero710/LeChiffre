@@ -24,13 +24,7 @@
   "support_hands": 100,
   "query_hands": 30,
   "blueprint_epochs": 5,
-  "personalization_history_hands": [
-    0,
-    10,
-    100,
-    10,
-    100
-  ],
+  "personalization_epochs": 5,
   "momentary_history_hands": 100,
   "momentary_epochs": 10,
   "subject_ids": [

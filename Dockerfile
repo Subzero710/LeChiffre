@@ -4,14 +4,15 @@
 FROM rust:1.99.1-bookworm AS toolchain
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        build-essential cmake pkg-config perl \
+        build-essential cmake pkg-config perl libopenblas-pthread-dev \
     && rm -rf /var/lib/apt/lists/*
 RUN rustup component add rustfmt clippy
 
 # Do not inherit the vendor crate's x86-64-v3 CPU requirement: containers
 # must run on baseline x86-64 machines. Keep the deep CFR process stack budget.
 ENV RUSTFLAGS="-C link-arg=-Wl,-zstack-size=47185920 -C force-frame-pointers=yes" \
-    CARGO_TARGET_DIR=/cargo-target
+    CARGO_TARGET_DIR=/cargo-target \
+    OPENBLAS_NUM_THREADS=1
 WORKDIR /workspace
 
 FROM toolchain AS build
@@ -33,10 +34,10 @@ RUN --mount=type=cache,id=lechiffre-cargo-registry,target=/usr/local/cargo/regis
 
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates libgcc-s1 libstdc++6 \
+    && apt-get install -y --no-install-recommends ca-certificates libgcc-s1 libstdc++6 libopenblas0-pthread \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /workspace
-ENV HOME=/tmp
+ENV HOME=/tmp OPENBLAS_NUM_THREADS=1
 USER 65532:65532
 COPY --from=build /dist/lechiffre /usr/local/bin/lechiffre
 COPY --from=build /dist/rsp /usr/local/bin/rsp

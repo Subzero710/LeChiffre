@@ -20,6 +20,58 @@ use super::{
     Position, Street,
 };
 
+// Debian's LP64 OpenBLAS CBLAS ABI. All buffers are owned Rust allocations;
+// every call below checks its matrix/vector dimensions before entering C.
+const ROW_MAJOR: i32 = 101;
+const NO_TRANS: i32 = 111;
+const TRANS: i32 = 112;
+
+#[link(name = "openblas")]
+unsafe extern "C" {
+    fn cblas_dgemv(
+        layout: i32,
+        trans: i32,
+        m: i32,
+        n: i32,
+        alpha: f64,
+        a: *const f64,
+        lda: i32,
+        x: *const f64,
+        incx: i32,
+        beta: f64,
+        y: *mut f64,
+        incy: i32,
+    );
+    fn cblas_dger(
+        layout: i32,
+        m: i32,
+        n: i32,
+        alpha: f64,
+        x: *const f64,
+        incx: i32,
+        y: *const f64,
+        incy: i32,
+        a: *mut f64,
+        lda: i32,
+    );
+    fn cblas_dgemm(
+        layout: i32,
+        trans_a: i32,
+        trans_b: i32,
+        m: i32,
+        n: i32,
+        k: i32,
+        alpha: f64,
+        a: *const f64,
+        lda: i32,
+        b: *const f64,
+        ldb: i32,
+        beta: f64,
+        c: *mut f64,
+        ldc: i32,
+    );
+}
+
 const STREET_COUNT: usize = 4;
 const POSITION_COUNT: usize = 7;
 pub const ACTION_COUNT: usize = 5;
@@ -208,6 +260,8 @@ pub struct DenseLayer {
     input: usize,
     output: usize,
     weights: Vec<f32>,
+    // Exact f32 -> f64 conversion, refreshed only when Adam changes weights.
+    weights_f64: Vec<f64>,
     bias: Vec<f32>,
 }
 
@@ -220,6 +274,8 @@ impl DenseLayer {
     ) -> Result<Self, GeneratorError> {
         if input == 0
             || output == 0
+            || input > i32::MAX as usize
+            || output > i32::MAX as usize
             || input.checked_mul(output) != Some(weights.len())
             || output != bias.len()
         {
@@ -231,6 +287,7 @@ impl DenseLayer {
         Ok(Self {
             input,
             output,
+            weights_f64: weights.iter().map(|&w| f64::from(w)).collect(),
             weights,
             bias,
         })
@@ -250,32 +307,82 @@ impl DenseLayer {
     }
 
     fn forward(&self, input: &[f64]) -> Vec<f64> {
-        debug_assert_eq!(input.len(), self.input);
-        self.weights
-            .chunks_exact(self.input)
-            .zip(&self.bias)
-            .map(|(row, b)| {
-                row.iter()
-                    .zip(input)
-                    .fold(f64::from(*b), |s, (w, x)| s + f64::from(*w) * x)
-            })
-            .collect()
+        assert_eq!(input.len(), self.input);
+        assert_eq!(self.weights_f64.len(), self.input * self.output);
+        let mut output = self.bias.iter().map(|&b| f64::from(b)).collect::<Vec<_>>();
+        assert_eq!(output.len(), self.output);
+        let m = self.output as i32;
+        let n = self.input as i32;
+        // SAFETY: contiguous row-major m*n matrix, n input and m output
+        // elements, unit strides; dimensions validated in DenseLayer::new.
+        unsafe {
+            cblas_dgemv(
+                ROW_MAJOR,
+                NO_TRANS,
+                m,
+                n,
+                1.0,
+                self.weights_f64.as_ptr(),
+                n,
+                input.as_ptr(),
+                1,
+                1.0,
+                output.as_mut_ptr(),
+                1,
+            );
+        }
+        output
     }
 
     fn backward(
         &self,
         input: &[f64],
         output_gradient: &[f64],
-        gradients: &mut LayerGradients,
+        gradients: Option<&mut LayerGradients>,
     ) -> Vec<f64> {
-        debug_assert_eq!(input.len(), self.input);
-        debug_assert_eq!(output_gradient.len(), self.output);
+        assert_eq!(input.len(), self.input);
+        assert_eq!(output_gradient.len(), self.output);
+        assert_eq!(self.weights_f64.len(), self.input * self.output);
+        let m = self.output as i32;
+        let n = self.input as i32;
         let mut input_gradient = vec![0.0; self.input];
-        for (out, &g) in output_gradient.iter().enumerate() {
-            gradients.bias[out] += g;
-            for i in 0..self.input {
-                gradients.weights[out * self.input + i] += g * input[i];
-                input_gradient[i] += g * f64::from(self.weights[out * self.input + i]);
+        // SAFETY: transpose of the same validated matrix; m input and n output.
+        unsafe {
+            cblas_dgemv(
+                ROW_MAJOR,
+                TRANS,
+                m,
+                n,
+                1.0,
+                self.weights_f64.as_ptr(),
+                n,
+                output_gradient.as_ptr(),
+                1,
+                0.0,
+                input_gradient.as_mut_ptr(),
+                1,
+            );
+        }
+        if let Some(gradients) = gradients {
+            assert_eq!(gradients.weights.len(), self.input * self.output);
+            assert_eq!(gradients.bias.len(), self.output);
+            // SAFETY: outer product of m and n contiguous vectors into m*n.
+            unsafe {
+                cblas_dger(
+                    ROW_MAJOR,
+                    m,
+                    n,
+                    1.0,
+                    output_gradient.as_ptr(),
+                    1,
+                    input.as_ptr(),
+                    1,
+                    gradients.weights.as_mut_ptr(),
+                    n,
+                );
+            }
+            for (b, &delta) in gradients.bias.iter_mut().zip(output_gradient) {
+                *b += delta;
             }
         }
         input_gradient
@@ -855,13 +962,124 @@ impl Gradients {
     }
 }
 
+/// Rows of inputs X and output derivatives D from one fixed G snapshot.
+/// Weight gradients are D^T X; no per-decision weight matrix is allocated.
+#[derive(Debug, Clone, Default)]
+struct LayerProducts {
+    rows: usize,
+    inputs: Vec<f64>,
+    deltas: Vec<f64>,
+}
+impl LayerProducts {
+    fn record(&mut self, input: &[f64], delta: &[f64]) -> Result<(), GeneratorError> {
+        if !input.iter().chain(delta).all(|x| x.is_finite()) {
+            return Err(GeneratorError::NonFiniteGradient);
+        }
+        self.rows = self
+            .rows
+            .checked_add(1)
+            .ok_or(GeneratorError::BatchCountOverflow)?;
+        self.inputs.extend_from_slice(input);
+        self.deltas.extend_from_slice(delta);
+        Ok(())
+    }
+
+    fn append(&mut self, other: Self) {
+        self.rows += other.rows;
+        self.inputs.extend(other.inputs);
+        self.deltas.extend(other.deltas);
+    }
+
+    fn add_to(
+        &self,
+        layer: &DenseLayer,
+        gradients: &mut LayerGradients,
+    ) -> Result<(), GeneratorError> {
+        if self.rows == 0 {
+            return Ok(()); // No observed target for this conditional head.
+        }
+        if self.rows.checked_mul(layer.input) != Some(self.inputs.len())
+            || self.rows.checked_mul(layer.output) != Some(self.deltas.len())
+            || layer.input.checked_mul(layer.output) != Some(gradients.weights.len())
+            || gradients.bias.len() != layer.output
+        {
+            return Err(GeneratorError::InvalidLayerShape);
+        }
+        let k = i32::try_from(self.rows).map_err(|_| GeneratorError::BatchCountOverflow)?;
+        let m = layer.output as i32;
+        let n = layer.input as i32;
+        // SAFETY: D is k*m, X is k*n, output m*n, all contiguous row-major.
+        // Transpose D, accumulate D^T X in the existing gradient buffer.
+        unsafe {
+            cblas_dgemm(
+                ROW_MAJOR,
+                TRANS,
+                NO_TRANS,
+                m,
+                n,
+                k,
+                1.0,
+                self.deltas.as_ptr(),
+                m,
+                self.inputs.as_ptr(),
+                n,
+                1.0,
+                gradients.weights.as_mut_ptr(),
+                n,
+            );
+        }
+        for row in self.deltas.chunks_exact(layer.output) {
+            for (b, &d) in gradients.bias.iter_mut().zip(row) {
+                *b += d;
+            }
+        }
+        if !gradients
+            .weights
+            .iter()
+            .chain(&gradients.bias)
+            .all(|x| x.is_finite())
+        {
+            return Err(GeneratorError::NonFiniteGradient);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct MatrixProducts {
+    state: LayerProducts,
+    action: LayerProducts,
+    sizing: LayerProducts,
+    timing: LayerProducts,
+}
+impl MatrixProducts {
+    fn append(&mut self, other: Self) {
+        self.state.append(other.state);
+        self.action.append(other.action);
+        self.sizing.append(other.sizing);
+        self.timing.append(other.timing);
+    }
+    fn add_to(
+        &self,
+        model: &GeneratorParameters,
+        grads: &mut Gradients,
+    ) -> Result<(), GeneratorError> {
+        self.state.add_to(&model.state, &mut grads.state)?;
+        self.action.add_to(&model.action, &mut grads.action)?;
+        self.sizing.add_to(&model.sizing, &mut grads.sizing)?;
+        self.timing.add_to(&model.timing, &mut grads.timing)?;
+        Ok(())
+    }
+}
+
 /// Gradients accumulated against one immutable Generator parameter snapshot.
 /// No optimizer step occurs until `Adam::apply_batch` is called. Per-decision
 /// `TrainingLoss.latent_gradient` can be propagated to A before that update.
 #[derive(Debug, Clone)]
 pub struct GeneratorGradientBatch {
-    parameter_snapshot: GeneratorParameters,
+    model_snapshot: NeuralBehaviourGenerator,
     gradients: Gradients,
+    matrix_products: MatrixProducts,
     observations: usize,
     total_weight: f64,
     loss_total: f64,
@@ -874,8 +1092,9 @@ pub struct GeneratorGradientBatch {
 impl GeneratorGradientBatch {
     pub fn new(model: &NeuralBehaviourGenerator) -> Self {
         Self {
-            parameter_snapshot: model.parameters.clone(),
+            model_snapshot: model.clone(),
             gradients: Gradients::new(&model.parameters),
+            matrix_products: MatrixProducts::default(),
             observations: 0,
             total_weight: 0.0,
             loss_total: 0.0,
@@ -902,6 +1121,59 @@ impl GeneratorGradientBatch {
         legal: &LegalActionSpace,
     ) -> Result<TrainingLoss, GeneratorError> {
         self.accumulate_weighted_encoded(model, profile, observation, legal, 1.0)
+    }
+
+    /// Score against this batch's owned immutable snapshot. The caller cannot
+    /// supply a different G; Adam::apply_batch still checks the live model.
+    /// This removes a full parameter equality scan for each training decision.
+    pub fn accumulate_snapshot_encoded(
+        &mut self,
+        profile: &BehaviourProfile,
+        observation: &GeneratorObservation,
+        legal: &LegalActionSpace,
+    ) -> Result<TrainingLoss, GeneratorError> {
+        let mut products = MatrixProducts::default();
+        let loss = backprop_encoded(
+            &self.model_snapshot,
+            profile,
+            observation,
+            *legal,
+            None,
+            Some(&mut products),
+        )?;
+        let observations = self
+            .observations
+            .checked_add(1)
+            .ok_or(GeneratorError::BatchCountOverflow)?;
+        if observations > i32::MAX as usize {
+            return Err(GeneratorError::BatchCountOverflow);
+        }
+        let total_weight = self.total_weight + 1.0;
+        let totals = [
+            self.loss_total + loss.total,
+            self.loss_action + loss.action,
+            self.loss_sizing + loss.sizing,
+            self.loss_timing + loss.timing,
+        ];
+        let next_latent = self
+            .latent_gradient_sum
+            .iter()
+            .zip(&loss.latent_gradient)
+            .map(|(&current, &delta)| current + f64::from(delta))
+            .collect::<Vec<_>>();
+        if !total_weight.is_finite() || !totals.iter().chain(&next_latent).all(|x| x.is_finite()) {
+            return Err(GeneratorError::NonFiniteGradient);
+        }
+        // All per-row checks passed. GEMM is deferred to apply_batch.
+        self.matrix_products.append(products);
+        self.observations = observations;
+        self.total_weight = total_weight;
+        self.loss_total = totals[0];
+        self.loss_action = totals[1];
+        self.loss_sizing = totals[2];
+        self.loss_timing = totals[3];
+        self.latent_gradient_sum = next_latent;
+        Ok(loss)
     }
 
     /// Accumulate a positive, explicit objective weight. The returned loss and
@@ -933,7 +1205,7 @@ impl GeneratorGradientBatch {
     }
 
     fn check_model(&self, model: &NeuralBehaviourGenerator) -> Result<(), GeneratorError> {
-        if model.parameters != self.parameter_snapshot
+        if model.parameters != self.model_snapshot.parameters
             || model.latent.dimension() != self.latent_gradient_sum.len()
         {
             return Err(GeneratorError::BatchModelChanged);
@@ -955,19 +1227,21 @@ impl GeneratorGradientBatch {
             .observations
             .checked_add(1)
             .ok_or(GeneratorError::BatchCountOverflow)?;
-        let mut summed = self.gradients.clone();
-        fn sum_layer(target: &mut LayerGradients, source: &LayerGradients, weight: f64) {
-            for (total, delta) in target.weights.iter_mut().zip(&source.weights) {
-                *total += weight * delta;
+        // Reuse the consumed per-observation buffer as the candidate sum.
+        // The previous accumulator is untouched until all checks pass.
+        let mut summed = gradients;
+        fn sum_layer(candidate: &mut LayerGradients, previous: &LayerGradients, weight: f64) {
+            for (delta, total) in candidate.weights.iter_mut().zip(&previous.weights) {
+                *delta = *total + weight * *delta;
             }
-            for (total, delta) in target.bias.iter_mut().zip(&source.bias) {
-                *total += weight * delta;
+            for (delta, total) in candidate.bias.iter_mut().zip(&previous.bias) {
+                *delta = *total + weight * *delta;
             }
         }
-        sum_layer(&mut summed.state, &gradients.state, weight);
-        sum_layer(&mut summed.action, &gradients.action, weight);
-        sum_layer(&mut summed.sizing, &gradients.sizing, weight);
-        sum_layer(&mut summed.timing, &gradients.timing, weight);
+        sum_layer(&mut summed.state, &self.gradients.state, weight);
+        sum_layer(&mut summed.action, &self.gradients.action, weight);
+        sum_layer(&mut summed.sizing, &self.gradients.sizing, weight);
+        sum_layer(&mut summed.timing, &self.gradients.timing, weight);
         let totals = [
             self.loss_total + weight * loss.total,
             self.loss_action + weight * loss.action,
@@ -1038,6 +1312,8 @@ impl GeneratorGradientBatch {
             return Err(GeneratorError::EmptyBatch);
         }
         let mut result = self.gradients.clone();
+        self.matrix_products
+            .add_to(&self.model_snapshot.parameters, &mut result)?;
         let n = self.total_weight;
         for layer in [
             &mut result.state,
@@ -1108,8 +1384,28 @@ fn loss_gradients_encoded(
     observation: &GeneratorObservation,
     legal: LegalActionSpace,
 ) -> Result<(TrainingLoss, Gradients), GeneratorError> {
+    let mut gradients = Gradients::new(&model.parameters);
+    let loss = backprop_encoded(
+        model,
+        profile,
+        observation,
+        legal,
+        Some(&mut gradients),
+        None,
+    )?;
+    Ok((loss, gradients))
+}
+
+fn backprop_encoded(
+    model: &NeuralBehaviourGenerator,
+    profile: &BehaviourProfile,
+    observation: &GeneratorObservation,
+    legal: LegalActionSpace,
+    gradients: Option<&mut Gradients>,
+    products: Option<&mut MatrixProducts>,
+) -> Result<TrainingLoss, GeneratorError> {
     let (stack, to_call) = observation.validated_facts(legal)?;
-    loss_gradients_features(
+    backprop_features(
         model,
         profile,
         encoded_context_features(
@@ -1122,6 +1418,8 @@ fn loss_gradients_encoded(
         &observation.observed,
         stack,
         to_call,
+        gradients,
+        products,
     )
 }
 
@@ -1134,6 +1432,33 @@ fn loss_gradients_features(
     actor_stack: f32,
     to_call: f32,
 ) -> Result<(TrainingLoss, Gradients), GeneratorError> {
+    let mut gradients = Gradients::new(&model.parameters);
+    let loss = backprop_features(
+        model,
+        profile,
+        encoded,
+        legal,
+        action,
+        actor_stack,
+        to_call,
+        Some(&mut gradients),
+        None,
+    )?;
+    Ok((loss, gradients))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn backprop_features(
+    model: &NeuralBehaviourGenerator,
+    profile: &BehaviourProfile,
+    encoded: Vec<f64>,
+    legal: LegalActionSpace,
+    action: &ObservedAction,
+    actor_stack: f32,
+    to_call: f32,
+    mut grads: Option<&mut Gradients>,
+    mut products: Option<&mut MatrixProducts>,
+) -> Result<TrainingLoss, GeneratorError> {
     let forward = model.forward_features(profile, encoded, legal)?;
     let k = usize::from(action_id(action.kind));
     let probability = forward.probabilities[k];
@@ -1141,16 +1466,19 @@ fn loss_gradients_features(
         return Err(GeneratorError::InvalidProbabilityMass);
     }
     let action_loss = -probability.ln();
-    let mut grads = Gradients::new(&model.parameters);
     let mut state_gradient = vec![0.0; forward.state.len()];
     let mut logits_gradient = forward.probabilities;
     logits_gradient[k] -= 1.0;
+    if let Some(p) = products.as_deref_mut() {
+        p.action.record(&forward.state, &logits_gradient)?;
+    }
     add(
         &mut state_gradient,
-        &model
-            .parameters
-            .action
-            .backward(&forward.state, &logits_gradient, &mut grads.action),
+        &model.parameters.action.backward(
+            &forward.state,
+            &logits_gradient,
+            grads.as_deref_mut().map(|g| &mut g.action),
+        ),
     );
 
     let amount = match action.kind {
@@ -1171,10 +1499,14 @@ fn loss_gradients_features(
         let raw = model.parameters.sizing.forward(&input);
         let (loss, grad) = sizing_nll(bounds, index, &raw)?;
         sizing_loss = loss;
-        let prev = model
-            .parameters
-            .sizing
-            .backward(&input, &grad, &mut grads.sizing);
+        if let Some(p) = products.as_deref_mut() {
+            p.sizing.record(&input, &grad)?;
+        }
+        let prev = model.parameters.sizing.backward(
+            &input,
+            &grad,
+            grads.as_deref_mut().map(|g| &mut g.sizing),
+        );
         add(&mut state_gradient, &prev[..forward.state.len()]);
     }
 
@@ -1194,20 +1526,27 @@ fn loss_gradients_features(
             residual / (sigma * sigma),
             (1.0 / sigma - residual * residual / sigma.powi(3)) * sigmoid(raw[1]),
         ];
-        let prev = model
-            .parameters
-            .timing
-            .backward(&input, &grad, &mut grads.timing);
+        if let Some(p) = products.as_deref_mut() {
+            p.timing.record(&input, &grad)?;
+        }
+        let prev = model.parameters.timing.backward(
+            &input,
+            &grad,
+            grads.as_deref_mut().map(|g| &mut g.timing),
+        );
         add(&mut state_gradient, &prev[..forward.state.len()]);
     }
     for (g, &s) in state_gradient.iter_mut().zip(&forward.state) {
         *g *= 1.0 - s * s;
     }
-    let input_gradient =
-        model
-            .parameters
-            .state
-            .backward(&forward.input, &state_gradient, &mut grads.state);
+    if let Some(p) = products {
+        p.state.record(&forward.input, &state_gradient)?;
+    }
+    let input_gradient = model.parameters.state.backward(
+        &forward.input,
+        &state_gradient,
+        grads.map(|g| &mut g.state),
+    );
     let latent_gradient = input_gradient[GENERATOR_CONTEXT_WIDTH..]
         .iter()
         .map(|&x| x as f32)
@@ -1216,16 +1555,13 @@ fn loss_gradients_features(
     if !total.is_finite() || input_gradient.iter().any(|x| !x.is_finite()) {
         return Err(GeneratorError::NonFiniteGradient);
     }
-    Ok((
-        TrainingLoss {
-            total,
-            action: action_loss,
-            sizing: sizing_loss,
-            timing: timing_loss,
-            latent_gradient,
-        },
-        grads,
-    ))
+    Ok(TrainingLoss {
+        total,
+        action: action_loss,
+        sizing: sizing_loss,
+        timing: timing_loss,
+        latent_gradient,
+    })
 }
 
 fn add(target: &mut [f64], source: &[f64]) {
@@ -1336,6 +1672,9 @@ impl LayerMoments {
             .zip(self.mb.iter_mut().zip(self.vb.iter_mut()))
         {
             adam_value(b, *g, m, v, rate, beta1_correction, beta2_correction)?;
+        }
+        for (cached, &weight) in layer.weights_f64.iter_mut().zip(&layer.weights) {
+            *cached = f64::from(weight);
         }
         Ok(())
     }
@@ -1506,7 +1845,7 @@ impl Adam {
         observation: &GeneratorObservation,
         legal: &LegalActionSpace,
     ) -> Result<TrainingLoss, GeneratorError> {
-        loss_gradients_encoded(model, profile, observation, *legal).map(|(loss, _)| loss)
+        backprop_encoded(model, profile, observation, *legal, None, None)
     }
 
     pub fn steps(&self) -> u64 {
@@ -1523,7 +1862,7 @@ impl NeuralBehaviourGenerator {
         observation: &GeneratorObservation,
         legal: &LegalActionSpace,
     ) -> Result<TrainingLoss, GeneratorError> {
-        loss_gradients_encoded(self, profile, observation, *legal).map(|(loss, _)| loss)
+        backprop_encoded(self, profile, observation, *legal, None, None)
     }
 
     /// Forward-only joint NLL for Monte Carlo validation. Never computes dL/dZ
@@ -1880,6 +2219,97 @@ mod tests {
     }
 
     #[test]
+    fn openblas_dense_matches_scalar_reference() {
+        let layer =
+            DenseLayer::new(3, 2, vec![0.1, -0.2, 0.3, 0.4, -0.5, 0.6], vec![0.25, -0.5]).unwrap();
+        let input = [0.7, 1.2, -0.9];
+        let delta = [0.3, -0.8];
+        let expected = layer
+            .weights()
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .zip(layer.biases())
+            .map(|(row, &b)| {
+                row.iter()
+                    .zip(input)
+                    .fold(f64::from(b), |sum, (&w, x)| sum + f64::from(w) * x)
+            })
+            .collect::<Vec<_>>();
+        for (a, b) in layer.forward(&input).iter().zip(expected) {
+            assert!((a - b).abs() < 1e-12);
+        }
+        let mut gradients = LayerGradients::new(&layer);
+        let actual = layer.backward(&input, &delta, Some(&mut gradients));
+        for (i, (&value, &x)) in actual.iter().zip(&input).enumerate() {
+            let expected = delta
+                .iter()
+                .enumerate()
+                .map(|(j, &d)| d * f64::from(layer.weights()[j * 3 + i]))
+                .sum::<f64>();
+            assert!((value - expected).abs() < 1e-12);
+            for (j, &d) in delta.iter().enumerate() {
+                assert!((gradients.weights[j * 3 + i] - d * x).abs() < 1e-12);
+            }
+        }
+        let mut products = LayerProducts::default();
+        products.record(&input, &delta).unwrap();
+        products.record(&[1.0, 2.0, 3.0], &[0.5, 0.25]).unwrap();
+        let mut sum = LayerGradients::new(&layer);
+        products.add_to(&layer, &mut sum).unwrap();
+        for (j, (&d, d2)) in delta.iter().zip([0.5, 0.25]).enumerate() {
+            for (i, (&x, x2)) in input.iter().zip([1.0, 2.0, 3.0]).enumerate() {
+                let expected = d * x + d2 * x2;
+                assert!((sum.weights[j * 3 + i] - expected).abs() < 1e-12);
+            }
+        }
+        assert!((sum.bias[0] - 0.8).abs() < 1e-12);
+        assert!((sum.bias[1] + 0.55).abs() < 1e-12);
+    }
+
+    #[test]
+    fn latent_only_backprop_matches_full_gradient_exactly() {
+        let context = ctx();
+        let (context_values, context_present) = encode_context(&context);
+        let g = model();
+        for amount in [0.0, 5.0, 80.0] {
+            let observed = if amount == 0.0 {
+                ObservedAction::from_exact(
+                    &context,
+                    ExactAction {
+                        kind: ActionKind::Check,
+                        is_all_in: false,
+                        amount_added_bb: 0.0,
+                        highest_bet_after_bb: 0.0,
+                        decision_time_ms: Some(600),
+                    },
+                )
+                .unwrap()
+            } else {
+                observed_bet(amount)
+            };
+            for timing in [None, Some(600), Some(30_000)] {
+                let mut observed = observed.clone();
+                observed.decision_time_ms = timing;
+                let observation = GeneratorObservation {
+                    street: context.street,
+                    actor_position: context.actor_position,
+                    context_values,
+                    context_present,
+                    observed,
+                };
+                let full = loss_gradients_encoded(&g, &profile(), &observation, legal())
+                    .unwrap()
+                    .0;
+                let latent = g
+                    .evaluate_observation_encoded(&profile(), &observation, &legal())
+                    .unwrap();
+                assert_eq!(full, latent);
+            }
+        }
+    }
+
+    #[test]
     fn batch_calculates_at_fixed_weights_and_applies_one_optimizer_step() {
         let mut generator = model();
         let mut adam = Adam::new(&generator, 0.001).unwrap();
@@ -1900,6 +2330,78 @@ mod tests {
         assert!((result.total - avg.total).abs() < 1e-12);
         assert_eq!(adam.steps(), 1);
         assert_ne!(*generator.parameters(), original);
+    }
+
+    #[test]
+    fn owned_snapshot_accumulation_matches_checked_accumulation() {
+        let context = ctx();
+        let (context_values, context_present) = encode_context(&context);
+        let mut g = model();
+        let mut expected_g = g.clone();
+        let mut opt = Adam::new(&g, 0.001).unwrap();
+        let mut expected_opt = opt.clone();
+        let mut batch = GeneratorGradientBatch::new(&g);
+        let mut expected = GeneratorGradientBatch::new(&expected_g);
+        for amount in [5.0, 7.0, 80.0] {
+            let observation = GeneratorObservation {
+                street: context.street,
+                actor_position: context.actor_position,
+                context_values,
+                context_present,
+                observed: observed_bet(amount),
+            };
+            assert_eq!(
+                batch
+                    .accumulate_snapshot_encoded(&profile(), &observation, &legal())
+                    .unwrap(),
+                expected
+                    .accumulate_encoded(&expected_g, &profile(), &observation, &legal())
+                    .unwrap()
+            );
+        }
+        let a = batch.averaged_gradients().unwrap();
+        let b = expected.averaged_gradients().unwrap();
+        for (a, b) in [
+            (&a.state, &b.state),
+            (&a.action, &b.action),
+            (&a.sizing, &b.sizing),
+            (&a.timing, &b.timing),
+        ] {
+            for (&a, &b) in a
+                .weights
+                .iter()
+                .chain(&a.bias)
+                .zip(b.weights.iter().chain(&b.bias))
+            {
+                assert!((a - b).abs() <= 1e-12 * (1.0 + a.abs().max(b.abs())));
+            }
+        }
+        assert_eq!(
+            opt.apply_batch(&mut g, batch).unwrap(),
+            expected_opt.apply_batch(&mut expected_g, expected).unwrap()
+        );
+        for (a, b) in [
+            (&g.parameters.state, &expected_g.parameters.state),
+            (&g.parameters.action, &expected_g.parameters.action),
+            (&g.parameters.sizing, &expected_g.parameters.sizing),
+            (&g.parameters.timing, &expected_g.parameters.timing),
+        ] {
+            for (&a, &b) in a
+                .weights()
+                .iter()
+                .chain(a.biases())
+                .zip(b.weights().iter().chain(b.biases()))
+            {
+                assert!((a - b).abs() <= 1e-6 * (1.0 + a.abs().max(b.abs())));
+            }
+            assert!(
+                a.weights
+                    .iter()
+                    .zip(&a.weights_f64)
+                    .all(|(&w, &cached)| f64::from(w) == cached)
+            );
+        }
+        assert_eq!(opt.steps(), expected_opt.steps());
     }
 
     #[test]

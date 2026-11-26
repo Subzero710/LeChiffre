@@ -1,6 +1,6 @@
 {
   "blueprint_extra_epochs": 0,
-  "personalization_history_hands": [],
+  "personalization_extra_epochs": 0,
   "momentary_history_hands": 100,
   "momentary_extra_epochs": 10
 }
