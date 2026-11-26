@@ -1143,14 +1143,32 @@ impl SizingShape {
         if observed >= n || raw.len() != sizing_outputs(width) || grad.len() != raw.len() {
             return Err(GeneratorError::InvalidObservedWager);
         }
+        let residuals: Vec<f64> = self
+            .log_probs
+            .iter()
+            .enumerate()
+            .map(|(j, p)| p.exp() - if j == observed { 1.0 } else { 0.0 })
+            .collect();
+        self.score_gradient(&residuals, raw, grad)
+    }
+
+    fn score_gradient(
+        &self,
+        residuals: &[f64],
+        raw: &[f64],
+        grad: &mut [f64],
+    ) -> Result<(), GeneratorError> {
+        let n = self.log_probs.len();
+        let width = self.active.len();
+        if residuals.len() != n || raw.len() != sizing_outputs(width) || grad.len() != raw.len() {
+            return Err(GeneratorError::InvalidObservedWager);
+        }
         let mut prefix = vec![(0.0, 0.0); n + 1];
         let mut suffix = vec![(0.0, 0.0); n + 1];
-        for j in 0..n {
-            let d = self.log_probs[j].exp() - if j == observed { 1.0 } else { 0.0 };
+        for (j, &d) in residuals.iter().enumerate() {
             prefix[j + 1] = (prefix[j].0 + d, prefix[j].1 + d * self.coordinates[j]);
         }
-        for j in (0..n).rev() {
-            let d = self.log_probs[j].exp() - if j == observed { 1.0 } else { 0.0 };
+        for (j, &d) in residuals.iter().enumerate().rev() {
             suffix[j] = (
                 suffix[j + 1].0 + d,
                 suffix[j + 1].1 + d * self.coordinates[j],
@@ -1405,6 +1423,7 @@ impl GeneratorGradientBatch {
             profile,
             observation,
             *legal,
+            SizingObjective::CrpsOverPot(f64::from(observation.context_values[0])),
             None,
             Some(&mut products),
         )?;
@@ -1597,6 +1616,7 @@ impl GeneratorGradientBatch {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Mixed training score, or joint NLL when returned by evaluate_observation_encoded.
 pub struct TrainingLoss {
     pub total: f64,
     pub action: f64,
@@ -1608,7 +1628,7 @@ pub struct TrainingLoss {
 
 /// Read-only NLL decomposition without constructing or backpropagating model gradients.
 /// The joint total uses the exact same action mask, wager bins, and timing
-/// density as the training objective.
+/// density as Z1 adaptation; training uses CRPS for sizing.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScoringLoss {
     pub total: f64,
@@ -1617,7 +1637,13 @@ pub struct ScoringLoss {
     pub timing: f64,
 }
 
-/// Explicit, differentiable negative-log-likelihood and reverse-mode gradients.
+#[derive(Clone, Copy)]
+enum SizingObjective {
+    Nll,
+    CrpsOverPot(f64),
+}
+
+/// Differentiable training objective and reverse-mode gradients.
 /// The training caller supplies each observed decision's *actual* legal space.
 fn loss_gradients(
     model: &NeuralBehaviourGenerator,
@@ -1642,6 +1668,7 @@ fn loss_gradients(
         action,
         actor.stack_remaining_bb,
         context.to_call_bb,
+        SizingObjective::CrpsOverPot(f64::from(context.pot_bb)),
     )
 }
 
@@ -1657,6 +1684,7 @@ fn loss_gradients_encoded(
         profile,
         observation,
         legal,
+        SizingObjective::CrpsOverPot(f64::from(observation.context_values[0])),
         Some(&mut gradients),
         None,
     )?;
@@ -1668,6 +1696,7 @@ fn backprop_encoded(
     profile: &BehaviourProfile,
     observation: &GeneratorObservation,
     legal: LegalActionSpace,
+    objective: SizingObjective,
     gradients: Option<&mut Gradients>,
     products: Option<&mut MatrixProducts>,
 ) -> Result<TrainingLoss, GeneratorError> {
@@ -1685,6 +1714,7 @@ fn backprop_encoded(
         &observation.observed,
         stack,
         to_call,
+        objective,
         gradients,
         products,
     )
@@ -1699,6 +1729,7 @@ fn loss_gradients_features(
     action: &ObservedAction,
     actor_stack: f32,
     to_call: f32,
+    objective: SizingObjective,
 ) -> Result<(TrainingLoss, Gradients), GeneratorError> {
     let mut gradients = Gradients::new(&model.parameters);
     let loss = backprop_features(
@@ -1709,6 +1740,7 @@ fn loss_gradients_features(
         action,
         actor_stack,
         to_call,
+        objective,
         Some(&mut gradients),
         None,
     )?;
@@ -1724,6 +1756,7 @@ fn backprop_features(
     action: &ObservedAction,
     actor_stack: f32,
     to_call: f32,
+    objective: SizingObjective,
     mut grads: Option<&mut Gradients>,
     mut products: Option<&mut MatrixProducts>,
 ) -> Result<TrainingLoss, GeneratorError> {
@@ -1765,7 +1798,10 @@ fn backprop_features(
         let index = bounds.index(amount)?;
         let input = sizing_input(&forward.state, action.kind);
         let raw = model.parameters.sizing.forward(&input);
-        let (loss, grad) = sizing_nll(bounds, index, &raw)?;
+        let (loss, grad) = match objective {
+            SizingObjective::Nll => sizing_nll(bounds, index, &raw)?,
+            SizingObjective::CrpsOverPot(pot) => sizing_crps(bounds, index, &raw, pot)?,
+        };
         sizing_loss = loss;
         if let Some(p) = products.as_deref_mut() {
             p.sizing.record(&input, &grad)?;
@@ -1883,6 +1919,73 @@ fn sizing_nll(
 ) -> Result<(f64, Vec<f64>), GeneratorError> {
     let mut gradient = vec![0.0; raw.len()];
     let loss = sizing_objective(bounds, index, raw, Some(&mut gradient))?;
+    Ok((loss, gradient))
+}
+
+/// Exact CRPS of the executable distribution, divided by the pre-action pot.
+/// The observed amount is the exact legal amount in BB, not a chip class.
+/// Integer differences avoid subtracting large nearly equal floating amounts.
+/// The all-in atom is included in the same CDF, not an extra Bernoulli loss.
+fn sizing_crps(
+    bounds: WagerBounds,
+    index: usize,
+    raw: &[f64],
+    pot_bb: f64,
+) -> Result<(f64, Vec<f64>), GeneratorError> {
+    sizing_width(raw)?;
+    let grid = BbSizingGrid::new(bounds)?;
+    if index > grid.ticks {
+        return Err(GeneratorError::InvalidObservedWager);
+    }
+    let pot_chips = pot_bb * bounds.big_blind_chips as f64;
+    if !pot_chips.is_finite() || pot_chips <= 0.0 {
+        return Err(GeneratorError::InvalidLegalActions);
+    }
+    let mut gradient = vec![0.0; raw.len()];
+    if grid.ticks == 0 {
+        return Ok((0.0, gradient));
+    }
+    let shape = SizingShape::new(grid, raw)?;
+    let q: Vec<f64> = shape.log_probs.iter().map(|p| p.exp()).collect();
+    let a = sigmoid(raw[0]);
+    let b = sigmoid(-raw[0]);
+    let observed = bounds.chips(index);
+    let mut lo = bounds.chips(grid.representative(0)?);
+    let mut loss = (lo - observed).max(0) as f64 / pot_chips;
+    let mut cumulative = 0.0;
+    let mut cdf_gradient = Vec::with_capacity(grid.count);
+    for (j, &probability) in q.iter().enumerate() {
+        cumulative += b * probability;
+        let hi = if j + 1 == grid.count {
+            bounds.max_added_chips
+        } else {
+            bounds.chips(grid.representative(j + 1)?)
+        };
+        if hi <= lo {
+            return Err(GeneratorError::InvalidWagerBounds);
+        }
+        let split = observed.clamp(lo, hi);
+        let left = (split - lo) as f64 / pot_chips;
+        let right = (hi - split) as f64 / pot_chips;
+        loss += left * cumulative.powi(2) + right * (cumulative - 1.0).powi(2);
+        cdf_gradient.push(2.0 * (left * cumulative + right * (cumulative - 1.0)));
+        lo = hi;
+    }
+    // dL/d(mass_j) is a suffix sum of interval CDF derivatives.
+    let mut suffix = 0.0;
+    for value in cdf_gradient.iter_mut().rev() {
+        suffix += *value;
+        *value = suffix;
+    }
+    let mean: f64 = q.iter().zip(&cdf_gradient).map(|(p, d)| p * d).sum();
+    gradient[0] = -a * b * mean;
+    for (d, &p) in cdf_gradient.iter_mut().zip(&q) {
+        *d = b * p * (*d - mean);
+    }
+    shape.score_gradient(&cdf_gradient, raw, &mut gradient)?;
+    if !loss.is_finite() || gradient.iter().any(|x| !x.is_finite()) {
+        return Err(GeneratorError::NonFiniteGradient);
+    }
     Ok((loss, gradient))
 }
 
@@ -2020,7 +2123,7 @@ impl Adam {
         })
     }
 
-    /// One raw game decision: NLL, reverse-mode backprop, then Adam.
+    /// One raw game decision: action/timing NLL + sizing CRPS/pot, then Adam.
     pub fn train_step(
         &mut self,
         model: &mut NeuralBehaviourGenerator,
@@ -2111,7 +2214,15 @@ impl Adam {
         observation: &GeneratorObservation,
         legal: &LegalActionSpace,
     ) -> Result<TrainingLoss, GeneratorError> {
-        backprop_encoded(model, profile, observation, *legal, None, None)
+        backprop_encoded(
+            model,
+            profile,
+            observation,
+            *legal,
+            SizingObjective::CrpsOverPot(f64::from(observation.context_values[0])),
+            None,
+            None,
+        )
     }
 
     pub fn steps(&self) -> u64 {
@@ -2128,7 +2239,15 @@ impl NeuralBehaviourGenerator {
         observation: &GeneratorObservation,
         legal: &LegalActionSpace,
     ) -> Result<TrainingLoss, GeneratorError> {
-        backprop_encoded(self, profile, observation, *legal, None, None)
+        backprop_encoded(
+            self,
+            profile,
+            observation,
+            *legal,
+            SizingObjective::Nll,
+            None,
+            None,
+        )
     }
 
     /// Forward-only joint NLL for Monte Carlo validation. Never computes dL/dZ
@@ -2426,6 +2545,13 @@ impl NeuralBehaviourGenerator {
         } else {
             None
         };
+        let p_min_bb_bin_given_nonallin = if grid.count == 0 {
+            None
+        } else if let Some(s) = &shape {
+            Some(s.log_probability(0)?.exp())
+        } else {
+            Some(1.0)
+        };
         let mut best = count;
         let mut best_log = log_atom;
         let mut nonallin_best: Option<(usize, f64)> = None;
@@ -2504,6 +2630,7 @@ impl NeuralBehaviourGenerator {
             "bb_ordinary_bins":grid.count,
             "actual_bb_bin":(actual < count).then(|| BbSizingGrid::bin(bounds, actual).to_string()),
             "map_bb_bin":(best < count).then(|| BbSizingGrid::bin(bounds, best).to_string()),
+            "p_min_bb_bin_given_nonallin":p_min_bb_bin_given_nonallin,
             "p_allin":atom, "nll":loss, "uniform_nll":((grid.count+1) as f64).ln(),
             "p_actual":(-loss).exp(), "p_map":best_log.exp(),
             "shape_nll":shape_nll, "nonallin_map_chips":nonallin_best.map(|(i,_)| bounds.chips(i)),
@@ -2591,7 +2718,7 @@ mod tests {
     }
 
     #[test]
-    fn forward_only_scoring_matches_training_loss_components() {
+    fn forward_only_scoring_matches_nll_adaptation_components() {
         let context = ctx();
         let (context_values, context_present) = encode_context(&context);
         let observation = GeneratorObservation {
@@ -2698,9 +2825,17 @@ mod tests {
                     context_present,
                     observed,
                 };
-                let full = loss_gradients_encoded(&g, &profile(), &observation, legal())
-                    .unwrap()
-                    .0;
+                let mut gradients = Gradients::new(&g.parameters);
+                let full = backprop_encoded(
+                    &g,
+                    &profile(),
+                    &observation,
+                    legal(),
+                    SizingObjective::Nll,
+                    Some(&mut gradients),
+                    None,
+                )
+                .unwrap();
                 let latent = g
                     .evaluate_observation_encoded(&profile(), &observation, &legal())
                     .unwrap();
@@ -3197,6 +3332,125 @@ mod tests {
     }
 
     #[test]
+    fn crps_matches_energy_identity_and_finite_differences() {
+        let raw = [0.3, -0.4, 0.7, 0.2, 1.1, -0.6, 0.9];
+        for bounds in [
+            WagerBounds {
+                min_added_chips: 13,
+                max_added_chips: 117,
+                chip_unit: 1,
+                big_blind_chips: 100,
+            },
+            WagerBounds {
+                min_added_chips: 2,
+                max_added_chips: 19,
+                chip_unit: 3,
+                big_blind_chips: 10,
+            },
+            WagerBounds {
+                min_added_chips: 10,
+                max_added_chips: 11,
+                chip_unit: 1,
+                big_blind_chips: 100,
+            },
+            WagerBounds {
+                min_added_chips: 10,
+                max_added_chips: 10,
+                chip_unit: 1,
+                big_blind_chips: 100,
+            },
+        ] {
+            let grid = BbSizingGrid::new(bounds).unwrap();
+            let mut masses = Vec::new();
+            if grid.count > 0 {
+                let shape = SizingShape::new(grid, &raw).unwrap();
+                for (j, &p) in shape.log_probs.iter().enumerate() {
+                    masses.push((
+                        bounds.chips(grid.representative(j).unwrap()) as f64,
+                        sigmoid(-raw[0]) * p.exp(),
+                    ));
+                }
+            }
+            masses.push((
+                bounds.max_added_chips as f64,
+                if grid.count == 0 {
+                    1.0
+                } else {
+                    sigmoid(raw[0])
+                },
+            ));
+            let pot = 2.3;
+            for index in 0..=grid.ticks {
+                let (loss, grad) = sizing_crps(bounds, index, &raw, pot).unwrap();
+                let y = bounds.chips(index) as f64;
+                let first: f64 = masses.iter().map(|(x, p)| p * (x - y).abs()).sum();
+                let mut second = 0.0;
+                for &(x, p) in &masses {
+                    for &(z, q) in &masses {
+                        second += p * q * (x - z).abs();
+                    }
+                }
+                let expected = (first - 0.5 * second) / (pot * bounds.big_blind_chips as f64);
+                assert!((loss - expected).abs() < 1e-12);
+                for j in 0..raw.len() {
+                    let mut plus = raw;
+                    let mut minus = raw;
+                    plus[j] += 1e-5;
+                    minus[j] -= 1e-5;
+                    let numeric = (sizing_crps(bounds, index, &plus, pot).unwrap().0
+                        - sizing_crps(bounds, index, &minus, pot).unwrap().0)
+                        / 2e-5;
+                    assert!((numeric - grad[j]).abs() < 1e-7, "{numeric} vs {}", grad[j]);
+                }
+                let (half, half_grad) = sizing_crps(bounds, index, &raw, 2.0 * pot).unwrap();
+                assert!((half * 2.0 - loss).abs() < 1e-12);
+                for (a, b) in half_grad.iter().zip(&grad) {
+                    assert!((a * 2.0 - b).abs() < 1e-12);
+                }
+                let scaled = WagerBounds {
+                    min_added_chips: bounds.min_added_chips * 10,
+                    max_added_chips: bounds.max_added_chips * 10,
+                    chip_unit: bounds.chip_unit * 10,
+                    big_blind_chips: bounds.big_blind_chips * 10,
+                };
+                let (other, other_grad) = sizing_crps(scaled, index, &raw, pot).unwrap();
+                assert!((other - loss).abs() < 1e-12);
+                for (a, b) in other_grad.iter().zip(&grad) {
+                    assert!((a - b).abs() < 1e-12);
+                }
+            }
+            assert!(sizing_crps(bounds, 0, &raw, 0.0).is_err());
+        }
+    }
+
+    #[test]
+    fn training_crps_matches_diagnostic_and_preserves_nll_adaptation() {
+        let context = ctx();
+        let (context_values, context_present) = encode_context(&context);
+        let g = model();
+        for amount in [5.0, 20.0, 80.0] {
+            let obs = GeneratorObservation {
+                street: context.street,
+                actor_position: context.actor_position,
+                context_values,
+                context_present,
+                observed: observed_bet(amount),
+            };
+            let training = loss_gradients_encoded(&g, &profile(), &obs, legal())
+                .unwrap()
+                .0;
+            let diag = g.sizing_diagnostic_row(&profile(), &obs, &legal()).unwrap();
+            let nll = g
+                .evaluate_observation_encoded(&profile(), &obs, &legal())
+                .unwrap();
+            assert!((training.sizing - diag["crps_over_pot"].as_f64().unwrap()).abs() < 1e-12);
+            assert!((nll.sizing - diag["nll"].as_f64().unwrap()).abs() < 1e-12);
+            assert_eq!(training.action, nll.action);
+            assert_eq!(training.timing, nll.timing);
+        }
+    }
+
+    #[test]
     fn adam_reduces_observed_decision_loss() {
         let mut g = model();
         let mut adam = Adam::new(&g, 0.002).unwrap();
@@ -3262,7 +3516,7 @@ mod tests {
     }
 
     #[test]
-    fn parquet_features_and_live_context_have_identical_nll_and_latent_gradient() {
+    fn parquet_features_and_live_context_have_identical_objective_and_latent_gradient() {
         let game = ctx();
         let observed = observed_bet(5.0);
         let (numeric, mask) = encode_context(&game);

@@ -44,9 +44,9 @@ pub struct HierarchicalEpochReport {
     pub decisions: usize,
     /// G optimizer steps in this epoch (A steps coincide during Momentary).
     pub optimizer_steps: usize,
-    /// Blueprint: Z0 NLL; Personalization: Z1 NLL; Momentary: mean prior/posterior
-    /// sampled NLL. Does not include KL.
-    pub mean_nll: f64,
+    /// Blueprint: Z0 objective; Personalization: Z1 objective; Momentary: mean
+    /// prior/posterior objective. Action/timing NLL + sizing CRPS/pot, excluding KL.
+    pub mean_objective: f64,
     /// The conditional KL is available only for Momentary training.
     pub mean_conditional_kl: Option<f64>,
 }
@@ -300,7 +300,7 @@ impl HierarchicalTrainer {
     /// FNV-128 detects accidental model mismatches; it is not a cryptographic signature.
     pub fn model_id(&self) -> Result<String, HierarchicalTrainingError> {
         let data = serde_json::to_vec(&json!({
-            "format":"lechiffre.hierarchical.model.v10-shared-bb",
+            "format":"lechiffre.hierarchical.model.v11-crps-pot",
             "z0":self.blueprint.centre().as_slice(),
             "prior_std":self.blueprint.prior_std(),
             "generator":self.generator.checkpoint_value(),
@@ -313,7 +313,7 @@ impl HierarchicalTrainer {
         for byte in data {
             hash = (hash ^ u128::from(byte)).wrapping_mul(PRIME);
         }
-        Ok(format!("hierarchical-v10-shared-bb-{hash:032x}"))
+        Ok(format!("hierarchical-v11-crps-pot-{hash:032x}"))
     }
 
     /// Hierarchical-only checkpoint. Exact model, optimizer, RNG, phase, and dataset provenance.
@@ -322,7 +322,7 @@ impl HierarchicalTrainer {
             return Err(HierarchicalTrainingError::NotTrained);
         }
         let value = json!({
-            "format":"lechiffre.hierarchical.checkpoint.v10-shared-bb",
+            "format":"lechiffre.hierarchical.checkpoint.v11-crps-pot",
             "model_id":self.model_id()?,
             "blueprint":{"centre":self.blueprint.centre().as_slice(),
                          "prior_std":self.blueprint.prior_std()},
@@ -398,7 +398,7 @@ impl HierarchicalTrainer {
             ],
         )
         .map_err(bad)?;
-        let expected_format = "lechiffre.hierarchical.checkpoint.v10-shared-bb";
+        let expected_format = "lechiffre.hierarchical.checkpoint.v11-crps-pot";
         if value["format"].as_str() != Some(expected_format) {
             return Err(bad(format!("expected {expected_format}")));
         }
@@ -535,7 +535,7 @@ impl HierarchicalTrainer {
         let mut batch = GeneratorGradientBatch::new(&working.generator);
         let mut decisions = 0usize;
         let mut optimizer_steps = 0usize;
-        let mut nll_sum = 0.0;
+        let mut objective_sum = 0.0;
         for (id, membership) in memberships {
             let hand = &dataset.hands[membership.hand_slot];
             let observed = hand.materialize(membership.subject_position);
@@ -549,7 +549,7 @@ impl HierarchicalTrainer {
                 )?;
                 if batch.len() == working.optimization.blueprint_batch_decisions {
                     decisions += batch.len();
-                    nll_sum += working.apply_blueprint_batch(batch)?;
+                    objective_sum += working.apply_blueprint_batch(batch)?;
                     optimizer_steps += 1;
                     batch = GeneratorGradientBatch::new(&working.generator);
                 }
@@ -557,13 +557,13 @@ impl HierarchicalTrainer {
         }
         if !batch.is_empty() {
             decisions += batch.len();
-            nll_sum += working.apply_blueprint_batch(batch)?;
+            objective_sum += working.apply_blueprint_batch(batch)?;
             optimizer_steps += 1;
         }
         if decisions == 0 {
             return Err(HierarchicalTrainingError::EmptyTraining);
         }
-        if !nll_sum.is_finite() {
+        if !objective_sum.is_finite() {
             return Err(HierarchicalTrainingError::NonFiniteUpdate);
         }
         let expected_decisions: usize = dataset
@@ -587,7 +587,7 @@ impl HierarchicalTrainer {
             phase: HierarchicalPhase::Blueprint,
             decisions,
             optimizer_steps,
-            mean_nll: nll_sum / decisions as f64,
+            mean_objective: objective_sum / decisions as f64,
             mean_conditional_kl: None,
         })
     }
@@ -615,11 +615,11 @@ impl HierarchicalTrainer {
         let next_centre = self.generator.latent_config().profile(centre)?;
         let next_blueprint =
             BehaviourBlueprint::new(next_centre, self.blueprint.prior_std().to_vec())?;
-        let nll_sum = mean.total * batch.len() as f64;
+        let objective_sum = mean.total * batch.len() as f64;
         self.generator_adam
             .apply_batch(&mut self.generator, batch)?;
         self.blueprint = next_blueprint;
-        Ok(nll_sum)
+        Ok(objective_sum)
     }
 
     /// Online personalization on disjoint trajectories of `support_hands`
@@ -670,7 +670,7 @@ impl HierarchicalTrainer {
         }
         let mut batch = GeneratorGradientBatch::new(&working.generator);
         let mut count = 0usize;
-        let mut sum_nll = 0.0;
+        let mut objective_sum = 0.0;
         let mut optimizer_steps = 0;
         for (hand_index, id, membership) in memberships {
             let hand = dataset.hands[membership.hand_slot].materialize(membership.subject_position);
@@ -709,7 +709,7 @@ impl HierarchicalTrainer {
                     observation,
                     legal,
                 )?;
-                sum_nll += loss.total;
+                objective_sum += loss.total;
                 count = count
                     .checked_add(1)
                     .ok_or(HierarchicalTrainingError::CountOverflow)?;
@@ -737,7 +737,7 @@ impl HierarchicalTrainer {
         if count == 0 || states.values().any(|state| state.observed_decisions() == 0) {
             return Err(HierarchicalTrainingError::EmptyTraining);
         }
-        if !sum_nll.is_finite() {
+        if !objective_sum.is_finite() {
             return Err(HierarchicalTrainingError::NonFiniteUpdate);
         }
         working.personalization_epochs = working
@@ -749,7 +749,7 @@ impl HierarchicalTrainer {
             phase: HierarchicalPhase::Personalization,
             decisions: count,
             optimizer_steps,
-            mean_nll: sum_nll / count as f64,
+            mean_objective: objective_sum / count as f64,
             mean_conditional_kl: None,
         })
     }
@@ -777,16 +777,16 @@ impl HierarchicalTrainer {
         let samples = sample_subjects(dataset, subjects, partitions, episode)?;
         let mut working = self.clone();
         working.bind_training_context(dataset, subjects, partitions, episode)?;
-        let mut nll_sum = 0.0;
+        let mut objective_sum = 0.0;
         let mut kl_sum = 0.0;
         let mut decisions = 0usize;
         for sample in &samples {
             let baseline =
                 working.personalize(sample.id, &sample.support, history_hands, provider)?;
             let observations = collect_query(sample, provider)?;
-            let (total_nll, total_kl) =
+            let (total_objective, total_kl) =
                 working.train_momentary_decisions(&baseline, &observations)?;
-            nll_sum += total_nll;
+            objective_sum += total_objective;
             kl_sum += total_kl;
             decisions = decisions
                 .checked_add(observations.len())
@@ -804,7 +804,7 @@ impl HierarchicalTrainer {
             phase: HierarchicalPhase::Momentary,
             decisions,
             optimizer_steps: samples.len(),
-            mean_nll: nll_sum / decisions as f64,
+            mean_objective: objective_sum / decisions as f64,
             mean_conditional_kl: Some(kl_sum / decisions as f64),
         })
     }
@@ -817,7 +817,7 @@ impl HierarchicalTrainer {
         let mut g_batch = GeneratorGradientBatch::new(&self.generator);
         let mut a_batch = AnalyzerGradientBatch::new(&self.analyzer);
         let mut next_noise = self.noise;
-        let mut nll = 0.0;
+        let mut objective = 0.0;
         let mut kl = 0.0;
         for (observation, legal) in decisions {
             let posterior = self.analyzer.infer_encoded(observation, baseline)?;
@@ -839,7 +839,7 @@ impl HierarchicalTrainer {
                 &post_loss.latent_gradient,
                 self.beta_kl,
             )?;
-            nll += (prior_loss.total + post_loss.total) * 0.5;
+            objective += (prior_loss.total + post_loss.total) * 0.5;
         }
         if decisions.is_empty() {
             return Err(HierarchicalTrainingError::EmptyTraining);
@@ -856,7 +856,7 @@ impl HierarchicalTrainer {
         self.generator_adam = next_g_optimizer;
         self.analyzer_adam = next_a_optimizer;
         self.noise = next_noise;
-        Ok((nll, kl))
+        Ok((objective, kl))
     }
 
     /// Fit Z1 only from the explicitly provided, ordered support history.
@@ -1960,7 +1960,7 @@ mod tests {
             .unwrap();
         assert_eq!(report.decisions, 12);
         assert_eq!(report.optimizer_steps, 4);
-        assert_eq!(report.mean_nll, nll / 12.0);
+        assert_eq!(report.mean_objective, nll / 12.0);
         assert_eq!(
             actual.generator.parameters(),
             expected.generator.parameters()
@@ -2050,7 +2050,7 @@ mod tests {
             .unwrap();
         assert_eq!(report.decisions, 12);
         assert_eq!(report.optimizer_steps, 3);
-        assert_eq!(report.mean_nll, total / 12.0);
+        assert_eq!(report.mean_objective, total / 12.0);
         assert_eq!(
             actual.generator.parameters(),
             expected.generator.parameters()
@@ -2211,6 +2211,7 @@ mod tests {
             "lechiffre.hierarchical.checkpoint.v8",
             "lechiffre.hierarchical.checkpoint.v9",
             "lechiffre.hierarchical.checkpoint.v10",
+            "lechiffre.hierarchical.checkpoint.v10-shared-bb",
         ] {
             obsolete["format"] = json!(obsolete_version);
             std::fs::write(&invalid_path, serde_json::to_vec(&obsolete).unwrap()).unwrap();

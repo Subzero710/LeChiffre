@@ -513,8 +513,8 @@ fn print_hierarchical_epoch(
     r: &lechiffre::datasets::behaviour_parquet_loader::HierarchicalEpochReport,
 ) {
     println!(
-        "phase={:?} decisions={} optimizer_steps={} mean_nll={:.8} conditional_KL={:?}",
-        r.phase, r.decisions, r.optimizer_steps, r.mean_nll, r.mean_conditional_kl
+        "phase={:?} decisions={} optimizer_steps={} mean_objective={:.8} conditional_KL={:?}",
+        r.phase, r.decisions, r.optimizer_steps, r.mean_objective, r.mean_conditional_kl
     );
 }
 fn validation_report_value(
