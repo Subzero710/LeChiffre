@@ -2,7 +2,7 @@
   "latent_dimension": 4,
   "generator_hidden": 32,
   "analyzer_hidden": 32,
-  "generator_lr": 0.0005,
+  "generator_gn_damping": 0.01,
   "analyzer_lr": 0.0005,
   "blueprint_lr": 0.001,
   "baseline_lr": 0.2,

@@ -1357,11 +1357,12 @@ impl MatrixProducts {
 }
 
 /// Gradients accumulated against one immutable Generator parameter snapshot.
-/// No optimizer step occurs until `Adam::apply_batch` is called. Per-decision
+/// No optimizer step occurs until the optimizer applies the complete batch. Per-decision
 /// `TrainingLoss.latent_gradient` can be propagated to A before that update.
 #[derive(Debug, Clone)]
 pub struct GeneratorGradientBatch {
     model_snapshot: NeuralBehaviourGenerator,
+    gn_examples: Vec<GnExample>,
     gradients: Gradients,
     matrix_products: MatrixProducts,
     observations: usize,
@@ -1377,6 +1378,7 @@ impl GeneratorGradientBatch {
     pub fn new(model: &NeuralBehaviourGenerator) -> Self {
         Self {
             model_snapshot: model.clone(),
+            gn_examples: Vec::new(),
             gradients: Gradients::new(&model.parameters),
             matrix_products: MatrixProducts::default(),
             observations: 0,
@@ -1458,6 +1460,12 @@ impl GeneratorGradientBatch {
         self.loss_sizing = totals[2];
         self.loss_timing = totals[3];
         self.latent_gradient_sum = next_latent;
+        self.gn_examples.push(GnExample {
+            profile: profile.clone(),
+            observation: observation.clone(),
+            legal: *legal,
+            weight: 1.0,
+        });
         Ok(loss)
     }
 
@@ -1473,7 +1481,14 @@ impl GeneratorGradientBatch {
     ) -> Result<TrainingLoss, GeneratorError> {
         self.check_model(model)?;
         let (loss, gradients) = loss_gradients_encoded(model, profile, observation, *legal)?;
-        self.add_loss_gradients(loss, gradients, weight)
+        let result = self.add_loss_gradients(loss, gradients, weight)?;
+        self.gn_examples.push(GnExample {
+            profile: profile.clone(),
+            observation: observation.clone(),
+            legal: *legal,
+            weight,
+        });
+        Ok(result)
     }
 
     pub fn accumulate(
@@ -1988,6 +2003,416 @@ fn sizing_crps(
     Ok((loss, gradient))
 }
 
+/// Damped matrix-free generalized Gauss-Newton on all shared G parameters.
+/// Action and timing use their expected NLL Hessians, sizing uses J_CDF^T D J_CDF.
+/// Latents and observations are fixed within each solve. No Adam fallback.
+#[derive(Debug, Clone)]
+pub struct GaussNewton {
+    damping: f64,
+    step: u64,
+}
+
+#[derive(Debug, Clone)]
+struct GnExample {
+    profile: BehaviourProfile,
+    observation: GeneratorObservation,
+    legal: LegalActionSpace,
+    weight: f64,
+}
+
+struct GnWager {
+    shape: SizingShape,
+    raw: Vec<f64>,
+    q: Vec<f64>,
+    gaps: Vec<f64>,
+    a: f64,
+    b: f64,
+}
+impl GnWager {
+    fn new(bounds: WagerBounds, raw: Vec<f64>, pot: f64) -> Result<Option<Self>, GeneratorError> {
+        let grid = BbSizingGrid::new(bounds)?;
+        if grid.count == 0 {
+            return Ok(None);
+        }
+        let shape = SizingShape::new(grid, &raw)?;
+        let q = shape.log_probs.iter().map(|p| p.exp()).collect();
+        let pot_chips = pot * bounds.big_blind_chips as f64;
+        if !pot_chips.is_finite() || pot_chips <= 0.0 {
+            return Err(GeneratorError::InvalidLegalActions);
+        }
+        let mut gaps = Vec::with_capacity(grid.count);
+        let mut lo = bounds.chips(grid.representative(0)?);
+        for j in 0..grid.count {
+            let hi = if j + 1 == grid.count {
+                bounds.max_added_chips
+            } else {
+                bounds.chips(grid.representative(j + 1)?)
+            };
+            if hi <= lo {
+                return Err(GeneratorError::InvalidWagerBounds);
+            }
+            gaps.push((hi - lo) as f64 / pot_chips);
+            lo = hi;
+        }
+        let a = sigmoid(raw[0]);
+        let b = sigmoid(-raw[0]);
+        Ok(Some(Self {
+            shape,
+            raw,
+            q,
+            gaps,
+            a,
+            b,
+        }))
+    }
+    // Exact 2 J^T D J v, J differentiates ordinary CDFs including the atom.
+    fn product(&self, v: &[f64]) -> Result<Vec<f64>, GeneratorError> {
+        let score: Vec<f64> = self
+            .shape
+            .basis
+            .iter()
+            .map(|row| {
+                row.weights
+                    .iter()
+                    .enumerate()
+                    .map(|(j, w)| w * v[1 + row.first + j])
+                    .sum()
+            })
+            .collect();
+        let mean = gn_dot(&self.q, &score);
+        let mut cumulative = 0.0;
+        let mut r: Vec<f64> = self
+            .q
+            .iter()
+            .zip(score)
+            .zip(&self.gaps)
+            .map(|((&q, s), &d)| {
+                cumulative += self.b * q * (s - mean - self.a * v[0]);
+                2.0 * d * cumulative
+            })
+            .collect();
+        let mut suffix = 0.0;
+        for x in r.iter_mut().rev() {
+            suffix += *x;
+            *x = suffix;
+        }
+        let mean = gn_dot(&self.q, &r);
+        let mut out = vec![0.0; v.len()];
+        out[0] = -self.a * self.b * mean;
+        for (x, &q) in r.iter_mut().zip(&self.q) {
+            *x = self.b * q * (*x - mean);
+        }
+        self.shape.score_gradient(&r, &self.raw, &mut out)?;
+        Ok(out)
+    }
+}
+
+struct GnRow {
+    forward: ForwardPass,
+    sizing: Option<(Vec<f64>, GnWager)>,
+    timing: Option<(Vec<f64>, [f64; 2])>,
+    weight: f64,
+}
+impl GnRow {
+    fn new(model: &NeuralBehaviourGenerator, ex: &GnExample) -> Result<Self, GeneratorError> {
+        let ob = &ex.observation;
+        let (stack, call) = ob.validated_facts(ex.legal)?;
+        let forward = model.forward_features(
+            &ex.profile,
+            encoded_context_features(
+                ob.street,
+                ob.actor_position,
+                &ob.context_values,
+                &ob.context_present,
+            ),
+            ex.legal,
+        )?;
+        let action = &ob.observed;
+        let amount = match action.kind {
+            ActionKind::Fold | ActionKind::Check => 0.0,
+            ActionKind::Call => call.min(stack),
+            ActionKind::Bet | ActionKind::Raise => {
+                stack
+                    * action
+                        .sizing
+                        .ok_or(GeneratorError::InvalidObservedWager)?
+                        .amount_over_stack_before
+            }
+        };
+        let sizing = if let Some(bounds) = ex.legal.bounds(action.kind) {
+            let input = sizing_input(&forward.state, action.kind);
+            GnWager::new(
+                bounds,
+                model.parameters.sizing.forward(&input),
+                f64::from(ob.context_values[0]),
+            )?
+            .map(|w| (input, w))
+        } else {
+            None
+        };
+        let timing = if action.decision_time_ms.is_some() {
+            let input = timing_input(&forward.state, action.kind, f64::from(amount / stack));
+            let raw = model.parameters.timing.forward(&input);
+            let sigma = softplus(raw[1]) + MIN_TIMING_SCALE;
+            Some((
+                input,
+                [1.0 / sigma.powi(2), 2.0 * (sigmoid(raw[1]) / sigma).powi(2)],
+            ))
+        } else {
+            None
+        };
+        Ok(Self {
+            forward,
+            sizing,
+            timing,
+            weight: ex.weight,
+        })
+    }
+}
+
+fn gn_dot(x: &[f64], y: &[f64]) -> f64 {
+    assert_eq!(x.len(), y.len());
+    x.iter().zip(y).map(|(a, b)| a * b).sum()
+}
+fn gn_flatten(g: &Gradients) -> Vec<f64> {
+    [&g.state, &g.action, &g.sizing, &g.timing]
+        .into_iter()
+        .flat_map(|l| l.weights.iter().chain(&l.bias).copied())
+        .collect()
+}
+fn gn_unflatten(p: &GeneratorParameters, v: &[f64]) -> Gradients {
+    let mut g = Gradients::new(p);
+    let mut source = v.iter();
+    for l in [&mut g.state, &mut g.action, &mut g.sizing, &mut g.timing] {
+        for x in l.weights.iter_mut().chain(&mut l.bias) {
+            *x = *source.next().expect("GN vector shape");
+        }
+    }
+    assert!(source.next().is_none());
+    g
+}
+// Directional derivative of a dense layer: dW x + db + W dx.
+fn gn_dense_jvp(layer: &DenseLayer, v: &LayerGradients, x: &[f64], dx: &[f64]) -> Vec<f64> {
+    v.weights
+        .chunks_exact(layer.input)
+        .zip(layer.weights_f64.chunks_exact(layer.input))
+        .zip(&v.bias)
+        .map(|((dw, w), b)| gn_dot(dw, x) + b + gn_dot(w, dx))
+        .collect()
+}
+fn gn_product(
+    p: &GeneratorParameters,
+    rows: &[GnRow],
+    weight: f64,
+    vector: &[f64],
+) -> Result<Vec<f64>, GeneratorError> {
+    let v = gn_unflatten(p, vector);
+    let mut result = Gradients::new(p);
+    for row in rows {
+        let f = &row.forward;
+        let mut ds = gn_dense_jvp(&p.state, &v.state, &f.input, &vec![0.0; f.input.len()]);
+        for (d, s) in ds.iter_mut().zip(&f.state) {
+            *d *= 1.0 - s * s;
+        }
+        let da = gn_dense_jvp(&p.action, &v.action, &f.state, &ds);
+        let mean = gn_dot(&da, &f.probabilities);
+        let delta: Vec<f64> = da
+            .iter()
+            .zip(f.probabilities)
+            .map(|(d, q)| row.weight * q * (d - mean) / weight)
+            .collect();
+        let mut back = p
+            .action
+            .backward(&f.state, &delta, Some(&mut result.action));
+        if let Some((input, wager)) = &row.sizing {
+            let mut dx = ds.clone();
+            dx.resize(input.len(), 0.0);
+            let draw = gn_dense_jvp(&p.sizing, &v.sizing, input, &dx);
+            let mut delta = wager.product(&draw)?;
+            for d in &mut delta {
+                *d *= row.weight / weight;
+            }
+            let prev = p.sizing.backward(input, &delta, Some(&mut result.sizing));
+            add(&mut back, &prev[..ds.len()]);
+        }
+        if let Some((input, fisher)) = &row.timing {
+            let mut dx = ds.clone();
+            dx.resize(input.len(), 0.0);
+            let draw = gn_dense_jvp(&p.timing, &v.timing, input, &dx);
+            let delta = [
+                draw[0] * fisher[0] * row.weight / weight,
+                draw[1] * fisher[1] * row.weight / weight,
+            ];
+            let prev = p.timing.backward(input, &delta, Some(&mut result.timing));
+            add(&mut back, &prev[..ds.len()]);
+        }
+        for (d, s) in back.iter_mut().zip(&f.state) {
+            *d *= 1.0 - s * s;
+        }
+        let _ = p.state.backward(&f.input, &back, Some(&mut result.state));
+    }
+    let out = gn_flatten(&result);
+    if out.iter().any(|x| !x.is_finite()) {
+        return Err(GeneratorError::NonFiniteGradient);
+    }
+    Ok(out)
+}
+
+// CG solves (H+lambda I)d=-g. A finite truncated iterate is a deliberate
+// inexact GN solve, accepted only by the actual objective reduction test.
+fn gn_cg(
+    g: &[f64],
+    damping: f64,
+    hv: &impl Fn(&[f64]) -> Result<Vec<f64>, GeneratorError>,
+) -> Result<Vec<f64>, GeneratorError> {
+    let mut d = vec![0.0; g.len()];
+    let mut r: Vec<f64> = g.iter().map(|x| -x).collect();
+    let mut p = r.clone();
+    let mut rr = gn_dot(&r, &r);
+    let tolerance = rr * 1e-6;
+    for _ in 0..64 {
+        if rr <= tolerance {
+            break;
+        }
+        let mut ap = hv(&p)?;
+        for (a, x) in ap.iter_mut().zip(&p) {
+            *a += damping * x;
+        }
+        let pap = gn_dot(&p, &ap);
+        if !pap.is_finite() || pap <= 0.0 {
+            return Err(GeneratorError::GaussNewtonSolveFailed);
+        }
+        let alpha = rr / pap;
+        for ((d, r), (p, a)) in d.iter_mut().zip(&mut r).zip(p.iter().zip(ap)) {
+            *d += alpha * p;
+            *r -= alpha * a;
+        }
+        let next = gn_dot(&r, &r);
+        if !next.is_finite() {
+            return Err(GeneratorError::NonFiniteGradient);
+        }
+        let beta = next / rr;
+        for (p, r) in p.iter_mut().zip(&r) {
+            *p = r + beta * *p;
+        }
+        rr = next;
+    }
+    Ok(d)
+}
+fn gn_candidate(
+    model: &NeuralBehaviourGenerator,
+    delta: &[f64],
+) -> Result<(NeuralBehaviourGenerator, Vec<f64>), GeneratorError> {
+    let mut next = model.clone();
+    let p = &mut next.parameters;
+    let mut source = delta.iter();
+    let mut actual = Vec::with_capacity(delta.len());
+    for l in [&mut p.state, &mut p.action, &mut p.sizing, &mut p.timing] {
+        for w in l.weights.iter_mut().chain(&mut l.bias) {
+            let old = f64::from(*w);
+            let value = old + source.next().expect("GN vector shape");
+            if !value.is_finite() || value.abs() > f64::from(f32::MAX) {
+                return Err(GeneratorError::NonFiniteParameter);
+            }
+            *w = value as f32;
+            actual.push(f64::from(*w) - old);
+        }
+        for (w, &stored) in l.weights_f64.iter_mut().zip(&l.weights) {
+            *w = f64::from(stored);
+        }
+    }
+    assert!(source.next().is_none());
+    Ok((next, actual))
+}
+
+impl GaussNewton {
+    pub fn new(_model: &NeuralBehaviourGenerator, damping: f64) -> Result<Self, GeneratorError> {
+        if !damping.is_finite() || !(1e-8..=1e8).contains(&damping) {
+            return Err(GeneratorError::InvalidGaussNewtonDamping);
+        }
+        Ok(Self { damping, step: 0 })
+    }
+    pub fn apply_batch(
+        &mut self,
+        model: &mut NeuralBehaviourGenerator,
+        batch: GeneratorGradientBatch,
+    ) -> Result<TrainingLoss, GeneratorError> {
+        batch.check_model(model)?;
+        let loss = batch.mean_loss()?;
+        if batch.gn_examples.len() != batch.len() {
+            return Err(GeneratorError::GaussNewtonEncodedBatchRequired);
+        }
+        let g = gn_flatten(&batch.averaged_gradients()?);
+        let step = self
+            .step
+            .checked_add(1)
+            .ok_or(GeneratorError::OptimizerStepOverflow)?;
+        let norm2 = gn_dot(&g, &g);
+        if !norm2.is_finite() {
+            return Err(GeneratorError::NonFiniteGradient);
+        }
+        // Explicit stationary batch, not a fallback optimizer.
+        if norm2.sqrt() <= 1e-8 {
+            self.step = step;
+            return Ok(loss);
+        }
+        let rows = batch
+            .gn_examples
+            .iter()
+            .map(|ex| GnRow::new(model, ex))
+            .collect::<Result<Vec<_>, _>>()?;
+        let hv = |v: &[f64]| gn_product(&model.parameters, &rows, batch.total_weight, v);
+        let mut damping = self.damping;
+        for _ in 0..12 {
+            let delta = gn_cg(&g, damping, &hv)?;
+            let (candidate, actual) = gn_candidate(model, &delta)?;
+            let predicted = -gn_dot(&g, &actual) - 0.5 * gn_dot(&actual, &hv(&actual)?);
+            let mut total = 0.0;
+            for ex in &batch.gn_examples {
+                total += ex.weight
+                    * backprop_encoded(
+                        &candidate,
+                        &ex.profile,
+                        &ex.observation,
+                        ex.legal,
+                        SizingObjective::CrpsOverPot(f64::from(ex.observation.context_values[0])),
+                        None,
+                        None,
+                    )?
+                    .total;
+            }
+            let reduction = loss.total - total / batch.total_weight;
+            if predicted > 0.0 && reduction > 0.0 && reduction / predicted >= 1e-4 {
+                let ratio = reduction / predicted;
+                self.damping = if ratio > 0.75 {
+                    (damping * 0.5).max(1e-8)
+                } else if ratio < 0.25 {
+                    (damping * 2.0).min(1e8)
+                } else {
+                    damping
+                };
+                self.step = step;
+                *model = candidate;
+                return Ok(loss);
+            }
+            damping = (damping * 4.0).min(1e8);
+        }
+        Err(GeneratorError::GaussNewtonStepRejected)
+    }
+    pub(crate) fn checkpoint_value(&self) -> Value {
+        json!({"damping":self.damping,"steps":self.step})
+    }
+    pub(crate) fn from_checkpoint(
+        value: &Value,
+        model: &NeuralBehaviourGenerator,
+    ) -> Result<Self, String> {
+        exact_keys(value, &["damping", "steps"])?;
+        let mut result = Self::new(model, number(&value["damping"])?).map_err(|e| e.to_string())?;
+        result.step = unsigned(&value["steps"])?;
+        Ok(result)
+    }
+}
+
 /// Adam optimizer owns all of its moments, with no second model implementation.
 #[derive(Debug, Clone)]
 pub struct Adam {
@@ -2418,14 +2843,14 @@ impl LayerMoments {
 }
 
 impl Adam {
-    pub(crate) fn checkpoint_value(&self) -> Value {
+    pub fn checkpoint_value(&self) -> Value {
         json!({"learning_rate":self.learning_rate,"steps":self.step,
             "state":self.moments.state.checkpoint_value(),
             "action":self.moments.action.checkpoint_value(),
             "sizing":self.moments.sizing.checkpoint_value(),
             "timing":self.moments.timing.checkpoint_value()})
     }
-    pub(crate) fn from_checkpoint(
+    pub fn from_checkpoint(
         value: &Value,
         model: &NeuralBehaviourGenerator,
     ) -> Result<Self, String> {
@@ -2489,6 +2914,10 @@ pub enum GeneratorError {
     BatchCountOverflow,
     InvalidBatchWeight,
     EmptyBatch,
+    InvalidGaussNewtonDamping,
+    GaussNewtonEncodedBatchRequired,
+    GaussNewtonSolveFailed,
+    GaussNewtonStepRejected,
 }
 impl fmt::Display for GeneratorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -2714,6 +3143,119 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn gn_wager_product_matches_cdf_jacobian_and_is_psd() {
+        let bounds = legal().bet.unwrap();
+        let raw = (0..25).map(|i| (i as f64 * 0.31).sin()).collect::<Vec<_>>();
+        let v = (0..25).map(|i| (i as f64 * 0.7).cos()).collect::<Vec<_>>();
+        let w = GnWager::new(bounds, raw.clone(), 10.0).unwrap().unwrap();
+        let hv = w.product(&v).unwrap();
+        let cdf = |r: &[f64]| {
+            let shape = SizingShape::new(BbSizingGrid::new(bounds).unwrap(), r).unwrap();
+            let mut sum = 0.0;
+            shape
+                .log_probs
+                .iter()
+                .map(|p| {
+                    sum += sigmoid(-r[0]) * p.exp();
+                    sum
+                })
+                .collect::<Vec<_>>()
+        };
+        let epsilon = 1e-5;
+        let plus = raw
+            .iter()
+            .zip(&v)
+            .map(|(r, d)| r + epsilon * d)
+            .collect::<Vec<_>>();
+        let minus = raw
+            .iter()
+            .zip(&v)
+            .map(|(r, d)| r - epsilon * d)
+            .collect::<Vec<_>>();
+        let jv = cdf(&plus)
+            .iter()
+            .zip(cdf(&minus))
+            .map(|(a, b)| (a - b) / (2.0 * epsilon))
+            .collect::<Vec<_>>();
+        let energy = 2.0 * jv.iter().zip(&w.gaps).map(|(x, d)| d * x * x).sum::<f64>();
+        assert!((gn_dot(&v, &hv) - energy).abs() < 1e-8);
+        for i in 0..raw.len() {
+            let mut p = raw.clone();
+            let mut m = raw.clone();
+            p[i] += epsilon;
+            m[i] -= epsilon;
+            let numeric = cdf(&p)
+                .iter()
+                .zip(cdf(&m))
+                .zip(jv.iter().zip(&w.gaps))
+                .map(|((a, b), (j, d))| 2.0 * d * j * (a - b) / (2.0 * epsilon))
+                .sum::<f64>();
+            assert!((numeric - hv[i]).abs() < 1e-8, "coefficient {i}");
+        }
+    }
+
+    #[test]
+    fn gn_shared_parameters_symmetric_and_accepted_batch_decreases_score() {
+        let mut g = model();
+        let context = ctx();
+        let (context_values, context_present) = encode_context(&context);
+        let mut batch = GeneratorGradientBatch::new(&g);
+        for amount in [1.0, 5.0, 20.0, 80.0] {
+            let ob = GeneratorObservation {
+                street: context.street,
+                actor_position: context.actor_position,
+                context_values,
+                context_present,
+                observed: observed_bet(amount),
+            };
+            batch
+                .accumulate_snapshot_encoded(&profile(), &ob, &legal())
+                .unwrap();
+        }
+        let examples = batch.gn_examples.clone();
+        let rows = examples
+            .iter()
+            .map(|ex| GnRow::new(&g, ex))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let n = gn_flatten(&batch.averaged_gradients().unwrap()).len();
+        let v = (0..n).map(|i| (i as f64 * 0.21).sin()).collect::<Vec<_>>();
+        let u = (0..n).map(|i| (i as f64 * 0.31).cos()).collect::<Vec<_>>();
+        let hv = gn_product(&g.parameters, &rows, 4.0, &v).unwrap();
+        let hu = gn_product(&g.parameters, &rows, 4.0, &u).unwrap();
+        assert!(gn_dot(&v, &hv) >= 0.0);
+        assert!((gn_dot(&u, &hv) - gn_dot(&v, &hu)).abs() < 1e-8 * (1.0 + gn_dot(&u, &hv).abs()));
+        let before = batch.mean_loss().unwrap().total;
+        let mut opt = GaussNewton::new(&g, 0.01).unwrap();
+        opt.apply_batch(&mut g, batch).unwrap();
+        let after = examples
+            .iter()
+            .map(|ex| {
+                backprop_encoded(
+                    &g,
+                    &ex.profile,
+                    &ex.observation,
+                    ex.legal,
+                    SizingObjective::CrpsOverPot(10.0),
+                    None,
+                    None,
+                )
+                .unwrap()
+                .total
+            })
+            .sum::<f64>()
+            / 4.0;
+        assert!(after < before, "{after} >= {before}");
+        let saved = opt.checkpoint_value();
+        assert_eq!(
+            GaussNewton::from_checkpoint(&saved, &g)
+                .unwrap()
+                .checkpoint_value(),
+            saved
+        );
     }
 
     #[test]
