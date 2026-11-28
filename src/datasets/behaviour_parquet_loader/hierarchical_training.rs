@@ -24,11 +24,11 @@ use super::training_data::{
 };
 use super::{BehaviourParquetDataset, DatasetPartitions, EvaluationPartition};
 use crate::behavioural::{
-    ACTION_COUNT, AnalyzerAdam, AnalyzerError, AnalyzerGradientBatch, BaselineAdaptationConfig,
-    BaselineAdaptationError, BehaviourBlueprint, BehaviourLatentModel, BehaviourProfileError,
-    GaussNewton, GeneratorError, GeneratorGradientBatch, GeneratorObservation, LegalActionSpace,
-    NeuralBehaviourAnalyzer, NeuralBehaviourGenerator, NoiseStream, PlayerBaseline,
-    PlayerBaselineAdapter, PlayerBaselineState,
+    ACTION_COUNT, Adam, AnalyzerAdam, AnalyzerError, AnalyzerGradientBatch,
+    BaselineAdaptationConfig, BaselineAdaptationError, BehaviourBlueprint, BehaviourLatentModel,
+    BehaviourProfileError, GeneratorError, GeneratorGradientBatch, GeneratorObservation,
+    LegalActionSpace, NeuralBehaviourAnalyzer, NeuralBehaviourGenerator, NoiseStream,
+    PlayerBaseline, PlayerBaselineAdapter, PlayerBaselineState,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,7 +45,7 @@ pub struct HierarchicalEpochReport {
     /// G optimizer steps in this epoch (A steps coincide during Momentary).
     pub optimizer_steps: usize,
     /// Blueprint: Z0 objective; Personalization: Z1 objective; Momentary: mean
-    /// prior/posterior objective. Action/timing NLL + sizing CRPS/pot, excluding KL.
+    /// prior/posterior objective. Joint action/sizing/timing NLL, excluding KL.
     pub mean_objective: f64,
     /// The conditional KL is available only for Momentary training.
     pub mean_conditional_kl: Option<f64>,
@@ -125,7 +125,7 @@ pub struct HierarchicalTrainer {
     blueprint: BehaviourBlueprint,
     generator: NeuralBehaviourGenerator,
     analyzer: NeuralBehaviourAnalyzer,
-    generator_gn: GaussNewton,
+    generator_adam: Adam,
     analyzer_adam: AnalyzerAdam,
     baseline_config: BaselineAdaptationConfig,
     blueprint_learning_rate: f64,
@@ -151,7 +151,7 @@ impl HierarchicalTrainer {
         blueprint: BehaviourBlueprint,
         generator: NeuralBehaviourGenerator,
         analyzer: NeuralBehaviourAnalyzer,
-        generator_gn: GaussNewton,
+        generator_adam: Adam,
         analyzer_adam: AnalyzerAdam,
         baseline_config: BaselineAdaptationConfig,
         blueprint_learning_rate: f64,
@@ -176,7 +176,7 @@ impl HierarchicalTrainer {
             blueprint,
             generator,
             analyzer,
-            generator_gn,
+            generator_adam,
             analyzer_adam,
             baseline_config,
             blueprint_learning_rate,
@@ -300,7 +300,7 @@ impl HierarchicalTrainer {
     /// FNV-128 detects accidental model mismatches; it is not a cryptographic signature.
     pub fn model_id(&self) -> Result<String, HierarchicalTrainingError> {
         let data = serde_json::to_vec(&json!({
-            "format":"lechiffre.hierarchical.model.v12-cubic-bb-crps-pot-gn",
+            "format":"lechiffre.hierarchical.model.v13-cubic-bb-nll",
             "z0":self.blueprint.centre().as_slice(),
             "prior_std":self.blueprint.prior_std(),
             "generator":self.generator.checkpoint_value(),
@@ -313,7 +313,7 @@ impl HierarchicalTrainer {
         for byte in data {
             hash = (hash ^ u128::from(byte)).wrapping_mul(PRIME);
         }
-        Ok(format!("hierarchical-v12-cubic-bb-crps-pot-gn-{hash:032x}"))
+        Ok(format!("hierarchical-v13-cubic-bb-nll-{hash:032x}"))
     }
 
     /// Hierarchical-only checkpoint. Exact model, optimizer, RNG, phase, and dataset provenance.
@@ -322,13 +322,13 @@ impl HierarchicalTrainer {
             return Err(HierarchicalTrainingError::NotTrained);
         }
         let value = json!({
-            "format":"lechiffre.hierarchical.checkpoint.v12-cubic-bb-crps-pot-gn",
+            "format":"lechiffre.hierarchical.checkpoint.v13-cubic-bb-nll",
             "model_id":self.model_id()?,
             "blueprint":{"centre":self.blueprint.centre().as_slice(),
                          "prior_std":self.blueprint.prior_std()},
             "generator":self.generator.checkpoint_value(),
             "analyzer":self.analyzer.checkpoint_value(),
-            "generator_gn":self.generator_gn.checkpoint_value(),
+            "generator_adam":self.generator_adam.checkpoint_value(),
             "analyzer_adam":self.analyzer_adam.checkpoint_value(),
             "baseline_config":{"learning_rate":self.baseline_config.learning_rate(),
                                "max_step_prior_std":self.baseline_config.max_step_prior_std()},
@@ -382,7 +382,7 @@ impl HierarchicalTrainer {
                 "blueprint",
                 "generator",
                 "analyzer",
-                "generator_gn",
+                "generator_adam",
                 "analyzer_adam",
                 "baseline_config",
                 "blueprint_learning_rate",
@@ -398,7 +398,7 @@ impl HierarchicalTrainer {
             ],
         )
         .map_err(bad)?;
-        let expected_format = "lechiffre.hierarchical.checkpoint.v12-cubic-bb-crps-pot-gn";
+        let expected_format = "lechiffre.hierarchical.checkpoint.v13-cubic-bb-nll";
         if value["format"].as_str() != Some(expected_format) {
             return Err(bad(format!("expected {expected_format}")));
         }
@@ -435,7 +435,7 @@ impl HierarchicalTrainer {
             config.profile(floats(&value["blueprint"]["centre"])?)?,
             floats(&value["blueprint"]["prior_std"])?,
         )?;
-        let gopt = GaussNewton::from_checkpoint(&value["generator_gn"], &generator).map_err(bad)?;
+        let gopt = Adam::from_checkpoint(&value["generator_adam"], &generator).map_err(bad)?;
         let aopt =
             AnalyzerAdam::from_checkpoint(&value["analyzer_adam"], &analyzer).map_err(bad)?;
         let baseline_config = BaselineAdaptationConfig::new(
@@ -616,7 +616,8 @@ impl HierarchicalTrainer {
         let next_blueprint =
             BehaviourBlueprint::new(next_centre, self.blueprint.prior_std().to_vec())?;
         let objective_sum = mean.total * batch.len() as f64;
-        self.generator_gn.apply_batch(&mut self.generator, batch)?;
+        self.generator_adam
+            .apply_batch(&mut self.generator, batch)?;
         self.blueprint = next_blueprint;
         Ok(objective_sum)
     }
@@ -625,7 +626,7 @@ impl HierarchicalTrainer {
     /// exploitable Train hands per subject. Reset the complete adaptation state
     /// to Z0 at each trajectory boundary, including at the start of each epoch.
     /// Each hand is scored with its pre-hand Z1 and adapted once after its last
-    /// decision, before the GN update, using that decision's G snapshot. Keep the state
+    /// decision, before Adam, using that decision's G snapshot. Keep the state
     /// across G updates within each trajectory. No replay or gradient through Z1.
     pub fn train_personalization_epoch<P: ExactLegalityProvider>(
         &mut self,
@@ -720,7 +721,7 @@ impl HierarchicalTrainer {
                 }
                 if batch.len() == working.optimization.blueprint_batch_decisions {
                     working
-                        .generator_gn
+                        .generator_adam
                         .apply_batch(&mut working.generator, batch)?;
                     optimizer_steps += 1;
                     batch = GeneratorGradientBatch::new(&working.generator);
@@ -729,7 +730,7 @@ impl HierarchicalTrainer {
         }
         if !batch.is_empty() {
             working
-                .generator_gn
+                .generator_adam
                 .apply_batch(&mut working.generator, batch)?;
             optimizer_steps += 1;
         }
@@ -846,13 +847,13 @@ impl HierarchicalTrainer {
         // Compute both candidate updates before committing either one (or RNG).
         let mut next_g = self.generator.clone();
         let mut next_a = self.analyzer.clone();
-        let mut next_g_optimizer = self.generator_gn.clone();
+        let mut next_g_optimizer = self.generator_adam.clone();
         let mut next_a_optimizer = self.analyzer_adam.clone();
         next_g_optimizer.apply_batch(&mut next_g, g_batch)?;
         next_a_optimizer.apply_decision_batch(&mut next_a, a_batch)?;
         self.generator = next_g;
         self.analyzer = next_a;
-        self.generator_gn = next_g_optimizer;
+        self.generator_adam = next_g_optimizer;
         self.analyzer_adam = next_a_optimizer;
         self.noise = next_noise;
         Ok((objective, kl))
@@ -1417,7 +1418,7 @@ mod tests {
             BehaviourBlueprint::new(latent.profile(vec![0.0; 4]).unwrap(), vec![1.0; 4]).unwrap();
         let generator = NeuralBehaviourGenerator::initialize(latent, 8, 42).unwrap();
         let analyzer = NeuralBehaviourAnalyzer::initialize(latent, 8, 43).unwrap();
-        let gopt = GaussNewton::new(&generator, 0.01).unwrap();
+        let gopt = Adam::new(&generator, 0.0005).unwrap();
         let aopt = AnalyzerAdam::new(&analyzer, 0.0005).unwrap();
         HierarchicalTrainer::new(
             blueprint,
@@ -1774,7 +1775,7 @@ mod tests {
             .train_blueprint_epoch(&data, &[42], &partitions, episode, &mut provider)
             .unwrap();
         let model_id = trainer.model_id().unwrap();
-        let generator_optimizer = trainer.generator_gn.checkpoint_value();
+        let generator_optimizer = trainer.generator_adam.checkpoint_value();
         let analyzer_optimizer = trainer.analyzer_adam.checkpoint_value();
         let noise_state = trainer.noise.state;
         let reference = trainer
@@ -1802,7 +1803,10 @@ mod tests {
         ));
         assert_eq!(trainer.completed_epochs(), (1, 0, 0));
         assert_eq!(trainer.model_id().unwrap(), model_id);
-        assert_eq!(trainer.generator_gn.checkpoint_value(), generator_optimizer);
+        assert_eq!(
+            trainer.generator_adam.checkpoint_value(),
+            generator_optimizer
+        );
         assert_eq!(trainer.analyzer_adam.checkpoint_value(), analyzer_optimizer);
         assert_eq!(trainer.noise.state, noise_state);
     }
@@ -1947,7 +1951,7 @@ mod tests {
                     .unwrap();
             }
             expected
-                .generator_gn
+                .generator_adam
                 .apply_batch(&mut expected.generator, batch)
                 .unwrap();
         }
@@ -1962,8 +1966,8 @@ mod tests {
             expected.generator.parameters()
         );
         assert_eq!(
-            actual.generator_gn.checkpoint_value(),
-            expected.generator_gn.checkpoint_value()
+            actual.generator_adam.checkpoint_value(),
+            expected.generator_adam.checkpoint_value()
         );
         assert_eq!(actual.blueprint, initial.blueprint);
         assert_eq!(actual.analyzer.parameters(), initial.analyzer.parameters());
@@ -2027,7 +2031,7 @@ mod tests {
                 }
                 if batch.len() == 5 {
                     expected
-                        .generator_gn
+                        .generator_adam
                         .apply_batch(&mut expected.generator, batch)
                         .unwrap();
                     batch = GeneratorGradientBatch::new(&expected.generator);
@@ -2038,7 +2042,7 @@ mod tests {
         assert_eq!(state.observed_decisions(), 4);
         assert_eq!(batch.len(), 2);
         expected
-            .generator_gn
+            .generator_adam
             .apply_batch(&mut expected.generator, batch)
             .unwrap();
         let report = actual
@@ -2052,8 +2056,8 @@ mod tests {
             expected.generator.parameters()
         );
         assert_eq!(
-            actual.generator_gn.checkpoint_value(),
-            expected.generator_gn.checkpoint_value()
+            actual.generator_adam.checkpoint_value(),
+            expected.generator_adam.checkpoint_value()
         );
         // A second pass starts from a fresh Z0; no duplicate-hand error.
         assert_eq!(
@@ -2093,7 +2097,7 @@ mod tests {
             }
         }
         expected
-            .generator_gn
+            .generator_adam
             .apply_batch(&mut expected.generator, batch)
             .unwrap();
         actual
@@ -2104,8 +2108,8 @@ mod tests {
             expected.generator.checkpoint_value()
         );
         assert_eq!(
-            actual.generator_gn.checkpoint_value(),
-            expected.generator_gn.checkpoint_value()
+            actual.generator_adam.checkpoint_value(),
+            expected.generator_adam.checkpoint_value()
         );
     }
 
@@ -2210,6 +2214,8 @@ mod tests {
             "lechiffre.hierarchical.checkpoint.v10-shared-bb",
             "lechiffre.hierarchical.checkpoint.v11-crps-pot",
             "lechiffre.hierarchical.checkpoint.v11-cubic-bb-crps-pot",
+            "lechiffre.hierarchical.checkpoint.v12-cubic-bb-crps-pot-gn",
+            "lechiffre.hierarchical.checkpoint.v12.1-cubic-bb-crps-pot-sgn",
         ] {
             obsolete["format"] = json!(obsolete_version);
             std::fs::write(&invalid_path, serde_json::to_vec(&obsolete).unwrap()).unwrap();
@@ -2279,7 +2285,7 @@ mod sizing_diagnostic {
     use crate::behavioural::ActionKind;
 
     #[test]
-    #[ignore = "requires the real dataset, manifest, and two explicit V11 cubic checkpoints"]
+    #[ignore = "requires the real dataset, manifest, and two explicit V13 cubic NLL checkpoints"]
     fn sizing_diagnostic_z32_g64() {
         let env = |key: &str| std::env::var(key).expect(key);
         let data = BehaviourParquetDataset::open(env("LECHIFFRE_DIAG_DATASET")).unwrap();

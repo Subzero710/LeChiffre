@@ -259,7 +259,7 @@ struct BehaviourRunConfig {
     latent_dimension: usize,
     generator_hidden: usize,
     analyzer_hidden: usize,
-    generator_gn_damping: f64,
+    generator_lr: f64,
     analyzer_lr: f64,
     blueprint_lr: f64,
     baseline_lr: f64,
@@ -342,7 +342,7 @@ fn run_configuration(path: &str) -> Result<BehaviourRunConfig, String> {
         "latent_dimension",
         "generator_hidden",
         "analyzer_hidden",
-        "generator_gn_damping",
+        "generator_lr",
         "analyzer_lr",
         "blueprint_lr",
         "baseline_lr",
@@ -384,7 +384,7 @@ fn run_configuration(path: &str) -> Result<BehaviourRunConfig, String> {
         || momentary_history > episode.support_hands
         || std.iter().any(|s| *s <= 0.0)
         || [
-            "generator_gn_damping",
+            "generator_lr",
             "analyzer_lr",
             "blueprint_lr",
             "baseline_lr",
@@ -405,7 +405,7 @@ fn run_configuration(path: &str) -> Result<BehaviourRunConfig, String> {
         latent_dimension: dim,
         generator_hidden: config_usize(&v, "generator_hidden")?,
         analyzer_hidden: config_usize(&v, "analyzer_hidden")?,
-        generator_gn_damping: config_float(&v, "generator_gn_damping")?,
+        generator_lr: config_float(&v, "generator_lr")?,
         analyzer_lr: config_float(&v, "analyzer_lr")?,
         blueprint_lr: config_float(&v, "blueprint_lr")?,
         baseline_lr: config_float(&v, "baseline_lr")?,
@@ -721,8 +721,8 @@ fn evaluation_partition(
 
 fn train_hierarchical(args: &[String]) -> Result<(), String> {
     use lechiffre::behavioural::{
-        AnalyzerAdam, BaselineAdaptationConfig, BehaviourBlueprint, BehaviourLatentConfig,
-        GaussNewton, NeuralBehaviourAnalyzer, NeuralBehaviourGenerator,
+        Adam, AnalyzerAdam, BaselineAdaptationConfig, BehaviourBlueprint, BehaviourLatentConfig,
+        NeuralBehaviourAnalyzer, NeuralBehaviourGenerator,
     };
     use lechiffre::datasets::behaviour_parquet_loader::{
         BehaviourParquetDataset, HierarchicalTrainer,
@@ -748,7 +748,7 @@ fn train_hierarchical(args: &[String]) -> Result<(), String> {
     let noise_seed = run.seed.checked_add(2).ok_or("seed overflow")?;
     let a = NeuralBehaviourAnalyzer::initialize(latent, run.analyzer_hidden, a_seed)
         .map_err(|e| e.to_string())?;
-    let go = GaussNewton::new(&g, run.generator_gn_damping).map_err(|e| e.to_string())?;
+    let go = Adam::new(&g, run.generator_lr).map_err(|e| e.to_string())?;
     let ao = AnalyzerAdam::new(&a, run.analyzer_lr).map_err(|e| e.to_string())?;
     let baseline = BaselineAdaptationConfig::new(run.baseline_lr, run.baseline_max_step_prior_std)
         .map_err(|e| e.to_string())?;
